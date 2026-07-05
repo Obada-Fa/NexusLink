@@ -8,7 +8,14 @@ import GestureOverlay from '@/components/GestureOverlay';
 export default function MirrorPage() {
   const status = useConnectionStore((s) => s.status);
   const client = useConnectionStore((s) => s.client);
+  const connect = useConnectionStore((s) => s.connect);
+  const hostUrl = useConnectionStore((s) => s.hostUrl);
   const router = useRouter();
+
+  const handleReconnect = useCallback(async () => {
+    if (!hostUrl) return;
+    try { await connect(hostUrl); } catch { /* handled by store */ }
+  }, [connect, hostUrl]);
 
   const [mirrorActive, setMirrorActive] = useState(false);
   const [streamId, setStreamId] = useState<string | null>(null);
@@ -60,50 +67,103 @@ export default function MirrorPage() {
           \u2190 Back
         </button>
         <span style={styles.title}>Mirror</span>
-        {mirrorActive ? <GestureOverlay viewportRef={viewportRef} /> : null}
-        <button
-          onClick={() => {
-            if (mirrorActive) stopMirror();
-            else startMirror();
-          }}
-          style={{
-            ...styles.toggleBtn,
-            background: mirrorActive ? '#2a6aff' : '#1a2a1e',
-            color: mirrorActive ? '#fff' : '#4ade80',
-            borderColor: mirrorActive ? '#2a6aff' : '#1e3a1e',
-          }}
-        >
-          {mirrorActive ? 'Stop' : 'Start'}
-        </button>
+        {status === 'connected' ? (
+          <>
+            {mirrorActive ? <GestureOverlay viewportRef={viewportRef} /> : null}
+            <button
+              onClick={() => {
+                if (mirrorActive) stopMirror();
+                else startMirror();
+              }}
+              style={{
+                ...styles.toggleBtn,
+                background: mirrorActive ? '#2a6aff' : '#1a2a1e',
+                color: mirrorActive ? '#fff' : '#4ade80',
+                borderColor: mirrorActive ? '#2a6aff' : '#1e3a1e',
+              }}
+            >
+              {mirrorActive ? 'Stop' : 'Start'}
+            </button>
+          </>
+        ) : (
+          <button onClick={handleReconnect} style={styles.reconnectBtn}>
+            Reconnect
+          </button>
+        )}
       </header>
 
-      <div style={styles.stage}>
-        {!mirrorActive ? (
-          <div style={styles.placeholder}>
-            <span style={styles.placeholderIcon}>{'\u{1F4FA}'}</span>
-            <p style={styles.placeholderText}>Screen mirror inactive</p>
-            <p style={styles.placeholderHint}>
-              Tap Start to begin screen capture
-            </p>
-          </div>
-        ) : (
-          <div style={styles.videoPlaceholder}>
-            <span style={styles.placeholderIcon}>{'\u{1F4FA}'}</span>
-            <p style={styles.placeholderText}>Screen streaming active</p>
-            <p style={styles.placeholderHint}>
-              {streamId ? `Stream: ${streamId.slice(0, 8)}...` : 'Connecting...'}
-            </p>
-            <div ref={viewportRef} style={styles.videoFrame}>
-              <p style={styles.videoFrameText}>Video frames render here</p>
+      {status !== 'connected' || !client ? (
+        <div style={styles.disconnectedOverlay}>
+          <span style={styles.disconnectedIcon}>{'\u26A0'}</span>
+          <span style={styles.disconnectedText}>Not connected.</span>
+          <button onClick={handleReconnect} style={styles.reconnectBtnLarge}>
+            Reconnect
+          </button>
+        </div>
+      ) : (
+        <div style={styles.stage}>
+          {!mirrorActive ? (
+            <div style={styles.placeholder}>
+              <span style={styles.placeholderIcon}>{'\u{1F4FA}'}</span>
+              <p style={styles.placeholderText}>Screen mirror inactive</p>
+              <p style={styles.placeholderHint}>
+                Tap Start to begin screen capture
+              </p>
             </div>
-          </div>
-        )}
-      </div>
+          ) : (
+            <div style={styles.videoPlaceholder}>
+              <span style={styles.placeholderIcon}>{'\u{1F4FA}'}</span>
+              <p style={styles.placeholderText}>Screen streaming active</p>
+              <p style={styles.placeholderHint}>
+                {streamId ? `Stream: ${streamId.slice(0, 8)}...` : 'Connecting...'}
+              </p>
+              <div ref={viewportRef} style={styles.videoFrame}>
+                <p style={styles.videoFrameText}>Video frames render here</p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  disconnectedOverlay: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '12px',
+  },
+  disconnectedIcon: {
+    fontSize: '36px',
+  },
+  disconnectedText: {
+    fontSize: '14px',
+    color: '#555',
+  },
+  reconnectBtn: {
+    padding: '4px 10px',
+    borderRadius: '6px',
+    border: '1px solid #2a3a6a',
+    background: '#141420',
+    color: '#2a6aff',
+    fontSize: '11px',
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  reconnectBtnLarge: {
+    padding: '10px 24px',
+    borderRadius: '8px',
+    border: 'none',
+    background: '#2a6aff',
+    color: '#fff',
+    fontSize: '13px',
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
   wrapper: {
     display: 'flex',
     flexDirection: 'column',

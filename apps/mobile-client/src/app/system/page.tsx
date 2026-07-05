@@ -42,7 +42,14 @@ function formatNet(kbs: number): string {
 export default function SystemPage() {
   const client = useConnectionStore((s) => s.client);
   const status = useConnectionStore((s) => s.status);
+  const connect = useConnectionStore((s) => s.connect);
+  const hostUrl = useConnectionStore((s) => s.hostUrl);
   const router = useRouter();
+
+  const handleReconnect = useCallback(async () => {
+    if (!hostUrl) return;
+    try { await connect(hostUrl); } catch { /* handled by store */ }
+  }, [connect, hostUrl]);
 
   const [info, setInfo] = useState<SystemInfo | null>(null);
   const [perf, setPerf] = useState<PerfSnapshot | null>(null);
@@ -118,8 +125,16 @@ export default function SystemPage() {
             \u2190 Back
           </button>
           <span style={styles.title}>System</span>
+          <button onClick={handleReconnect} style={styles.reconnectBtn}>
+            Reconnect
+          </button>
         </header>
-        <div style={styles.emptyState}>Not connected.</div>
+        <div style={styles.emptyState}>
+          <span>Not connected.</span>
+          <button onClick={handleReconnect} style={styles.reconnectBtnLarge}>
+            Reconnect
+          </button>
+        </div>
       </div>
     );
   }
@@ -270,6 +285,26 @@ export default function SystemPage() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  reconnectBtn: {
+    padding: '4px 10px',
+    borderRadius: '6px',
+    border: '1px solid #2a3a6a',
+    background: '#141420',
+    color: '#2a6aff',
+    fontSize: '11px',
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  reconnectBtnLarge: {
+    padding: '10px 24px',
+    borderRadius: '8px',
+    border: 'none',
+    background: '#2a6aff',
+    color: '#fff',
+    fontSize: '13px',
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
   wrapper: {
     display: 'flex',
     flexDirection: 'column',

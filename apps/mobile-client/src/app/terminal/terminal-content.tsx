@@ -198,6 +198,19 @@ export default function TerminalContent() {
     [client]
   );
 
+  const connect = useConnectionStore((s) => s.connect);
+  const disconnect = useConnectionStore((s) => s.disconnect);
+  const hostUrl = useConnectionStore((s) => s.hostUrl);
+
+  const handleReconnect = useCallback(async () => {
+    if (!hostUrl) return;
+    try {
+      await connect(hostUrl);
+    } catch {
+      // handled by store
+    }
+  }, [connect, hostUrl]);
+
   const hasSession = status === 'connected' && client;
 
   return (
@@ -212,9 +225,24 @@ export default function TerminalContent() {
             {terminalIdRef.current ? 'live' : 'connecting...'}
           </span>
         )}
+        {status !== 'connected' && (
+          <button onClick={handleReconnect} style={styles.reconnectBtn}>
+            Reconnect
+          </button>
+        )}
       </header>
 
-      <div ref={containerRef} style={styles.termContainer} />
+      {!hasSession ? (
+        <div style={styles.disconnectedOverlay}>
+          <span style={styles.disconnectedIcon}>{'\u26A0'}</span>
+          <span style={styles.disconnectedText}>Not connected.</span>
+          <button onClick={handleReconnect} style={styles.reconnectBtnLarge}>
+            Reconnect
+          </button>
+        </div>
+      ) : (
+        <div ref={containerRef} style={styles.termContainer} />
+      )}
 
       <div style={styles.toolbar}>
         {TOOLBAR_KEYS.map((k) => {
@@ -243,6 +271,41 @@ export default function TerminalContent() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  disconnectedOverlay: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '12px',
+  },
+  disconnectedIcon: {
+    fontSize: '36px',
+  },
+  disconnectedText: {
+    fontSize: '14px',
+    color: '#555',
+  },
+  reconnectBtn: {
+    padding: '4px 10px',
+    borderRadius: '6px',
+    border: '1px solid #2a3a6a',
+    background: '#141420',
+    color: '#2a6aff',
+    fontSize: '11px',
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  reconnectBtnLarge: {
+    padding: '10px 24px',
+    borderRadius: '8px',
+    border: 'none',
+    background: '#2a6aff',
+    color: '#fff',
+    fontSize: '13px',
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
   wrapper: {
     display: 'flex',
     flexDirection: 'column',

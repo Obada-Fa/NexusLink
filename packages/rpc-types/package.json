@@ -3,6 +3,9 @@
   "main": "src/index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "test": "bun test"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },

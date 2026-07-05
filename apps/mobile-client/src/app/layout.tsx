@@ -1,3 +1,6 @@
+import { Suspense } from "react";
+import Loading from "./loading";
+
 export const metadata = {
   title: 'NexusLink',
   description: 'Mobile remote desktop client',
@@ -11,7 +14,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <meta name="theme-color" content="#0a0a0f" />
         <link rel="manifest" href="/manifest.json" />
       </head>
-      <body>{children}</body>
+      <body>
+        <Suspense fallback={<Loading />}>{children}</Suspense>
+      </body>
     </html>
   );
 }
