@@ -1,0 +1,18 @@
+{
+  "name": "nexuslink",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "sidecar/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck"
+  },
+  "devDependencies": {
+    "turbo": "latest"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@nexuslink/ui-components",
+  "main": "src/index.tsx",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0"
+  },
+  "peerDependencies": {
+    "react": "^18.3.0",
+    "typescript": "^5"
+  }
+}
