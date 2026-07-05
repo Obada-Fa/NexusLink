@@ -72,12 +72,13 @@ export default function PairPage() {
           return;
         }
 
-        const publicKey = JSON.stringify({
-          kty: 'EC',
-          crv: 'P-256',
-          x: 'mobile-client-x',
-          y: 'mobile-client-y',
-        });
+        const clientKeyPair = await crypto.subtle.generateKey(
+          { name: 'ECDH', namedCurve: 'P-256' },
+          true,
+          ['deriveBits']
+        );
+        const clientPubJwk = await crypto.subtle.exportKey('jwk', clientKeyPair.publicKey);
+        const publicKey = JSON.stringify(clientPubJwk);
 
         const pairResult = (await client.request('session.pair', {
           publicKey,
