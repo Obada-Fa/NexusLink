@@ -24,12 +24,11 @@ struct RpcResponse {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let stdin = tokio::io::stdin();
-    let stdout = tokio::io::stdout();
-    let mut stdout = stdout.into_std().await;
-    let mut reader = BufReader::new(stdin.into_std().await);
+    let stdin = std::io::stdin();
+    let mut stdout = std::io::stdout();
+    let reader = BufReader::new(stdin);
 
-    while let Some(line) = reader.lines().next() {
+    for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
