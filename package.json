@@ -10,7 +10,8 @@
     "dev": "turbo run dev",
     "build": "turbo run build",
     "lint": "turbo run lint",
-    "typecheck": "turbo run typecheck"
+    "typecheck": "turbo run typecheck",
+    "lan": "bun run --cwd apps/mobile-client build && cd apps/desktop && bun run src/server/index.ts"
   },
   "devDependencies": {
     "turbo": "latest"

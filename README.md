@@ -19,7 +19,23 @@ sidecar: Rust JSON-RPC helper
 bun install
 ```
 
-Requires [Bun](https://bun.sh) >= 1.x, [Rust](https://rustup.rs) for Tauri/sidecar.
+Requires [Bun](https://bun.sh) >= 1.x. Linux/X11 host needs `ffmpeg` + `xdotool`
+(screen capture + input injection). Rust is only needed for the future Tauri/sidecar WAN path.
+
+## Quick Start (LAN) — scan & go
+
+```bash
+bun run lan          # builds the PWA, then starts the unified host on :45678
+```
+
+The host prints a **QR code** and its LAN URLs (e.g. `http://192.168.2.30:45678`).
+
+- **Phone** (same Wi-Fi): scan the QR → the browser opens and **auto-connects** → tap
+  Mirror Mode → Start. No IP to type.
+- **PC**: open `http://localhost:45678`.
+
+One port serves the app *and* the control WebSocket. The client derives the host from the
+page it was served from, so there is no address to enter.
 
 ## Dev
 

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 import { useConnectionStore } from '@/store/connection';
+import { deriveHostWsUrl } from '@/lib/host-url';
 
 const STORAGE_KEY = 'nexuslink-host-url';
 
@@ -14,10 +15,12 @@ export default function ConnectionProvider({ children }: { children: React.React
     if (tried.current) return;
     tried.current = true;
 
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      connect(saved).catch(() => {
-        /* silent fail — user connects manually */
+    // Zero-config: prefer a previously-used host, otherwise auto-derive the host
+    // from the page origin (the host served us this page) and connect immediately.
+    const target = localStorage.getItem(STORAGE_KEY) || deriveHostWsUrl();
+    if (target) {
+      connect(target).catch(() => {
+        /* silent fail — falls back to the manual connect form */
       });
     }
   }, [connect]);

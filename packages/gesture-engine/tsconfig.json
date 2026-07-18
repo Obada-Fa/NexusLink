@@ -1,7 +1,8 @@
 {
   "compilerOptions": {
-    // Environment setup & latest features
-    "lib": ["ESNext"],
+    // Environment setup & latest features. This package attaches touch listeners
+    // to DOM elements, so the DOM lib is required for HTMLElement/Touch/rAF/etc.
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",
