@@ -20,6 +20,8 @@ export function setSend(fn: SendFn): void {
 
 interface CaptureSession {
   id: string;
+  /** 32-bit key stamped into every binary frame header for client-side matching. */
+  key: number;
   proc: ReturnType<typeof Bun.spawn>;
   ws: WebSocket;
   /** Region currently being grabbed (undefined = pre-region legacy path). */
@@ -29,6 +31,12 @@ interface CaptureSession {
   resolveRegion?: () => Region | null;
   watchdog?: ReturnType<typeof setInterval>;
 }
+
+/** Binary frame header: u32 magic 'NLF1' | u32 streamKey | f64 timestampMs (LE). */
+export const FRAME_MAGIC = 0x4e4c4631;
+export const FRAME_HEADER_BYTES = 16;
+
+let nextStreamKey = 1;
 
 const sessions = new Map<string, CaptureSession>();
 
@@ -197,10 +205,11 @@ export function startCapture(
   ws: WebSocket,
   region?: Region,
   resolveRegion?: () => Region | null,
-): { streamId: string; region: Region } {
+): { streamId: string; streamKey: number; region: Region } {
   const id = crypto.randomUUID();
+  const key = nextStreamKey++;
   const { scaleW, q } = qualitySettings(quality);
-  const clampedFps = Math.max(1, Math.min(30, Math.round(fps || 12)));
+  const clampedFps = Math.max(1, Math.min(30, Math.round(fps || 24)));
   const ffArgs = { fps: clampedFps, scaleW, q };
 
   // Region capture: an adopted window's rect, or the primary monitor for the
@@ -210,7 +219,7 @@ export function startCapture(
   const grab = clampRegion(want);
 
   const proc = spawnGrabber(grab, ffArgs);
-  const session: CaptureSession = { id, proc, ws, region: grab, ffArgs, resolveRegion };
+  const session: CaptureSession = { id, key, proc, ws, region: grab, ffArgs, resolveRegion };
   sessions.set(id, session);
 
   void pumpFrames(session).catch(() => {});
@@ -243,7 +252,7 @@ export function startCapture(
   // Always return the grabbed region — the client maps touch coordinates
   // through it (critical on multi-monitor hosts where the primary monitor
   // does not start at 0,0).
-  return { streamId: id, region: grab };
+  return { streamId: id, streamKey: key, region: grab };
 }
 
 async function pumpFrames(session: CaptureSession): Promise<void> {
@@ -263,7 +272,7 @@ async function pumpFrames(session: CaptureSession): Promise<void> {
       buf = Buffer.concat([buf, Buffer.from(value)]);
 
       const { frames, rest } = extractFrames(buf);
-      for (const frame of frames) emitFrame(ws, id, frame);
+      for (const frame of frames) emitFrame(session, frame);
       buf = rest;
 
       // Safety valve against unbounded growth if a boundary is never found.
@@ -274,10 +283,20 @@ async function pumpFrames(session: CaptureSession): Promise<void> {
   }
 }
 
-function emitFrame(ws: WebSocket, streamId: string, frame: Buffer): void {
-  if (!sendFn || ws.readyState !== 1) return;
-  const data = frame.toString('base64');
-  sendFn(ws, { type: 'stream-frame', streamId, data, timestamp: Date.now() });
+function emitFrame(session: CaptureSession, frame: Buffer): void {
+  const { ws, key } = session;
+  if (ws.readyState !== 1) return;
+  // Binary WS frame: fixed header + raw JPEG. No base64 (-25% bytes), no JSON
+  // parse on the hot path — this is what makes 24-30fps feel smooth.
+  const header = Buffer.allocUnsafe(FRAME_HEADER_BYTES);
+  header.writeUInt32LE(FRAME_MAGIC, 0);
+  header.writeUInt32LE(key >>> 0, 4);
+  header.writeDoubleLE(Date.now(), 8);
+  try {
+    ws.send(Buffer.concat([header, frame]));
+  } catch {
+    // socket going down; close handler tears the session down
+  }
 }
 
 export function stopCapture(streamId: string): void {

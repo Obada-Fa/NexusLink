@@ -77,16 +77,33 @@ export default function GestureOverlay({
             .catch(() => {});
           break;
         case 'drag-start':
+          setLastGesture(`drag ${event.x},${event.y}`);
+          client
+            .request('input.buttonDown', { button: 'left', x: event.x + ox, y: event.y + oy })
+            .catch(() => {});
+          break;
         case 'drag-move':
+          client.request('input.mouseMoveAbs', { x: event.x + ox, y: event.y + oy }).catch(() => {});
+          break;
         case 'drag-end':
-          // Press-and-hold drag (text selection / DnD) needs host button-hold
-          // injection + the extended input.* wire protocol (Phase 8/9). Surface
-          // it in the debug label for now rather than emit an incorrect event.
-          setLastGesture(`${event.type} ${event.x},${event.y}`);
+          setLastGesture('drag end');
+          client
+            .request('input.buttonUp', { button: 'left', x: event.x + ox, y: event.y + oy })
+            .catch(() => {});
           break;
         case 'zoom':
-          // Pinch-zoom maps to Ctrl+wheel on the host; awaiting that input primitive.
+          // Pinch-zoom → Ctrl+wheel at the pinch midpoint. scale is a signed
+          // delta; positive = fingers apart = zoom in = wheel up (negative dy).
           setLastGesture(`zoom ${event.scale.toFixed(2)}`);
+          client
+            .request('input.mouseScroll', {
+              deltaX: 0,
+              deltaY: -event.scale * 400,
+              x: event.x + ox,
+              y: event.y + oy,
+              modifiers: ['ctrl'],
+            })
+            .catch(() => {});
           break;
       }
     },

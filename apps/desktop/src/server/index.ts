@@ -5,7 +5,7 @@ import { getSystemInfo, getPerfSnapshot } from './handlers/system';
 import { handleTerminalCreate, handleTerminalInput, handleTerminalResize, handleTerminalKill, setSend as setTerminalSend } from './handlers/terminal';
 import { validateToken, generateToken, handleSessionPair, validateSessionTOTP, isLocalDev, generateDevToken } from './handlers/auth';
 import { setSend as setSignalingSend } from './handlers/signaling';
-import { mouseMove, mouseClick, mouseScroll, keyEvent, typeText } from './handlers/input';
+import { mouseMove, mouseClick, mouseScroll, keyEvent, typeText, buttonDown, buttonUp, mouseMoveAbs } from './handlers/input';
 import { setSend as setCaptureSend, startCapture, stopCapture, stopCapturesForSocket, getScreenMetadata } from './handlers/capture';
 import { listWindows, listApps, launchApp, adoptWindow, releaseWindow, activateWindow, getWindowGeometry } from './handlers/windows';
 import { serveStatic, staticAvailable } from './static-server';
@@ -89,7 +89,25 @@ export async function startRpcServer(port = 45678) {
           params.deltaY as number,
           params.x as number | undefined,
           params.y as number | undefined,
+          params.modifiers as string[] | undefined,
         );
+        break;
+      case 'input.buttonDown':
+        result = buttonDown(
+          params.button as 'left' | 'right' | 'middle',
+          params.x as number | undefined,
+          params.y as number | undefined,
+        );
+        break;
+      case 'input.buttonUp':
+        result = buttonUp(
+          params.button as 'left' | 'right' | 'middle',
+          params.x as number | undefined,
+          params.y as number | undefined,
+        );
+        break;
+      case 'input.mouseMoveAbs':
+        result = mouseMoveAbs(params.x as number, params.y as number);
         break;
       case 'input.keyEvent':
         result = keyEvent(params.key as string, params.modifiers as string[] | undefined);
@@ -157,23 +175,20 @@ export async function startRpcServer(port = 45678) {
         const isLocal = sessionId ? sessions.get(sessionId)?.isLocal : false;
         let token: string | undefined;
 
-        // Dev bypass: auto-generate token for local connections
-        if (isLocal && code.startsWith('dev-')) {
-          const dev = generateDevToken();
-          token = dev.token;
-        } else if (isLocal) {
-          // local connection, auto-issue token without TOTP
+        // Dev-only bypass for local connections — never active unless the host
+        // was explicitly started with NEXUSLINK_DEV=1 (Module D1.3).
+        if (isLocal && process.env.NEXUSLINK_DEV === '1') {
           const dev = generateDevToken();
           token = dev.token;
         } else {
-          // TOTP pairing flow
+          // TOTP pairing flow (no universal codes — Module D1.1)
           const pairingData = sessionId ? sessions.get(sessionId)?.pairingData : undefined;
-          if (!pairingData?.pairingId && code !== '123456') {
+          if (!pairingData?.pairingId) {
             const response: RpcResponse = { id: req.id, error: 'no active pairing session' };
             send(ws, { type: 'rpc-response', response });
             return;
           }
-          const totpValid = code === '123456' ? true : await validateSessionTOTP(pairingData!.pairingId, code);
+          const totpValid = await validateSessionTOTP(pairingData.pairingId, code);
           if (!totpValid) {
             const response: RpcResponse = { id: req.id, error: 'invalid totp code' };
             send(ws, { type: 'rpc-response', response });
