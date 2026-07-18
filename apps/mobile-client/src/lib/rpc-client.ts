@@ -28,6 +28,7 @@ export class RpcClient {
   private ws: WebSocket | null = null;
   private pending = new Map<string, PendingRequest>();
   private subscribers = new Map<string, Set<(data: unknown) => void>>();
+  private binarySubscribers = new Set<(data: ArrayBuffer) => void>();
   private reconnectAttempts = 0;
   private maxReconnectDelay = 30000;
   private baseDelay = 1000;
@@ -49,6 +50,7 @@ export class RpcClient {
     this.closed = false;
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(this.wsUrl);
+      this.ws.binaryType = 'arraybuffer';
 
       const timer = setTimeout(() => {
         this.ws?.close();
@@ -120,6 +122,14 @@ export class RpcClient {
     });
   }
 
+  /** Subscribe to raw binary WS messages (mirror frames). */
+  subscribeBinary(callback: (data: ArrayBuffer) => void): () => void {
+    this.binarySubscribers.add(callback);
+    return () => {
+      this.binarySubscribers.delete(callback);
+    };
+  }
+
   subscribe(topic: string, callback: (data: unknown) => void): () => void {
     let subs = this.subscribers.get(topic);
     if (!subs) {
@@ -137,6 +147,12 @@ export class RpcClient {
   }
 
   private handleMessage(event: MessageEvent): void {
+    // Binary messages (mirror frames) bypass JSON entirely — hot path.
+    if (event.data instanceof ArrayBuffer) {
+      for (const cb of this.binarySubscribers) cb(event.data);
+      return;
+    }
+
     let raw: Record<string, unknown>;
     try {
       raw = JSON.parse(event.data as string);

@@ -10,9 +10,11 @@ import { useConnectionStore } from '@/store/connection';
 import ConnectionProvider from '@/components/ConnectionProvider';
 import GestureOverlay, { type HostRegion } from '@/components/GestureOverlay';
 
-type StreamFrame = { type: 'stream-frame'; streamId: string; data: string; timestamp: number };
-
 type Phase = 'connecting' | 'launching' | 'adopting' | 'streaming' | 'error';
+
+/** Binary frame header from the host: u32 magic 'NLF1' | u32 streamKey | f64 ts (LE). */
+const FRAME_MAGIC = 0x4e4c4631;
+const FRAME_HEADER_BYTES = 16;
 
 interface MirrorTarget {
   windowId?: string;
@@ -109,7 +111,7 @@ function MirrorView() {
         if (cancelled) return;
 
         // Adopt: shape the window like a phone screen and focus it.
-        let captureParams: Record<string, unknown> = { quality: 'medium', fps: 15 };
+        let captureParams: Record<string, unknown> = { quality: 'medium', fps: 24 };
         if (windowId) {
           setPhase('adopting');
           windowIdRef.current = windowId;
@@ -124,6 +126,7 @@ function MirrorView() {
 
         const cap = (await client.request('screen.startCapture', captureParams)) as {
           streamId: string;
+          streamKey: number;
           region?: HostRegion;
         };
         if (cancelled) {
@@ -133,12 +136,20 @@ function MirrorView() {
         streamIdRef.current = cap.streamId;
         setRegion(cap.region ?? null);
 
-        const unsubFrames = client.subscribe('stream-frame', (msg: unknown) => {
-          const frame = msg as StreamFrame;
-          if (!frame || frame.streamId !== streamIdRef.current) return;
+        let lastUrl: string | null = null;
+        const unsubFrames = client.subscribeBinary((buf: ArrayBuffer) => {
+          if (buf.byteLength <= FRAME_HEADER_BYTES) return;
+          const view = new DataView(buf);
+          if (view.getUint32(0, true) !== FRAME_MAGIC) return;
+          if (view.getUint32(4, true) !== cap.streamKey) return;
           frameCountRef.current++;
           if (imgRef.current) {
-            imgRef.current.src = `data:image/jpeg;base64,${frame.data}`;
+            const url = URL.createObjectURL(
+              new Blob([new Uint8Array(buf, FRAME_HEADER_BYTES)], { type: 'image/jpeg' }),
+            );
+            imgRef.current.src = url;
+            if (lastUrl) URL.revokeObjectURL(lastUrl);
+            lastUrl = url;
           }
         });
         // The host re-grabs if the window moves/resizes; keep touch mapping aligned.

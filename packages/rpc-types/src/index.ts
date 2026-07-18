@@ -16,6 +16,9 @@ export type RpcMethod =
   | 'screen.getMetadata'
   | 'input.mouseMove'
   | 'input.mouseClick'
+  | 'input.buttonDown'
+  | 'input.buttonUp'
+  | 'input.mouseMoveAbs'
   | 'input.mouseScroll'
   | 'input.keyEvent'
   | 'input.typeText'
@@ -79,8 +82,14 @@ export type Params<M extends RpcMethod> =
     ? { dx: number; dy: number }
     : M extends 'input.mouseClick'
     ? { button: 'left' | 'right' | 'middle'; x?: number; y?: number }
+    : M extends 'input.buttonDown'
+    ? { button: 'left' | 'right' | 'middle'; x?: number; y?: number }
+    : M extends 'input.buttonUp'
+    ? { button: 'left' | 'right' | 'middle'; x?: number; y?: number }
+    : M extends 'input.mouseMoveAbs'
+    ? { x: number; y: number }
     : M extends 'input.mouseScroll'
-    ? { deltaX: number; deltaY: number; x: number; y: number }
+    ? { deltaX: number; deltaY: number; x: number; y: number; modifiers?: string[] }
     : M extends 'input.keyEvent'
     ? { key: string; modifiers?: string[] }
     : M extends 'input.typeText'
@@ -137,7 +146,7 @@ export type Result<M extends RpcMethod> =
     : M extends 'terminal.kill'
     ? void
     : M extends 'screen.startCapture'
-    ? { streamId: string; region?: CaptureRegion }
+    ? { streamId: string; streamKey: number; region: CaptureRegion }
     : M extends 'screen.stopCapture'
     ? void
     : M extends 'screen.getMetadata'
@@ -145,6 +154,12 @@ export type Result<M extends RpcMethod> =
     : M extends 'input.mouseMove'
     ? { ok: boolean }
     : M extends 'input.mouseClick'
+    ? { ok: boolean }
+    : M extends 'input.buttonDown'
+    ? { ok: boolean }
+    : M extends 'input.buttonUp'
+    ? { ok: boolean }
+    : M extends 'input.mouseMoveAbs'
     ? { ok: boolean }
     : M extends 'input.mouseScroll'
     ? { ok: boolean }
