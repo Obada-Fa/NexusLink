@@ -11,6 +11,8 @@ import { listWindows, listApps, launchApp, adoptWindow, releaseWindow, activateW
 import { serveStatic, staticAvailable } from './static-server';
 import { printLaunchBanner } from './launch-banner';
 import { startSidecarReader } from './sidecar-reader';
+import { startMdns } from './mdns';
+import { handleFileDownload, handleFileUpload } from './handlers/files-http';
 
 type Params = Record<string, unknown>;
 
@@ -226,6 +228,11 @@ export async function startRpcServer(port = 45678) {
     port,
     async fetch(req, srv) {
       const url = new URL(req.url);
+      if (url.pathname === '/files') {
+        if (req.method === 'GET') return handleFileDownload(url);
+        if (req.method === 'POST' || req.method === 'PUT') return handleFileUpload(url, req);
+        return new Response('Method not allowed', { status: 405 });
+      }
       if (url.pathname === '/signal' || url.pathname === '/rpc') {
         const isLocal = isLocalDev(req.url);
         // @ts-expect-error Bun upgrade supports data option in runtime
@@ -270,6 +277,7 @@ export async function startRpcServer(port = 45678) {
   });
 
   startSidecarReader(send, getPerfSnapshot, getAuthenticatedSessions);
+  startMdns(port);
 
   const servesClient = await staticAvailable();
   printLaunchBanner(port, servesClient);
