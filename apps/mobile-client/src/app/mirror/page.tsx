@@ -1,174 +1,333 @@
 'use client';
 
+// The phone-OS app viewport: streams an adopted host window (or the full desktop)
+// and turns touch into direct manipulation. Auto-connects and auto-starts — the
+// user never has to press "Start".
+
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useConnectionStore } from '@/store/connection';
-import GestureOverlay from '@/components/GestureOverlay';
+import ConnectionProvider from '@/components/ConnectionProvider';
+import GestureOverlay, { type HostRegion } from '@/components/GestureOverlay';
 
-export default function MirrorPage() {
+type StreamFrame = { type: 'stream-frame'; streamId: string; data: string; timestamp: number };
+
+type Phase = 'connecting' | 'launching' | 'adopting' | 'streaming' | 'error';
+
+interface MirrorTarget {
+  windowId?: string;
+  appId?: string;
+  wmClass?: string;
+  title?: string;
+}
+
+/** "org.gnome.Calculator" → "orggnomecalculator" — dashes/dots vary in the wild. */
+function normClass(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function parseTarget(): MirrorTarget {
+  if (typeof window === 'undefined') return {};
+  const p = new URLSearchParams(window.location.search);
+  return {
+    windowId: p.get('w') ?? undefined,
+    appId: p.get('app') ?? undefined,
+    wmClass: p.get('cls') ?? undefined,
+    title: p.get('title') ?? undefined,
+  };
+}
+
+function MirrorView() {
   const status = useConnectionStore((s) => s.status);
   const client = useConnectionStore((s) => s.client);
-  const connect = useConnectionStore((s) => s.connect);
-  const hostUrl = useConnectionStore((s) => s.hostUrl);
   const router = useRouter();
 
-  const handleReconnect = useCallback(async () => {
-    if (!hostUrl) return;
-    try { await connect(hostUrl); } catch { /* handled by store */ }
-  }, [connect, hostUrl]);
+  const [phase, setPhase] = useState<Phase>('connecting');
+  const [errorMsg, setErrorMsg] = useState('');
+  // null until the URL is parsed client-side — the session must not start before
+  // then, or a ?w=/?app= target would be misread as a full-desktop session.
+  const [target, setTarget] = useState<MirrorTarget | null>(null);
+  const [region, setRegion] = useState<HostRegion | null>(null);
+  const [fps, setFps] = useState(0);
+  const [kbOpen, setKbOpen] = useState(false);
 
-  const [mirrorActive, setMirrorActive] = useState(false);
-  const [streamId, setStreamId] = useState<string | null>(null);
+  const streamIdRef = useRef<string | null>(null);
+  const windowIdRef = useRef<string | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
-
-  const startMirror = useCallback(async () => {
-    if (!client || status !== 'connected') return;
-    try {
-      const result = (await client.request('screen.startCapture', {
-        quality: 'medium',
-        fps: 15,
-      })) as { streamId: string };
-      setStreamId(result.streamId);
-      setMirrorActive(true);
-
-      client.subscribe('stream-frame', (_msg: unknown) => {
-        // placeholder: frames would be rendered to canvas
-      });
-    } catch {
-      // screen capture not available on this host
-      setMirrorActive(true);
-    }
-  }, [client, status]);
-
-  const stopMirror = useCallback(async () => {
-    if (streamId && client) {
-      try {
-        await client.request('screen.stopCapture', { streamId });
-      } catch {
-        // ignore
-      }
-    }
-    setStreamId(null);
-    setMirrorActive(false);
-  }, [client, streamId]);
+  const unsubRef = useRef<(() => void) | null>(null);
+  const frameCountRef = useRef(0);
+  const startedRef = useRef(false);
+  const kbRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
+    setTarget(parseTarget());
+  }, []);
+
+  // ---- session bring-up: (launch →) adopt → capture ------------------------
+  useEffect(() => {
+    if (status !== 'connected' || !client || !target || startedRef.current) return;
+    startedRef.current = true;
+    let cancelled = false;
+
+    const begin = async () => {
+      try {
+        let windowId = target.windowId ?? null;
+
+        // Launch flow: start the app on the PC, then wait for its window.
+        if (!windowId && target.appId) {
+          setPhase('launching');
+          const launched = (await client.request('apps.launch', { appId: target.appId })) as {
+            ok: boolean;
+            wmClass?: string;
+          };
+          if (!launched.ok) throw new Error('The host could not launch this app.');
+          const nCls = normClass(target.wmClass || launched.wmClass || target.appId || '');
+
+          const deadline = Date.now() + 25000;
+          while (!cancelled && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 800));
+            const wins = (await client.request('window.list')) as Array<{
+              windowId: string;
+              wmClass: string;
+              appId?: string;
+            }>;
+            const hit = wins.find((w) => {
+              if (w.appId && w.appId === target.appId) return true;
+              const nWin = normClass(w.wmClass.split('.').pop() ?? '');
+              return (
+                nWin.length >= 4 && nCls.length >= 4 && (nCls.includes(nWin) || nWin.includes(nCls))
+              );
+            });
+            if (hit) {
+              windowId = hit.windowId;
+              break;
+            }
+          }
+          if (!windowId) throw new Error('The app started but no window appeared yet. Go back and tap it under "Open on your PC".');
+        }
+        if (cancelled) return;
+
+        // Adopt: shape the window like a phone screen and focus it.
+        let captureParams: Record<string, unknown> = { quality: 'medium', fps: 15 };
+        if (windowId) {
+          setPhase('adopting');
+          windowIdRef.current = windowId;
+          await client.request('window.adopt', {
+            windowId,
+            viewportW: Math.round(window.innerWidth),
+            viewportH: Math.round(window.innerHeight),
+          });
+          captureParams = { ...captureParams, windowId };
+        }
+        if (cancelled) return;
+
+        const cap = (await client.request('screen.startCapture', captureParams)) as {
+          streamId: string;
+          region?: HostRegion;
+        };
+        if (cancelled) {
+          void client.request('screen.stopCapture', { streamId: cap.streamId }).catch(() => {});
+          return;
+        }
+        streamIdRef.current = cap.streamId;
+        setRegion(cap.region ?? null);
+
+        const unsubFrames = client.subscribe('stream-frame', (msg: unknown) => {
+          const frame = msg as StreamFrame;
+          if (!frame || frame.streamId !== streamIdRef.current) return;
+          frameCountRef.current++;
+          if (imgRef.current) {
+            imgRef.current.src = `data:image/jpeg;base64,${frame.data}`;
+          }
+        });
+        // The host re-grabs if the window moves/resizes; keep touch mapping aligned.
+        const unsubRegion = client.subscribe('stream-region', (msg: unknown) => {
+          const update = msg as { streamId: string; region: HostRegion };
+          if (!update || update.streamId !== streamIdRef.current) return;
+          setRegion(update.region);
+        });
+        unsubRef.current = () => {
+          unsubFrames();
+          unsubRegion();
+        };
+        setPhase('streaming');
+      } catch (err) {
+        if (!cancelled) {
+          setErrorMsg(err instanceof Error ? err.message : 'Could not start the session.');
+          setPhase('error');
+        }
+      }
+    };
+
+    void begin();
     return () => {
+      cancelled = true;
+    };
+  }, [status, client, target]);
+
+  // ---- teardown -------------------------------------------------------------
+  const teardown = useCallback(
+    (release: boolean) => {
+      unsubRef.current?.();
+      unsubRef.current = null;
+      const streamId = streamIdRef.current;
+      streamIdRef.current = null;
       if (streamId && client) {
         client.request('screen.stopCapture', { streamId }).catch(() => {});
       }
-    };
-  }, [streamId, client]);
+      const windowId = windowIdRef.current;
+      if (release && windowId && client) {
+        client.request('window.release', { windowId }).catch(() => {});
+      }
+    },
+    [client],
+  );
+
+  useEffect(() => () => teardown(false), [teardown]);
+
+  const goHome = useCallback(() => {
+    teardown(true);
+    router.push('/');
+  }, [teardown, router]);
+
+  // ---- FPS HUD ---------------------------------------------------------------
+  useEffect(() => {
+    if (phase !== 'streaming') return;
+    const t = setInterval(() => {
+      setFps(frameCountRef.current);
+      frameCountRef.current = 0;
+    }, 1000);
+    return () => clearInterval(t);
+  }, [phase]);
+
+  // ---- phone keyboard → host ---------------------------------------------------
+  const sendSpecialKey = useCallback(
+    (key: string) => {
+      client?.request('input.keyEvent', { key }).catch(() => {});
+    },
+    [client],
+  );
+
+  const onKbInput = useCallback(() => {
+    const el = kbRef.current;
+    if (!el || !client) return;
+    const text = el.value;
+    if (text) {
+      client.request('input.typeText', { text }).catch(() => {});
+      el.value = '';
+    }
+  }, [client]);
+
+  const onKbKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        sendSpecialKey('Return');
+      } else if (e.key === 'Backspace' && !kbRef.current?.value) {
+        sendSpecialKey('BackSpace');
+      }
+    },
+    [sendSpecialKey],
+  );
+
+  useEffect(() => {
+    if (kbOpen) kbRef.current?.focus();
+  }, [kbOpen]);
+
+  const title = target?.title || (target?.windowId || target?.appId ? 'App' : 'Desktop');
 
   return (
     <div style={styles.wrapper}>
       <header style={styles.topBar}>
-        <button onClick={() => router.back()} style={styles.backBtn}>
-          \u2190 Back
+        <button onClick={goHome} style={styles.barBtn} aria-label="Home">
+          {'⌂'}
         </button>
-        <span style={styles.title}>Mirror</span>
-        {status === 'connected' ? (
-          <>
-            {mirrorActive ? <GestureOverlay viewportRef={viewportRef} /> : null}
-            <button
-              onClick={() => {
-                if (mirrorActive) stopMirror();
-                else startMirror();
-              }}
-              style={{
-                ...styles.toggleBtn,
-                background: mirrorActive ? '#2a6aff' : '#1a2a1e',
-                color: mirrorActive ? '#fff' : '#4ade80',
-                borderColor: mirrorActive ? '#2a6aff' : '#1e3a1e',
-              }}
-            >
-              {mirrorActive ? 'Stop' : 'Start'}
-            </button>
-          </>
-        ) : (
-          <button onClick={handleReconnect} style={styles.reconnectBtn}>
-            Reconnect
-          </button>
-        )}
+        <span style={styles.title}>
+          {title}
+          {phase === 'streaming' && fps > 0 ? ` · ${fps}fps` : ''}
+        </span>
+        <button
+          onClick={() => setKbOpen((v) => !v)}
+          style={{ ...styles.barBtn, color: kbOpen ? '#2a6aff' : '#888' }}
+          aria-label="Keyboard"
+        >
+          {'⌨'}
+        </button>
+        {phase === 'streaming' && <GestureOverlay viewportRef={viewportRef} region={region} showHud={false} />}
       </header>
 
-      {status !== 'connected' || !client ? (
-        <div style={styles.disconnectedOverlay}>
-          <span style={styles.disconnectedIcon}>{'\u26A0'}</span>
-          <span style={styles.disconnectedText}>Not connected.</span>
-          <button onClick={handleReconnect} style={styles.reconnectBtnLarge}>
-            Reconnect
-          </button>
-        </div>
-      ) : (
-        <div style={styles.stage}>
-          {!mirrorActive ? (
-            <div style={styles.placeholder}>
-              <span style={styles.placeholderIcon}>{'\u{1F4FA}'}</span>
-              <p style={styles.placeholderText}>Screen mirror inactive</p>
-              <p style={styles.placeholderHint}>
-                Tap Start to begin screen capture
-              </p>
-            </div>
-          ) : (
-            <div style={styles.videoPlaceholder}>
-              <span style={styles.placeholderIcon}>{'\u{1F4FA}'}</span>
-              <p style={styles.placeholderText}>Screen streaming active</p>
-              <p style={styles.placeholderHint}>
-                {streamId ? `Stream: ${streamId.slice(0, 8)}...` : 'Connecting...'}
-              </p>
-              <div ref={viewportRef} style={styles.videoFrame}>
-                <p style={styles.videoFrameText}>Video frames render here</p>
-              </div>
-            </div>
-          )}
+      <div style={styles.stage}>
+        {phase === 'streaming' ? (
+          <div ref={viewportRef} style={styles.viewport}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img ref={imgRef} alt="host screen" style={styles.frame} draggable={false} />
+          </div>
+        ) : phase === 'error' ? (
+          <div style={styles.centerBox}>
+            <span style={styles.bigIcon}>{'⚠'}</span>
+            <p style={styles.centerText}>{errorMsg}</p>
+            <button onClick={goHome} style={styles.primaryBtn}>
+              Back to apps
+            </button>
+          </div>
+        ) : status !== 'connected' && status !== 'connecting' ? (
+          <div style={styles.centerBox}>
+            <span style={styles.bigIcon}>{'⚠'}</span>
+            <p style={styles.centerText}>Not connected to the PC.</p>
+            <button onClick={goHome} style={styles.primaryBtn}>
+              Back
+            </button>
+          </div>
+        ) : (
+          <div style={styles.centerBox}>
+            <style dangerouslySetInnerHTML={{ __html: '@keyframes nl-spin{to{transform:rotate(360deg)}}' }} />
+            <div style={styles.spinner} />
+            <p style={styles.centerText}>
+              {phase === 'launching'
+                ? `Opening ${title} on your PC…`
+                : phase === 'adopting'
+                  ? 'Fitting the app to your screen…'
+                  : 'Connecting…'}
+            </p>
+          </div>
+        )}
+      </div>
+
+      {kbOpen && (
+        <div style={styles.kbBar}>
+          <input
+            ref={kbRef}
+            style={styles.kbInput}
+            placeholder="Type here — sent to the PC"
+            onInput={onKbInput}
+            onKeyDown={onKbKeyDown}
+            autoCapitalize="none"
+            autoCorrect="off"
+          />
+          <button style={styles.kbKey} onClick={() => sendSpecialKey('BackSpace')}>⌫</button>
+          <button style={styles.kbKey} onClick={() => sendSpecialKey('Return')}>⏎</button>
+          <button style={styles.kbKey} onClick={() => sendSpecialKey('Escape')}>Esc</button>
         </div>
       )}
     </div>
   );
 }
 
+export default function MirrorPage() {
+  return (
+    <ConnectionProvider>
+      <MirrorView />
+    </ConnectionProvider>
+  );
+}
+
 const styles: Record<string, React.CSSProperties> = {
-  disconnectedOverlay: {
-    flex: 1,
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: '12px',
-  },
-  disconnectedIcon: {
-    fontSize: '36px',
-  },
-  disconnectedText: {
-    fontSize: '14px',
-    color: '#555',
-  },
-  reconnectBtn: {
-    padding: '4px 10px',
-    borderRadius: '6px',
-    border: '1px solid #2a3a6a',
-    background: '#141420',
-    color: '#2a6aff',
-    fontSize: '11px',
-    fontWeight: 600,
-    cursor: 'pointer',
-  },
-  reconnectBtnLarge: {
-    padding: '10px 24px',
-    borderRadius: '8px',
-    border: 'none',
-    background: '#2a6aff',
-    color: '#fff',
-    fontSize: '13px',
-    fontWeight: 600,
-    cursor: 'pointer',
-  },
   wrapper: {
     display: 'flex',
     flexDirection: 'column',
     height: '100dvh',
-    background: '#0a0a0f',
+    background: '#000',
     color: '#e0e0e0',
     fontFamily: 'system-ui, sans-serif',
     overflow: 'hidden',
@@ -176,85 +335,110 @@ const styles: Record<string, React.CSSProperties> = {
   topBar: {
     display: 'flex',
     alignItems: 'center',
-    gap: '10px',
-    padding: '10px 12px',
-    borderBottom: '1px solid #1e1e30',
+    gap: 8,
+    padding: '6px 10px',
+    background: '#0a0a0f',
+    borderBottom: '1px solid #16162a',
     flexShrink: 0,
   },
-  backBtn: {
-    padding: '6px 12px',
-    borderRadius: '6px',
-    border: '1px solid #333',
+  barBtn: {
+    width: 34,
+    height: 30,
+    borderRadius: 8,
+    border: '1px solid #22223a',
     background: 'transparent',
     color: '#888',
-    fontSize: '12px',
+    fontSize: 16,
     cursor: 'pointer',
-    fontWeight: 500,
+    lineHeight: 1,
   },
   title: {
-    fontSize: '14px',
+    fontSize: 13,
     fontWeight: 600,
     color: '#ccc',
     flex: 1,
+    textAlign: 'center',
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
   },
-  toggleBtn: {
-    padding: '6px 14px',
-    borderRadius: '6px',
-    border: '1px solid',
-    fontSize: '12px',
+  stage: { flex: 1, display: 'flex', minHeight: 0, background: '#000' },
+  viewport: {
+    position: 'relative',
+    width: '100%',
+    height: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    touchAction: 'none',
+    userSelect: 'none',
+    WebkitUserSelect: 'none',
+    background: '#000',
+  },
+  frame: {
+    maxWidth: '100%',
+    maxHeight: '100%',
+    width: '100%',
+    height: '100%',
+    objectFit: 'contain',
+    pointerEvents: 'none',
+    display: 'block',
+  },
+  centerBox: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+    padding: 24,
+    textAlign: 'center',
+  },
+  bigIcon: { fontSize: 36 },
+  centerText: { fontSize: 14, color: '#889', margin: 0, maxWidth: 280 },
+  primaryBtn: {
+    padding: '10px 24px',
+    borderRadius: 8,
+    border: 'none',
+    background: '#2a6aff',
+    color: '#fff',
+    fontSize: 13,
     fontWeight: 600,
     cursor: 'pointer',
   },
-  stage: {
+  spinner: {
+    width: 32,
+    height: 32,
+    borderRadius: '50%',
+    border: '3px solid #1e2a4a',
+    borderTopColor: '#2a6aff',
+    animation: 'nl-spin 0.8s linear infinite',
+  },
+  kbBar: {
+    display: 'flex',
+    gap: 6,
+    padding: '8px 10px calc(8px + env(safe-area-inset-bottom))',
+    background: '#0f0f1a',
+    borderTop: '1px solid #1c1c30',
+    flexShrink: 0,
+  },
+  kbInput: {
     flex: 1,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
+    padding: '8px 12px',
+    borderRadius: 8,
+    border: '1px solid #26263e',
+    background: '#161624',
+    color: '#eee',
+    fontSize: 14,
+    outline: 'none',
   },
-  placeholder: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    gap: '12px',
-    color: '#444',
-  },
-  placeholderIcon: {
-    fontSize: '48px',
-  },
-  placeholderText: {
-    fontSize: '16px',
-    fontWeight: 500,
-    color: '#555',
-    margin: 0,
-  },
-  placeholderHint: {
-    fontSize: '12px',
-    color: '#444',
-    margin: 0,
-  },
-  videoPlaceholder: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    gap: '12px',
-    width: '100%',
-    height: '100%',
-    padding: '20px',
-    boxSizing: 'border-box',
-  },
-  videoFrame: {
-    width: '100%',
-    flex: 1,
-    background: '#111118',
-    borderRadius: '8px',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    border: '1px solid #1e1e30',
-  },
-  videoFrameText: {
-    color: '#333',
-    fontSize: '14px',
-    margin: 0,
+  kbKey: {
+    padding: '0 12px',
+    borderRadius: 8,
+    border: '1px solid #26263e',
+    background: '#161624',
+    color: '#aab',
+    fontSize: 14,
+    cursor: 'pointer',
   },
 };

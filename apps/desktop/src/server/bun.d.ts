@@ -1,5 +1,12 @@
 declare var Bun: {
-  file(path: string): { text(): Promise<string>; arrayBuffer(): Promise<ArrayBuffer> };
+  file(path: string): {
+    text(): Promise<string>;
+    arrayBuffer(): Promise<ArrayBuffer>;
+    exists(): Promise<boolean>;
+    stream(): ReadableStream;
+    readonly size: number;
+    readonly type: string;
+  };
   write(path: string, data: string | ArrayBuffer | Uint8Array): Promise<number>;
   env: Record<string, string>;
   serve(opts: {

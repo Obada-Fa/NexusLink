@@ -18,6 +18,13 @@ export type RpcMethod =
   | 'input.mouseClick'
   | 'input.mouseScroll'
   | 'input.keyEvent'
+  | 'input.typeText'
+  | 'window.list'
+  | 'window.adopt'
+  | 'window.release'
+  | 'window.activate'
+  | 'apps.list'
+  | 'apps.launch'
   | 'session.pair'
   | 'session.authenticate'
   | 'session.heartbeat'
@@ -63,7 +70,7 @@ export type Params<M extends RpcMethod> =
     : M extends 'terminal.kill'
     ? { terminalId: string }
     : M extends 'screen.startCapture'
-    ? { quality: 'low' | 'medium' | 'high'; fps: number }
+    ? { quality: 'low' | 'medium' | 'high'; fps: number; windowId?: string }
     : M extends 'screen.stopCapture'
     ? { streamId: string }
     : M extends 'screen.getMetadata'
@@ -76,6 +83,20 @@ export type Params<M extends RpcMethod> =
     ? { deltaX: number; deltaY: number; x: number; y: number }
     : M extends 'input.keyEvent'
     ? { key: string; modifiers?: string[] }
+    : M extends 'input.typeText'
+    ? { text: string }
+    : M extends 'window.list'
+    ? {}
+    : M extends 'window.adopt'
+    ? { windowId: string; viewportW?: number; viewportH?: number }
+    : M extends 'window.release'
+    ? { windowId: string }
+    : M extends 'window.activate'
+    ? { windowId: string }
+    : M extends 'apps.list'
+    ? {}
+    : M extends 'apps.launch'
+    ? { appId: string }
     : M extends 'session.pair'
     ? { publicKey: string }
     : M extends 'session.authenticate'
@@ -116,7 +137,7 @@ export type Result<M extends RpcMethod> =
     : M extends 'terminal.kill'
     ? void
     : M extends 'screen.startCapture'
-    ? { streamId: string }
+    ? { streamId: string; region?: CaptureRegion }
     : M extends 'screen.stopCapture'
     ? void
     : M extends 'screen.getMetadata'
@@ -129,6 +150,20 @@ export type Result<M extends RpcMethod> =
     ? { ok: boolean }
     : M extends 'input.keyEvent'
     ? { ok: boolean }
+    : M extends 'input.typeText'
+    ? { ok: boolean }
+    : M extends 'window.list'
+    ? WindowInfo[]
+    : M extends 'window.adopt'
+    ? { region: CaptureRegion }
+    : M extends 'window.release'
+    ? { ok: boolean }
+    : M extends 'window.activate'
+    ? { ok: boolean }
+    : M extends 'apps.list'
+    ? AppInfo[]
+    : M extends 'apps.launch'
+    ? { ok: boolean; wmClass?: string }
     : M extends 'session.pair'
     ? { publicKey: string; totpIssuerUri: string }
     : M extends 'session.authenticate'
@@ -184,9 +219,40 @@ export interface ScreenMetadata {
   height: number
 }
 
+export interface CaptureRegion {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** A top-level window currently open on the host. */
+export interface WindowInfo {
+  windowId: string
+  title: string
+  /** WM_CLASS instance.class, e.g. "brave-browser.Brave-browser" */
+  wmClass: string
+  desktop: number
+  /** data: URI (png/svg) resolved from the matching .desktop entry, if any */
+  icon?: string
+  appId?: string
+}
+
+/** A launchable application installed on the host (.desktop entry). */
+export interface AppInfo {
+  /** Desktop-file basename without extension, e.g. "org.gnome.Calculator" */
+  appId: string
+  name: string
+  /** data: URI (png/svg), if an icon could be resolved */
+  icon?: string
+  /** StartupWMClass or best-guess class used to match a running window */
+  wmClass?: string
+}
+
 export type WsMessage =
   | { type: 'rpc-request'; request: RpcRequest }
   | { type: 'rpc-response'; response: RpcResponse }
   | { type: 'stream-frame'; streamId: string; data: string; timestamp: number }
+  | { type: 'stream-region'; streamId: string; region: CaptureRegion }
   | { type: 'terminal-output'; terminalId: string; data: string }
   | { type: 'perf-update'; data: PerfSnapshot }

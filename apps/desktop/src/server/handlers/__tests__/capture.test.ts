@@ -1,0 +1,58 @@
+import { describe, it, expect } from 'bun:test';
+import { extractFrames } from '../capture';
+
+const SOI = Buffer.from([0xff, 0xd8]);
+const EOI = Buffer.from([0xff, 0xd9]);
+
+/** Build a fake JPEG frame with a marker byte in the body (incl. a stray 0xFFD9). */
+function fakeJpeg(tag: number, withStrayEoi = false): Buffer {
+  const body = withStrayEoi
+    ? Buffer.from([tag, 0x01, 0xff, 0xd9, 0x02]) // stray EOI inside scan data
+    : Buffer.from([tag, 0x01, 0x02, 0x03]);
+  return Buffer.concat([SOI, body, EOI]);
+}
+
+describe('extractFrames (MJPEG framing)', () => {
+  it('returns no frames and empties the buffer when no SOI is present', () => {
+    const { frames, rest } = extractFrames(Buffer.from([0x00, 0x11, 0x22]));
+    expect(frames.length).toBe(0);
+    expect(rest.length).toBe(0);
+  });
+
+  it('holds a single incomplete frame as remainder until the next SOI arrives', () => {
+    const one = fakeJpeg(0xaa);
+    const { frames, rest } = extractFrames(one);
+    // A lone frame can't be closed until the following SOI, so it stays buffered.
+    expect(frames.length).toBe(0);
+    expect(rest.equals(one)).toBe(true);
+  });
+
+  it('emits complete frames delimited by the following SOI', () => {
+    const a = fakeJpeg(0xaa);
+    const b = fakeJpeg(0xbb);
+    const c = fakeJpeg(0xcc);
+    const { frames, rest } = extractFrames(Buffer.concat([a, b, c]));
+    expect(frames.length).toBe(2);
+    expect(frames[0]!.equals(a)).toBe(true);
+    expect(frames[1]!.equals(b)).toBe(true);
+    expect(rest.equals(c)).toBe(true); // last frame held until next SOI
+  });
+
+  it('is not fooled by stray 0xFFD9 bytes inside scan data', () => {
+    const a = fakeJpeg(0xaa, true); // contains an embedded EOI
+    const b = fakeJpeg(0xbb);
+    const { frames, rest } = extractFrames(Buffer.concat([a, b]));
+    expect(frames.length).toBe(1);
+    expect(frames[0]!.equals(a)).toBe(true); // whole frame, not truncated at stray EOI
+    expect(rest.equals(b)).toBe(true);
+  });
+
+  it('discards leading garbage before the first SOI', () => {
+    const a = fakeJpeg(0xaa);
+    const b = fakeJpeg(0xbb);
+    const junk = Buffer.from([0x99, 0x88, 0x77]);
+    const { frames } = extractFrames(Buffer.concat([junk, a, b]));
+    expect(frames.length).toBe(1);
+    expect(frames[0]!.equals(a)).toBe(true);
+  });
+});

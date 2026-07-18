@@ -5,6 +5,11 @@ import { getSystemInfo, getPerfSnapshot } from './handlers/system';
 import { handleTerminalCreate, handleTerminalInput, handleTerminalResize, handleTerminalKill, setSend as setTerminalSend } from './handlers/terminal';
 import { validateToken, generateToken, handleSessionPair, validateSessionTOTP, isLocalDev, generateDevToken } from './handlers/auth';
 import { setSend as setSignalingSend } from './handlers/signaling';
+import { mouseMove, mouseClick, mouseScroll, keyEvent, typeText } from './handlers/input';
+import { setSend as setCaptureSend, startCapture, stopCapture, stopCapturesForSocket, getScreenMetadata } from './handlers/capture';
+import { listWindows, listApps, launchApp, adoptWindow, releaseWindow, activateWindow, getWindowGeometry } from './handlers/windows';
+import { serveStatic, staticAvailable } from './static-server';
+import { printLaunchBanner } from './launch-banner';
 import { startSidecarReader } from './sidecar-reader';
 
 type Params = Record<string, unknown>;
@@ -36,6 +41,7 @@ export async function startRpcServer(port = 45678) {
 
   setTerminalSend(send);
   setSignalingSend(send);
+  setCaptureSend(send);
 
   async function dispatch(method: RpcMethod, params: Params, req: RpcRequest<RpcMethod>, ws: WebSocket) {
     let result: unknown;
@@ -66,6 +72,73 @@ export async function startRpcServer(port = 45678) {
         break;
       case 'system.getPerf':
         result = await getPerfSnapshot();
+        break;
+      case 'input.mouseMove':
+        result = mouseMove(params.dx as number, params.dy as number);
+        break;
+      case 'input.mouseClick':
+        result = mouseClick(
+          params.button as 'left' | 'right' | 'middle',
+          params.x as number | undefined,
+          params.y as number | undefined,
+        );
+        break;
+      case 'input.mouseScroll':
+        result = mouseScroll(
+          params.deltaX as number,
+          params.deltaY as number,
+          params.x as number | undefined,
+          params.y as number | undefined,
+        );
+        break;
+      case 'input.keyEvent':
+        result = keyEvent(params.key as string, params.modifiers as string[] | undefined);
+        break;
+      case 'input.typeText':
+        result = typeText(params.text as string);
+        break;
+      case 'window.list':
+        result = await listWindows();
+        break;
+      case 'window.adopt':
+        result = await adoptWindow(
+          params.windowId as string,
+          params.viewportW as number | undefined,
+          params.viewportH as number | undefined,
+        );
+        break;
+      case 'window.release':
+        result = releaseWindow(params.windowId as string);
+        break;
+      case 'window.activate':
+        result = activateWindow(params.windowId as string);
+        break;
+      case 'apps.list':
+        result = await listApps();
+        break;
+      case 'apps.launch':
+        result = await launchApp(params.appId as string);
+        break;
+      case 'screen.startCapture': {
+        // Per-window capture: resolve the window's current on-screen rect, grab
+        // only that region, and keep tracking the window if it moves.
+        const windowId = params.windowId as string | undefined;
+        const region = windowId ? getWindowGeometry(windowId) ?? undefined : undefined;
+        result = startCapture(
+          (params.quality as 'low' | 'medium' | 'high') ?? 'medium',
+          (params.fps as number) ?? 12,
+          ws,
+          region,
+          windowId ? () => getWindowGeometry(windowId) : undefined,
+        );
+        break;
+      }
+      case 'screen.stopCapture':
+        stopCapture(params.streamId as string);
+        result = undefined;
+        break;
+      case 'screen.getMetadata':
+        result = getScreenMetadata();
         break;
       case 'session.pair': {
         const pairResult = await handleSessionPair(params.publicKey as string);
@@ -136,7 +209,7 @@ export async function startRpcServer(port = 45678) {
 
   const server = Bun.serve({
     port,
-    fetch(req, srv) {
+    async fetch(req, srv) {
       const url = new URL(req.url);
       if (url.pathname === '/signal' || url.pathname === '/rpc') {
         const isLocal = isLocalDev(req.url);
@@ -144,6 +217,9 @@ export async function startRpcServer(port = 45678) {
         if (srv.upgrade(req, { data: { isLocal } })) return;
         return new Response('Upgrade failed', { status: 400 });
       }
+      // Single-port mode: serve the exported PWA if it has been built.
+      const staticResp = await serveStatic(url.pathname);
+      if (staticResp) return staticResp;
       return new Response('NexusLink RPC', { status: 200 });
     },
     websocket: {
@@ -170,6 +246,7 @@ export async function startRpcServer(port = 45678) {
         }
       },
       close(ws) {
+        stopCapturesForSocket(ws as unknown as WebSocket);
         sessions.forEach((s, id) => {
           if (s.ws === ws) sessions.delete(id);
         });
@@ -179,6 +256,8 @@ export async function startRpcServer(port = 45678) {
 
   startSidecarReader(send, getPerfSnapshot, getAuthenticatedSessions);
 
+  const servesClient = await staticAvailable();
+  printLaunchBanner(port, servesClient);
   console.log(`[rpc-server] listening on port ${port}`);
   return { port };
 }

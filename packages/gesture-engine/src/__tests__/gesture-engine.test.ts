@@ -108,7 +108,9 @@ class MockTouchEvent {
 }
 
 function createMockElement(): {
-  el: EventTarget;
+  // `el` is a structural DOM stub whose dispatchEvent accepts MockTouchEvent; typed
+  // loosely so it can stand in for both HTMLElement (listeners) and Touch.target.
+  el: any;
   listeners: Map<string, EventListener[]>;
   getRect: () => DOMRect;
 } {
@@ -134,7 +136,7 @@ function createMockElement(): {
       const arr = listeners.get(event.type);
       if (arr) {
         for (const fn of arr) {
-          fn.call(el, event);
+          fn.call(el, event as unknown as Event);
         }
       }
       return !event.defaultPrevented;
@@ -220,11 +222,13 @@ describe('GestureEngine', () => {
     engine.detach();
   });
 
-  it('emits mouse-move on drag', () => {
+  it('emits mouse-move on drag (trackpad/precision mode)', () => {
     const { el, getRect } = createMockElement();
     const events: GestureEvent[] = [];
     const callbacks: GestureCallbacks = { onGesture: (e) => events.push(e) };
-    const engine = new GestureEngine(el as unknown as HTMLElement, callbacks);
+    // v2: one-finger pan is a momentum scroll in the default `direct` mode.
+    // Relative cursor movement is the legacy `trackpad` (Precision) behaviour.
+    const engine = new GestureEngine(el as unknown as HTMLElement, callbacks, { mode: 'trackpad' });
 
     Object.defineProperty(el, 'getBoundingClientRect', { value: getRect, configurable: true });
     engine.attach();
