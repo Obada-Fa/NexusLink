@@ -6,11 +6,14 @@
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:nexuslink/src/rpc/rpc_client.dart';
 
 const liveUrl = 'ws://127.0.0.1:45678/rpc';
+const httpBase = 'http://127.0.0.1:45678';
 
 Future<bool> hostUp() async {
   try {
@@ -68,6 +71,26 @@ void main() {
     expect(frames, greaterThanOrEqualTo(5));
 
     await client.request('screen.stopCapture', {'streamId': cap['streamId']});
+
+    // Files screen data path: fs.list on the home dir, then an HTTP upload +
+    // download round-trip via the same `http` package the Files screen uses.
+    final home = info['homeDir'] as String;
+    final entries = await client.request('fs.list', {'path': home}) as List<dynamic>;
+    expect(entries, isA<List<dynamic>>());
+
+    final tmpPath = '$home/.nexuslink_livetest.bin';
+    final payload = Uint8List.fromList(List.generate(4096, (i) => i % 256));
+    final upUri = Uri.parse(
+        '$httpBase/files?path=${Uri.encodeQueryComponent(tmpPath)}&overwrite=1');
+    final up = await http.post(upUri, body: payload);
+    expect(up.statusCode, 200);
+
+    final downUri =
+        Uri.parse('$httpBase/files?path=${Uri.encodeQueryComponent(tmpPath)}');
+    final down = await http.get(downUri);
+    expect(down.statusCode, 200);
+    expect(down.bodyBytes, equals(payload));
+
     client.dispose();
   }, timeout: const Timeout(Duration(minutes: 1)));
 }

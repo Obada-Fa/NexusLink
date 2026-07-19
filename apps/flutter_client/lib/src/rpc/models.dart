@@ -44,6 +44,33 @@ class AppInfo {
       );
 }
 
+class FileEntry {
+  final String name;
+  final String path;
+  final int size;
+  final bool isDirectory;
+  final String modifiedAt;
+  final String mimeType;
+
+  FileEntry({
+    required this.name,
+    required this.path,
+    required this.size,
+    required this.isDirectory,
+    required this.modifiedAt,
+    required this.mimeType,
+  });
+
+  factory FileEntry.fromJson(Map<String, dynamic> j) => FileEntry(
+        name: j['name'] as String,
+        path: j['path'] as String,
+        size: (j['size'] as num?)?.toInt() ?? 0,
+        isDirectory: j['isDirectory'] as bool? ?? false,
+        modifiedAt: (j['modifiedAt'] as String?) ?? '',
+        mimeType: (j['mimeType'] as String?) ?? '',
+      );
+}
+
 class CaptureRegion {
   final int x, y, width, height;
   CaptureRegion(this.x, this.y, this.width, this.height);
