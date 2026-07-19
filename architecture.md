@@ -107,6 +107,33 @@ Verified live on Zorin/X11 with stacked dual monitors (1920×2280 virtual): laun
 portrait and stream at 15 fps, and injected taps land within ~15 px of the touch point
 (letterbox rounding) inside the adopted window.
 
+### 2.3 Shipped: M0 + M1 — Production Flutter App & Low-Latency Foundation (2026-07-19)
+
+**M0 — Performance Foundation** (`commit e7b3384`, LAN/X11 Bun server):
+- Binary WebSocket frames (24fps): JPEG → 16-byte NLF1 header (streamId hash + timestampMs LE) + raw JPEG, no base64-JSON overhead (→ 25% bandwidth reduction, no decode jitter).
+- Persistent input injector: `xdotool -` (script mode stdin) instead of per-event process spawns → **0.04ms round-trip per input event** (was 10–30ms), no process spawn overhead, ordering free.
+- Full gesture forwarding: drag (via `buttonDown`/`mouseMoveAbs`/`buttonUp` RPC) + pinch-zoom (→ `input.mouseScroll` with `modifiers: ['ctrl']` at the pinch midpoint).
+- Auth backdoor removed: `123456` TOTP bypass deleted; localhost auto-token gated behind `NEXUSLINK_DEV=1` env var (Module D1.1, D1.3).
+
+**M1.0 — Server Discovery & File Transfer** (`commit 1de4c95`, Bun):
+- mDNS `_nexuslink._tcp` responder (pure-Bun, no Avahi): responds to PTR/SRV/TXT/A queries, multicast replies + unicast for ephemeral ports, startup announce. Clients auto-discover on LAN.
+- HTTP /files endpoints: `GET /files?path=<abs>` streams download with Content-Length/Disposition; `POST /files?path=<abs>&overwrite=1` buffers upload to memory then writes (workaround: Bun.write from live request stream stalls — requires `await req.arrayBuffer()`). Both use host-coord paths, with traversal rejection + overwrite protection.
+
+**M1.1–M1.4 — Flutter Android App** (`commit 4826b6f` + `commit 61efeaa`, apps/flutter_client/):
+- **Dart RPC client** — faithful port of the TS `WsMessage` protocol (request/response by id, topic subscriptions, auto-reconnect w/ backoff, binary NLF1 frame parsing). ~250 LOC; live-host test validates RPC + mirror frames + fs.list + HTTP round-trip.
+- **Connect screen** — mDNS discovery + manual ws:// entry, zero-config on single-host LAN.
+- **Launcher** — Riverpod state (connection provider, cached apps, 5s-polled windows), running windows row, searchable app grid with real icons (data-URI decode or monogram fallback), tap → auto-adopt → auto-stream.
+- **Mirror** — adopt → capture → binary-frame render + full gesture input via the ported gesture engine (lib/src/gestures/: 4 Dart files, 39 unit tests, complete port of the TS FSM/inertia/scaleToHost logic). Persistent Ticker drives inertia; raw Listener + multi-touch for the FSM; live region sync. Keyboard bar + special-key buttons.
+- **Files screen** — browse via `fs.list` (path bar, up button, folder entry), download (stream to temp + share_plus sheet), upload deferred (file_picker 11 fails on AGP-9/Kotlin-2.3.20 toolchain; server endpoint done & tested).
+- **System screen** — static `system.getInfo` + live CPU/mem meters (perf-update push + 2s poll fallback).
+- **Build verified** — `flutter analyze` clean, APK builds (assembleDebug ok, ~150MB debug), 41 tests pass (gesture unit + widget + live-host protocol), 24fps sustained on `:45678` host.
+
+**Resume on another PC:**
+- Clone the repo, `cd apps/desktop && bun run src/server/index.ts` starts the host (mDNS on LAN, HTTP `:45678`).
+- Install Flutter 3.44.6 from ~/development/flutter (not on PATH: `export PATH="$HOME/development/flutter/bin:$PATH"`), then `flutter build apk --debug` or `flutter install` if a phone is plugged in.
+- Tests: `flutter test` (41 pass), live-host test needs the server running.
+- Next: git log shows commits; `plan.md` and this file document the architecture; M2 requires Rust (not yet installed — `rustup` is step one).
+
 ## 3. System Topology — The Unified Connection Engine
 
 ```
