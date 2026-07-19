@@ -9,7 +9,9 @@ import '../rpc/models.dart';
 import '../state/connection.dart';
 import '../state/launcher.dart';
 import '../widgets/app_icon.dart';
+import 'files_screen.dart';
 import 'mirror_screen.dart';
+import 'system_screen.dart';
 
 class LauncherScreen extends ConsumerStatefulWidget {
   const LauncherScreen({super.key});
@@ -246,11 +248,12 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   }
 
   Widget _dock(BuildContext context) {
-    final items = [
+    void push(Widget screen) => Navigator.of(context)
+        .push(MaterialPageRoute(builder: (_) => screen));
+    final items = <(IconData, String, VoidCallback?)>[
       (Icons.desktop_windows, 'Desktop', () => _openDesktop(context)),
-      (Icons.terminal, 'Terminal', null),
-      (Icons.folder, 'Files', null),
-      (Icons.memory, 'System', null),
+      (Icons.folder, 'Files', () => push(const FilesScreen())),
+      (Icons.memory, 'System', () => push(const SystemScreen())),
     ];
     return Container(
       margin: const EdgeInsets.fromLTRB(14, 4, 14, 8),
