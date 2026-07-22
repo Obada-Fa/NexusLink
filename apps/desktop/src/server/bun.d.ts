@@ -10,6 +10,7 @@ declare var Bun: {
   write(path: string, data: string | ArrayBuffer | Uint8Array): Promise<number>;
   env: Record<string, string>;
   serve(opts: {
+    hostname?: string;
     port: number;
     fetch(req: Request, server: { upgrade(req: Request): boolean }): Response | undefined | Promise<Response | undefined>;
     websocket?: {

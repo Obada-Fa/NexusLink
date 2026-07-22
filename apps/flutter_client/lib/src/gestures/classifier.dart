@@ -459,7 +459,10 @@ class TouchClassifier {
     final host = _toHost(t0.x, t0.y);
 
     // Pinch dominates over pan -> zoom; otherwise two-finger pan -> scroll.
-    if (pinchDelta.abs() >= pinchMinDeltaPx &&
+    // Trackpad/precision mode never zooms: two fingers always scroll, like a
+    // laptop trackpad (per-event zoom/scroll flapping reads as glitching).
+    if (_effectiveMode != GestureMode.trackpad &&
+        pinchDelta.abs() >= pinchMinDeltaPx &&
         pinchDelta.abs() > math.sqrt(panDx * panDx + panDy * panDy)) {
       _emit(ZoomEvent(pinchDelta * pinchZoomScale, host.x, host.y));
     } else {
@@ -486,6 +489,9 @@ class TouchClassifier {
       // Lifted from multi-touch back to single: restart a fresh track.
       _prevScrollMid = null;
       _beginSingleTouch(touches[0], timestampMs);
+      // The finger lingering after a two-finger gesture must not turn into a
+      // long-press right click (taps are already blocked via _maxTouches).
+      if (_maxTouches >= 2) _longPressArmed = false;
     }
   }
 
@@ -547,9 +553,11 @@ class TouchClassifier {
       }
 
       // A one-finger direct scroll that ended with velocity -> momentum
-      // fling (the engine checks the start threshold).
+      // fling (the engine checks the start threshold). A finger that paused
+      // before lifting has stale velocity — flinging then feels haunted.
       if (_effectiveMode == GestureMode.direct &&
-          _state == GestureState.scrolling) {
+          _state == GestureState.scrolling &&
+          timestampMs - _velocity.lastSampleTimeMs <= flingMaxSampleAgeMs) {
         _onFlingStart?.call(
           _velocity.vx,
           _velocity.vy,

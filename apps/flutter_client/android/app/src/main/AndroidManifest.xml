@@ -1,4 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- LAN RPC WebSocket + file transfer. Only the debug manifest gets this
+         implicitly; release builds have no network access without it. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Receive mDNS multicast responses for zero-config host discovery. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
     <application
         android:label="nexuslink"
         android:name="${applicationName}"
