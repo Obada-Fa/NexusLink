@@ -2,8 +2,33 @@
 // scanning a square instead of typing an IP address.
 
 import os from 'os';
+import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 import qrcode from 'qrcode-terminal';
+
+/**
+ * Best-effort hint when a host firewall is likely rejecting LAN peers.
+ * The server binding to 0.0.0.0 is not enough on hosts where ufw is active
+ * with a deny/reject-incoming default — connections from the phone die at the
+ * firewall while loopback tests keep working, which reads as an app bug.
+ * No sudo, no rule parsing: if we can't tell, we stay silent.
+ */
+function firewallHint(port: number): string | null {
+  if (process.platform !== 'linux') return null;
+  try {
+    if (!existsSync('/usr/sbin/ufw') && !existsSync('/sbin/ufw')) return null;
+    const res = spawnSync('systemctl', ['is-active', 'ufw'], { encoding: 'utf8', timeout: 2000 });
+    if (res.stdout?.trim() !== 'active') return null;
+    return (
+      `  ⚠ A firewall (ufw) is active on this machine.\n` +
+      `    If your phone can't connect, allow the port once:\n` +
+      `      sudo ufw allow ${port}/tcp comment 'NexusLink host'`
+    );
+  } catch {
+    return null;
+  }
+}
 
 /** All non-internal IPv4 URLs the host is reachable at, on `port`. */
 export function lanUrls(port: number, scheme = 'http'): string[] {
@@ -39,5 +64,7 @@ export function printLaunchBanner(port: number, serveStaticClient: boolean): voi
   } else {
     console.log('  No LAN interface detected; reachable at ws://localhost:' + port + '/rpc');
   }
+  const hint = firewallHint(port);
+  if (hint) console.log('\n' + hint);
   console.log('\n──────────────────────────────────────────\n');
 }

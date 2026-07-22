@@ -21,6 +21,10 @@ const double scrollInertiaStopVelocity = 4;
 /// EMA smoothing factor for the velocity estimator (weight of newest sample).
 const double velocityEmaAlpha = 0.4;
 
+/// Max age (ms) of the newest velocity sample for a release to still fling.
+/// A pan that pauses before lifting must not fling with pre-pause velocity.
+const double flingMaxSampleAgeMs = 100;
+
 /// Minimum sample interval (ms). Guards against divide-by-zero / spikes on
 /// fast events.
 const double minSampleDtMs = 4;
@@ -83,6 +87,10 @@ class ScrollVelocityTracker {
   double get vy => _vy;
 
   double get speed => math.sqrt(_vx * _vx + _vy * _vy);
+
+  /// Timestamp of the newest sample (0 when unprimed). Lets the caller reject
+  /// stale velocity at release time (see [flingMaxSampleAgeMs]).
+  double get lastSampleTimeMs => _lastT;
 }
 
 /// Caller-driven momentum integrator (port of the `startInertia` frame loop

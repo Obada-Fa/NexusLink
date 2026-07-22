@@ -108,6 +108,27 @@ export function mouseMoveAbs(x: number, y: number): { ok: boolean } {
   return { ok: send(`mousemove ${r(x)} ${r(y)}`) };
 }
 
+// Fractional wheel remainder carried across scroll messages. Touch scrolls
+// arrive as many small per-move deltas (often < SCROLL_PX_PER_CLICK each);
+// rounding every message independently drops them, which kills slow scrolls
+// and inertia tails. Sign flips drain the remainder naturally.
+let scrollAccumX = 0;
+let scrollAccumY = 0;
+
+function takeClicks(axis: 'x' | 'y', delta: number): number {
+  const accum = (axis === 'x' ? scrollAccumX : scrollAccumY) + delta;
+  let clicks = Math.trunc(accum / SCROLL_PX_PER_CLICK);
+  let rest = accum - clicks * SCROLL_PX_PER_CLICK;
+  if (Math.abs(clicks) > MAX_SCROLL_CLICKS) {
+    // Burst cap: clamp and drop the excess instead of queueing a catch-up.
+    clicks = Math.sign(clicks) * MAX_SCROLL_CLICKS;
+    rest = 0;
+  }
+  if (axis === 'x') scrollAccumX = rest;
+  else scrollAccumY = rest;
+  return clicks;
+}
+
 /**
  * Wheel scroll at an optional point. Pixel deltas → discrete wheel clicks.
  * With `modifiers` (e.g. ['ctrl']) the wheel fires inside a keydown/keyup
@@ -127,15 +148,15 @@ export function mouseScroll(
   const mods = (modifiers ?? []).filter(safeCombo);
   for (const m of mods) lines.push(`keydown ${m}`);
 
-  const vClicks = Math.min(MAX_SCROLL_CLICKS, Math.round(Math.abs(deltaY) / SCROLL_PX_PER_CLICK));
-  if (vClicks > 0) {
+  const vClicks = takeClicks('y', deltaY);
+  if (vClicks !== 0) {
     // xdotool: button 4 = wheel up, 5 = wheel down. deltaY>0 scrolls content down.
-    lines.push(`click --repeat ${vClicks} ${deltaY > 0 ? '5' : '4'}`);
+    lines.push(`click --repeat ${Math.abs(vClicks)} ${vClicks > 0 ? '5' : '4'}`);
   }
-  const hClicks = Math.min(MAX_SCROLL_CLICKS, Math.round(Math.abs(deltaX) / SCROLL_PX_PER_CLICK));
-  if (hClicks > 0) {
+  const hClicks = takeClicks('x', deltaX);
+  if (hClicks !== 0) {
     // button 6 = wheel left, 7 = wheel right.
-    lines.push(`click --repeat ${hClicks} ${deltaX > 0 ? '7' : '6'}`);
+    lines.push(`click --repeat ${Math.abs(hClicks)} ${hClicks > 0 ? '7' : '6'}`);
   }
 
   for (const m of mods.reverse()) lines.push(`keyup ${m}`);

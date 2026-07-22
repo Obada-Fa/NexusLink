@@ -10,6 +10,10 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@nexuslink/gesture-engine": "workspace:*",
+    "@nexuslink/ui-components": "workspace:*",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
@@ -17,8 +21,6 @@
     "next-pwa": "^5.6.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
-    "@nexuslink/gesture-engine": "workspace:*",
-    "@nexuslink/ui-components": "workspace:*",
     "zustand": "^4.5.0"
   },
   "devDependencies": {

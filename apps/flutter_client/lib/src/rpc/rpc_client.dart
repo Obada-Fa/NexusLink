@@ -13,6 +13,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import '../auth/pairing.dart';
+
 const frameMagic = 0x4e4c4631; // 'NLF1'
 const frameHeaderBytes = 16;
 
@@ -79,15 +81,21 @@ class RpcClient {
       final ws = await WebSocket.connect(wsUrl)
           .timeout(const Duration(seconds: 8));
       _ws = ws;
-      _reconnectAttempts = 0;
-      _setStatus(RpcStatus.connected);
       ws.listen(
         _onMessage,
         onDone: _onClosed,
         onError: (_) => _onClosed(),
         cancelOnError: true,
       );
+      // The host rejects every RPC until the ECDH/TOTP handshake succeeds, so
+      // authenticate before reporting connected. Running it here (not in the
+      // UI layer) means reconnects re-authenticate too.
+      await performPairingHandshake(_requestRaw);
+      _reconnectAttempts = 0;
+      _setStatus(RpcStatus.connected);
     } catch (e) {
+      _ws?.close();
+      _ws = null;
       _setStatus(RpcStatus.disconnected);
       rethrow;
     }
@@ -130,10 +138,21 @@ class RpcClient {
     Map<String, dynamic> params = const {},
     Duration timeout = const Duration(seconds: 10),
   ]) {
-    final ws = _ws;
-    if (ws == null || _currentStatus != RpcStatus.connected) {
+    if (_ws == null || _currentStatus != RpcStatus.connected) {
       throw RpcException('not connected');
     }
+    return _requestRaw(method, params, timeout);
+  }
+
+  /// Ungated request used by the pairing handshake, which must run while the
+  /// status is still `connecting`.
+  Future<dynamic> _requestRaw(
+    String method, [
+    Map<String, dynamic> params = const {},
+    Duration timeout = const Duration(seconds: 10),
+  ]) {
+    final ws = _ws;
+    if (ws == null) throw RpcException('not connected');
     final id = '${DateTime.now().millisecondsSinceEpoch}-${++_idCounter}';
     final completer = Completer<dynamic>();
     _pending[id] = completer;

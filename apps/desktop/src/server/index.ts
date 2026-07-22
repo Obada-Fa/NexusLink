@@ -211,18 +211,21 @@ export async function startRpcServer(port = 45678) {
           // TOTP pairing flow (no universal codes — Module D1.1)
           const pairingData = sessionId ? sessions.get(sessionId)?.pairingData : undefined;
           if (!pairingData?.pairingId) {
+            console.warn('[auth] authenticate rejected: no active pairing session');
             const response: RpcResponse = { id: req.id, error: 'no active pairing session' };
             send(ws, { type: 'rpc-response', response });
             return;
           }
           const totpValid = await validateSessionTOTP(pairingData.pairingId, code);
           if (!totpValid) {
+            console.warn('[auth] authenticate rejected: invalid totp code (check client/host clock sync)');
             const response: RpcResponse = { id: req.id, error: 'invalid totp code' };
             send(ws, { type: 'rpc-response', response });
             return;
           }
           const newToken = generateToken();
           token = newToken.token;
+          console.log('[auth] session authenticated');
         }
 
         if (sessionId) {
@@ -250,6 +253,7 @@ export async function startRpcServer(port = 45678) {
   }
 
   const server = Bun.serve({
+    hostname: '0.0.0.0',
     port,
     async fetch(req, srv) {
       const url = new URL(req.url);

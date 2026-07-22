@@ -32,11 +32,23 @@ function sanitize(pathname: string): string {
  * this request should not be handled statically. Non-asset misses fall back to
  * index.html so client-side routes (/mirror, /files, …) deep-link correctly.
  */
+/**
+ * Hashed Next assets are immutable; everything else (HTML shell, sw.js,
+ * manifest) must revalidate every load, or phones keep running a stale app
+ * after the host updates.
+ */
+function cacheHeaders(pathname: string): HeadersInit {
+  return pathname.startsWith('/_next/static/')
+    ? { 'Cache-Control': 'public, max-age=31536000, immutable' }
+    : { 'Cache-Control': 'no-cache' };
+}
+
 export async function serveStatic(pathname: string): Promise<Response | null> {
   if (!(await staticAvailable())) return null;
 
   const clean = sanitize(pathname);
   const rel = clean === '/' ? 'index.html' : clean.replace(/^\//, '');
+  const headers = cacheHeaders(clean);
 
   const candidates =
     clean === '/'
@@ -47,14 +59,16 @@ export async function serveStatic(pathname: string): Promise<Response | null> {
     const full = join(STATIC_DIR, c);
     const file = Bun.file(full);
     if (await file.exists()) {
-      return new Response(file as unknown as BodyInit);
+      return new Response(file as unknown as BodyInit, { headers });
     }
   }
 
   // SPA fallback: extension-less misses (routes) serve the shell; asset misses 404.
   if (extname(clean) === '') {
     const shell = Bun.file(join(STATIC_DIR, 'index.html'));
-    if (await shell.exists()) return new Response(shell as unknown as BodyInit);
+    if (await shell.exists()) {
+      return new Response(shell as unknown as BodyInit, { headers: cacheHeaders('/') });
+    }
   }
   return new Response('Not found', { status: 404 });
 }

@@ -229,11 +229,14 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         client.notify('input.mouseClick',
             {'button': 'middle', 'x': hx(e.x), 'y': hy(e.y)});
       case ScrollEvent():
+        // Trackpad mode scrolls at the cursor's current position (real
+        // trackpad semantics) — warping the pointer to the fingers on every
+        // two-finger scroll would fight the one-finger cursor control.
         client.notify('input.mouseScroll', {
           'deltaX': e.deltaX,
           'deltaY': e.deltaY,
-          'x': hx(e.x),
-          'y': hy(e.y),
+          if (!_precision) 'x': hx(e.x),
+          if (!_precision) 'y': hy(e.y),
         });
       case MouseMoveEvent():
         client.notify('input.mouseMove', {'dx': e.dx, 'dy': e.dy});
@@ -308,7 +311,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         ),
         actions: [
           IconButton(
-            tooltip: 'Precision (trackpad) mode',
+            tooltip: 'Trackpad mode: 1 finger moves the cursor, 2 fingers scroll',
             icon: Icon(Icons.mouse,
                 color: _precision ? const Color(0xFF2A6AFF) : null),
             onPressed: () {

@@ -66,11 +66,6 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
               child: ListView(
                 padding: const EdgeInsets.symmetric(horizontal: 14),
                 children: [
-                  if (windows.isNotEmpty && q.isEmpty) ...[
-                    _sectionTitle('Open on your PC'),
-                    _runningRow(windows, apps),
-                    const SizedBox(height: 12),
-                  ],
                   _appsHeader(),
                   if (appsAsync.isLoading)
                     const Padding(
@@ -83,6 +78,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
                 ],
               ),
             ),
+            if (windows.isNotEmpty) _taskbar(windows, apps),
             _dock(context),
           ],
         ),
@@ -125,44 +121,50 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
                 color: Colors.white.withValues(alpha: 0.4))),
       );
 
-  Widget _runningRow(List<WindowInfo> windows, List<AppInfo> apps) {
-    return SizedBox(
-      height: 96,
+  /// Windows-style taskbar of everything open on the PC: always visible above
+  /// the dock (survives search + scrolling), one icon per open window, tap to
+  /// jump into that window's mirror. Long-press a tile to see the full title.
+  Widget _taskbar(List<WindowInfo> windows, List<AppInfo> apps) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(14, 0, 14, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+      height: 66,
+      decoration: BoxDecoration(
+        color: const Color(0xFF151522),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFF22223A)),
+      ),
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         itemCount: windows.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 10),
+        separatorBuilder: (_, _) => const SizedBox(width: 4),
         itemBuilder: (_, i) {
           final w = windows[i];
           final name = bestWindowName(w, apps);
-          return InkWell(
-            onTap: () => _openWindow(w, apps),
-            borderRadius: BorderRadius.circular(14),
-            child: Container(
-              width: 140,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFF151522),
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: const Color(0xFF22223A)),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  AppIconTile(icon: w.icon, name: name, size: 40),
-                  const SizedBox(height: 6),
-                  Text(name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          fontSize: 12, fontWeight: FontWeight.w600)),
-                  Text(w.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                          fontSize: 10,
-                          color: Colors.white.withValues(alpha: 0.35))),
-                ],
+          return Tooltip(
+            message: '$name — ${w.title}',
+            triggerMode: TooltipTriggerMode.longPress,
+            child: InkWell(
+              onTap: () => _openWindow(w, apps),
+              borderRadius: BorderRadius.circular(10),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    AppIconTile(icon: w.icon, name: name, size: 34),
+                    const SizedBox(height: 3),
+                    Container(
+                      width: 14,
+                      height: 3,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF4ADE80),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           );

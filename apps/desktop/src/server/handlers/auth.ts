@@ -66,7 +66,7 @@ export async function handleSessionPair(publicKey: string): Promise<{ publicKey:
   const serverKeyPair = await crypto.subtle.generateKey(
     { name: 'ECDH', namedCurve: 'P-256' },
     true,
-    ['deriveBits'],
+    ['deriveKey'],
   );
 
   const peerPubJwk = JSON.parse(publicKey) as JsonWebKey;
@@ -105,7 +105,10 @@ export async function validateSessionTOTP(
   pairingReference: string,
   code: string,
   stepMs = 30000,
-  tolerance = 1,
+  // ±2 steps = ±60s: phones and PCs are rarely more than a minute apart even
+  // without NTP, and the pairing secret is ephemeral so the wider window is
+  // not a meaningful weakening.
+  tolerance = 2,
 ): Promise<boolean> {
   const session = pairings.get(pairingReference);
   if (!session || !session.secret) return false;
