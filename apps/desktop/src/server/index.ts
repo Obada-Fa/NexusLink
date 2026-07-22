@@ -16,8 +16,23 @@ import { handleFileDownload, handleFileUpload } from './handlers/files-http';
 
 type Params = Record<string, unknown>;
 
+type Session = {
+  ws: WebSocket;
+  token?: string;
+  pairingData?: { pairingId: string };
+  isLocal?: boolean;
+  authenticated: boolean;
+};
+
+const AUTH_METHODS = new Set<string>([
+  'session.pair',
+  'session.authenticate',
+  'session.heartbeat',
+  'session.disconnect',
+]);
+
 export async function startRpcServer(port = 45678) {
-  const sessions = new Map<string, { ws: WebSocket; token?: string; pairingData?: { pairingId: string }; isLocal?: boolean }>();
+  const sessions = new Map<string, Session>();
 
   function send(ws: WebSocket, msg: WsMessage) {
     if (ws.readyState === 1) ws.send(JSON.stringify(msg));
@@ -46,6 +61,16 @@ export async function startRpcServer(port = 45678) {
   setCaptureSend(send);
 
   async function dispatch(method: RpcMethod, params: Params, req: RpcRequest<RpcMethod>, ws: WebSocket) {
+    const sessionId = findSession(ws);
+    const session = sessionId ? sessions.get(sessionId) : undefined;
+
+    // Block all privileged RPC calls until the session is authenticated.
+    if (!AUTH_METHODS.has(method) && !session?.authenticated) {
+      const response: RpcResponse = { id: req.id, error: 'not authenticated' };
+      send(ws, { type: 'rpc-response', response });
+      return;
+    }
+
     let result: unknown;
     switch (method) {
       case 'fs.list':
@@ -202,7 +227,7 @@ export async function startRpcServer(port = 45678) {
 
         if (sessionId) {
           const s = sessions.get(sessionId);
-          if (s) s.token = token;
+          if (s) { s.token = token; s.authenticated = true; }
         }
         result = { token };
         break;
@@ -248,7 +273,8 @@ export async function startRpcServer(port = 45678) {
       open(ws) {
         const id = crypto.randomUUID();
         const isLocal = !!(ws as unknown as { data?: { isLocal?: boolean } }).data?.isLocal;
-        sessions.set(id, { ws, isLocal });
+        const devBypass = isLocal && process.env.NEXUSLINK_DEV === '1';
+        sessions.set(id, { ws, isLocal, authenticated: devBypass });
       },
       async message(ws, raw) {
         let msg: WsMessage;
