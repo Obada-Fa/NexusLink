@@ -15,9 +15,8 @@ export function deriveHostWsUrl(): string {
   const { protocol, hostname, port } = window.location;
   const wsProto = protocol === 'https:' ? 'wss:' : 'ws:';
   const rpcPort =
-    (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_RPC_PORT) || DEFAULT_RPC_PORT;
-  const targetPort = port === rpcPort ? port : rpcPort;
-  return `${wsProto}//${hostname}:${targetPort}/rpc`;
+    (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_RPC_PORT) || port || DEFAULT_RPC_PORT;
+  return `${wsProto}//${hostname}:${rpcPort}/rpc`;
 }
 
 /** Human-friendly label for the host we'll auto-connect to (e.g. "this PC (192.168.2.30)"). */
