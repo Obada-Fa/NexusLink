@@ -1,6 +1,7 @@
 'use client';
 
 import dynamic from 'next/dynamic';
+import ConnectionProvider from '@/components/ConnectionProvider';
 
 const TerminalContent = dynamic(() => import('./terminal-content'), {
   ssr: false,
@@ -11,17 +12,21 @@ const TerminalContent = dynamic(() => import('./terminal-content'), {
         alignItems: 'center',
         justifyContent: 'center',
         height: '100dvh',
-        background: '#0a0a0f',
+        background: '#0d0d12',
         color: '#555',
         fontFamily: 'system-ui, sans-serif',
         fontSize: '14px',
       }}
     >
-      Loading terminal...
+      Opening terminal…
     </div>
   ),
 });
 
 export default function TerminalPage() {
-  return <TerminalContent />;
+  return (
+    <ConnectionProvider>
+      <TerminalContent />
+    </ConnectionProvider>
+  );
 }

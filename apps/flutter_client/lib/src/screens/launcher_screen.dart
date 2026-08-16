@@ -325,11 +325,11 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     void push(Widget screen) => Navigator.of(context)
         .push(MaterialPageRoute(builder: (_) => screen));
     final items = <(IconData, String, VoidCallback?)>[
-      (Icons.desktop_windows, 'Desktop', () => _openDesktop(context)),
-      (Icons.terminal, 'Term', () => push(const TerminalScreen())),
-      (Icons.auto_awesome, 'Agents', () => push(const AgentScreen())),
+      (Icons.terminal, 'Terminal', () => push(const TerminalScreen())),
       (Icons.folder, 'Files', () => push(const FilesScreen())),
       (Icons.memory, 'System', () => push(const SystemScreen())),
+      (Icons.desktop_windows, 'Desktop', () => _openDesktop(context)),
+      (Icons.auto_awesome, 'Agents', () => push(const AgentScreen())),
     ];
     return Container(
       margin: const EdgeInsets.fromLTRB(14, 4, 14, 8),

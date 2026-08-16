@@ -299,7 +299,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         return Padding(
           padding: const EdgeInsets.all(8),
           child: Text(e.text ?? 'error',
-              style: const TextStyle(color: Color(0xFFEE5555)),
+              style: const TextStyle(color: Color(0xFFEE5555))),
         );
       default:
         return const SizedBox.shrink();
