@@ -53,6 +53,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
 
   final _kbController = TextEditingController();
   final _kbFocus = FocusNode();
+  /// Last text value we already synced to the host (IME compose/diff baseline).
+  String _kbSynced = '';
   StreamSubscription<MirrorFrame>? _frameSub;
   Timer? _fpsTimer;
   bool _started = false;
@@ -293,10 +295,64 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   void _sendKey(String key) =>
       _client?.notify('input.keyEvent', {'key': key});
 
-  void _onKbChanged(String value) {
-    if (value.isEmpty) return;
-    _client?.notify('input.typeText', {'text': value});
-    _kbController.clear();
+  /// RustDesk-style soft keyboard: keep field text, skip inject while the IME
+  /// is composing, then diff old→new and batch `input.typeText` / BackSpace.
+  void _onKbChanged(String newValue) {
+    final editing = _kbController.value;
+    if (editing.isComposingRangeValid) {
+      // Still composing (suggestions / glide) — wait for a commit.
+      return;
+    }
+
+    final oldValue = _kbSynced;
+    if (newValue == oldValue) return;
+
+    var common = 0;
+    final maxCommon =
+        oldValue.length < newValue.length ? oldValue.length : newValue.length;
+    while (common < maxCommon && oldValue[common] == newValue[common]) {
+      common++;
+    }
+
+    for (var i = 0; i < oldValue.length - common; i++) {
+      _sendKey('BackSpace');
+    }
+    final insert = newValue.substring(common);
+    if (insert.isNotEmpty) {
+      _client?.notify('input.typeText', {'text': insert});
+    }
+    _kbSynced = newValue;
+
+    // Bound local buffer so the field does not grow forever.
+    if (newValue.length > 200) {
+      _kbSynced = '';
+      _kbController.value = const TextEditingValue(text: '');
+    }
+  }
+
+  void _onKbBackspace() {
+    if (_kbController.text.isNotEmpty) {
+      final t = _kbController.text;
+      final next = t.substring(0, t.length - 1);
+      _kbController.value = TextEditingValue(
+        text: next,
+        selection: TextSelection.collapsed(offset: next.length),
+      );
+      _onKbChanged(next);
+    } else {
+      _sendKey('BackSpace');
+    }
+  }
+
+  void _toggleKeyboard() {
+    setState(() => _keyboardOpen = !_keyboardOpen);
+    if (_keyboardOpen) {
+      _kbSynced = '';
+      _kbController.value = const TextEditingValue(text: '');
+      _kbFocus.requestFocus();
+    } else {
+      _kbFocus.unfocus();
+    }
   }
 
   @override
@@ -332,10 +388,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           IconButton(
             icon: Icon(Icons.keyboard,
                 color: _keyboardOpen ? const Color(0xFF2A6AFF) : null),
-            onPressed: () {
-              setState(() => _keyboardOpen = !_keyboardOpen);
-              if (_keyboardOpen) _kbFocus.requestFocus();
-            },
+            onPressed: _toggleKeyboard,
           ),
         ],
       ),
@@ -443,19 +496,23 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
             child: TextField(
               controller: _kbController,
               focusNode: _kbFocus,
-              autocorrect: false,
-              enableSuggestions: false,
+              // Leave suggestions on so glide typing / autocomplete can compose.
+              autocorrect: true,
+              enableSuggestions: true,
+              keyboardType: TextInputType.multiline,
+              textInputAction: TextInputAction.newline,
+              maxLines: null,
               onChanged: _onKbChanged,
               onSubmitted: (_) => _sendKey('Return'),
               decoration: InputDecoration(
                 isDense: true,
-                hintText: 'Type — sent to the PC',
+                hintText: 'Type — suggestions & glide OK',
                 border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(8)),
               ),
             ),
           ),
-          _kbKey('⌫', () => _sendKey('BackSpace')),
+          _kbKey('⌫', _onKbBackspace),
           _kbKey('⏎', () => _sendKey('Return')),
           _kbKey('Esc', () => _sendKey('Escape')),
         ],
