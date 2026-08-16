@@ -9,6 +9,12 @@ import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import type { WindowInfo, AppInfo, CaptureRegion } from '@nexuslink/rpc-types';
 import { getScreenMetadata, getPrimaryMonitor } from './capture';
+import {
+  aspectCorrectPlacement,
+  cropToPhoneAspect,
+  geometryClose,
+  portraitTarget,
+} from './phone-aspect';
 
 const DISPLAY = process.env.DISPLAY || ':0';
 
@@ -358,6 +364,9 @@ export async function listWindows(): Promise<WindowInfo[]> {
 /** Original geometry per adopted window, restored on release. */
 const savedGeometry = new Map<string, CaptureRegion & { maximized: boolean }>();
 
+/** Per-window phone-aspect capture session (survives WM drift via re-crop). */
+const adoptedSessions = new Map<string, { aspect: number; region: CaptureRegion }>();
+
 function getWindowGeometry(windowId: string): CaptureRegion | null {
   // xwininfo reports the client area's absolute position — exactly what x11grab needs.
   const info = run(['xwininfo', '-id', windowId]);
@@ -377,8 +386,13 @@ function isMaximized(windowId: string): boolean {
 }
 
 /**
- * Shape a window into a portrait phone viewport (right-anchored, height-fit) and
- * focus it. Returns the resulting on-screen region for capture + input mapping.
+ * Shape a window into a portrait phone viewport (right-anchored) and focus it.
+ * Returns the on-screen capture region for streaming + touch mapping.
+ *
+ * Chromium/Brave/Cursor often fight the first `wmctrl -e` (restore-bounds /
+ * min-width). We re-clamp, then aspect-correct (usually shrink height), and as
+ * a last resort center-crop the capture region to the phone aspect so the phone
+ * never letterboxes or stretches.
  */
 export async function adoptWindow(
   windowId: string,
@@ -395,42 +409,94 @@ export async function adoptWindow(
     if (orig) savedGeometry.set(windowId, { ...orig, maximized: isMaximized(windowId) });
   }
 
-  run(['wmctrl', '-i', '-r', windowId, '-b', 'remove,maximized_vert,maximized_horz']);
-  run(['wmctrl', '-i', '-r', windowId, '-b', 'remove,fullscreen']);
-  run(['wmctrl', '-i', '-r', windowId, '-b', 'remove,hidden']);
-
-  // Height-fit portrait rect with margins for panels/decorations; right-anchored so
-  // the desktop stays usable on the left.
-  const marginTop = 48;
-  const marginBottom = 16;
-  const height = mon.height - marginTop - marginBottom;
+  const marginTop = 24;
+  const marginBottom = 8;
   const aspect = viewportW > 0 && viewportH > 0 ? viewportW / viewportH : 390 / 844;
-  const width = Math.min(mon.width - 32, Math.round(height * aspect));
-  const x = mon.x + mon.width - width - 16;
-  const y = mon.y + marginTop;
+  let target = portraitTarget(mon, aspect, marginTop, marginBottom);
 
-  run(['wmctrl', '-i', '-r', windowId, '-e', `0,${x},${y},${width},${height}`]);
+  const stripChrome = () => {
+    run(['wmctrl', '-i', '-r', windowId, '-b', 'remove,maximized_vert,maximized_horz']);
+    run(['wmctrl', '-i', '-r', windowId, '-b', 'remove,fullscreen']);
+    run(['wmctrl', '-i', '-r', windowId, '-b', 'remove,hidden']);
+  };
+
+  const place = (t: { x: number; y: number; width: number; height: number }) => {
+    run(['wmctrl', '-i', '-r', windowId, '-e', `0,${t.x},${t.y},${t.width},${t.height}`]);
+  };
+
+  stripChrome();
+  place(target);
   run(['wmctrl', '-i', '-a', windowId]);
 
-  // Read back what the WM actually granted (decorations can shift the rect, and
-  // some WMs re-place the window a beat later).
-  await Bun.sleep(300);
-  const actual = getWindowGeometry(windowId);
-  const region = actual ?? { x, y, width, height };
+  // Re-clamp loop: Chromium restore-bounds often undoes the first resize.
+  const attempts = 5;
+  let actual: CaptureRegion | null = null;
+  for (let i = 0; i < attempts; i++) {
+    await Bun.sleep(i === 0 ? 300 : 250);
+    actual = getWindowGeometry(windowId);
+    if (actual && geometryClose(actual, target)) break;
+    if (i < attempts - 1) {
+      console.warn(
+        `[adopt] ${windowId} drifted (got ${actual ? `${actual.width}x${actual.height}` : 'null'}; want ${target.width}x${target.height}) — re-clamp ${i + 2}/${attempts}`,
+      );
+      stripChrome();
+      place(target);
+      run(['wmctrl', '-i', '-a', windowId]);
+    }
+  }
 
-  // Clamp into screen bounds and even-align for the capture pipeline.
+  // Aspect-correct: if the granted window is still too wide/tall, shrink the
+  // flexible axis so the live window matches the phone (fills without bars).
+  if (actual) {
+    const corrected = aspectCorrectPlacement(actual, aspect, mon, marginTop, marginBottom);
+    if (corrected) {
+      console.warn(
+        `[adopt] ${windowId} aspect ${(actual.width / actual.height).toFixed(3)} ≠ phone ${aspect.toFixed(3)} — reshape to ${corrected.width}x${corrected.height}`,
+      );
+      target = corrected;
+      stripChrome();
+      place(target);
+      run(['wmctrl', '-i', '-a', windowId]);
+      await Bun.sleep(280);
+      actual = getWindowGeometry(windowId) ?? actual;
+    }
+  }
+
+  const region = actual ?? target;
+
+  // Clamp into screen bounds, then force phone aspect on the capture rect so
+  // the phone stream never letterboxes even if the WM refused the reshape.
   const rx = Math.max(0, region.x);
   const ry = Math.max(0, region.y);
-  const rw = Math.min(screen.width - rx, region.width) & ~1;
-  const rh = Math.min(screen.height - ry, region.height) & ~1;
+  const rw = Math.min(screen.width - rx, region.width);
+  const rh = Math.min(screen.height - ry, region.height);
+  const cropped = cropToPhoneAspect({ x: rx, y: ry, width: rw, height: rh }, aspect);
+  adoptedSessions.set(windowId, { aspect, region: cropped });
 
-  return { region: { x: rx, y: ry, width: rw, height: rh } };
+  return { region: cropped };
+}
+
+/** Live capture rect for an adopted window (re-crops as the window moves). */
+export function getAdoptedCaptureRegion(windowId: string): CaptureRegion | null {
+  const session = adoptedSessions.get(windowId);
+  if (!session) return null;
+  const live = getWindowGeometry(windowId);
+  if (!live) return session.region;
+  const screen = getScreenMetadata();
+  const rx = Math.max(0, live.x);
+  const ry = Math.max(0, live.y);
+  const rw = Math.min(screen.width - rx, live.width);
+  const rh = Math.min(screen.height - ry, live.height);
+  const cropped = cropToPhoneAspect({ x: rx, y: ry, width: rw, height: rh }, session.aspect);
+  session.region = cropped;
+  return cropped;
 }
 
 /** Restore a previously adopted window to its original geometry. */
 export function releaseWindow(windowId: string): { ok: boolean } {
   const saved = savedGeometry.get(windowId);
   savedGeometry.delete(windowId);
+  adoptedSessions.delete(windowId);
   if (!saved) return { ok: true };
   run(['wmctrl', '-i', '-r', windowId, '-e', `0,${saved.x},${saved.y},${saved.width},${saved.height}`]);
   if (saved.maximized) {
