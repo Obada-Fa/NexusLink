@@ -20,6 +20,10 @@ import 'package:path_provider/path_provider.dart';
 /// Public GitHub repo that publishes Android APK release assets.
 const String kUpdateGithubRepo = 'Obada-Fa/NexusLink';
 
+/// Browser page for the latest APK release (fallback when html_url is missing).
+const String kReleasesLatestUrl =
+    'https://github.com/Obada-Fa/NexusLink/releases/latest';
+
 /// User-Agent required by the GitHub API.
 const String _kUserAgent = 'NexusLink-Android-Updater';
 
@@ -95,6 +99,10 @@ class ReleaseUpdate {
     this.apkBytes,
     this.notes,
   });
+
+  /// GitHub release page in the browser (or latest releases if html_url empty).
+  String get releasePageUrl =>
+      htmlUrl.isNotEmpty ? htmlUrl : kReleasesLatestUrl;
 }
 
 enum UpdateCheckResultKind { upToDate, available, noRelease, error }

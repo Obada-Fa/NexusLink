@@ -2,6 +2,7 @@
 // Works without the LAN host — only needs internet to GitHub.
 
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../updates/app_update.dart';
 
@@ -92,9 +93,23 @@ class _UpdateBannerState extends State<UpdateBanner> {
     }
   }
 
+  /// Opens the GitHub release / APK page in the browser.
+  Future<void> _openReleasePage() async {
+    final update = _result?.update;
+    final url = update?.releasePageUrl ?? kReleasesLatestUrl;
+    final uri = Uri.parse(url);
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!mounted) return;
+    if (!ok) {
+      setState(() => _status = 'Could not open $url');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final available = _result?.kind == UpdateCheckResultKind.available;
+    final releaseUrl =
+        _result?.update?.releasePageUrl ?? kReleasesLatestUrl;
     return Card(
       color: available
           ? const Color(0xFF152238)
@@ -159,6 +174,34 @@ class _UpdateBannerState extends State<UpdateBanner> {
                 label: Text('Download & install ${_result!.update!.version}'),
               ),
             ],
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _downloading ? null : _openReleasePage,
+                icon: const Icon(Icons.open_in_new, size: 16),
+                label: const Text('Open APK page on GitHub'),
+                style: TextButton.styleFrom(
+                  foregroundColor: const Color(0xFF2A6AFF),
+                  padding: EdgeInsets.zero,
+                  visualDensity: VisualDensity.compact,
+                ),
+              ),
+            ),
+            GestureDetector(
+              onTap: _downloading ? null : _openReleasePage,
+              child: Text(
+                releaseUrl,
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: Color(0xFF2A6AFF),
+                  decoration: TextDecoration.underline,
+                  decorationColor: Color(0xFF2A6AFF),
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
           ],
         ),
       ),

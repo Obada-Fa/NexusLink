@@ -66,6 +66,26 @@ void main() {
       expect(update.apkName, 'nexuslink-release.apk');
       expect(update.apkBytes, 42);
       expect(update.apkUrl, contains('nexuslink-release.apk'));
+      expect(update.htmlUrl,
+          'https://github.com/Obada-Fa/NexusLink/releases/tag/v1.0.1+3');
+      expect(update.releasePageUrl,
+          'https://github.com/Obada-Fa/NexusLink/releases/tag/v1.0.1+3');
+    });
+
+    test('releasePageUrl falls back to latest when html_url empty', () {
+      final update = releaseUpdateFromJson({
+        'tag_name': 'v1.0.0+1',
+        'html_url': '',
+        'assets': [
+          {
+            'name': 'app.apk',
+            'browser_download_url': 'https://example.com/app.apk',
+            'size': 1,
+          },
+        ],
+      });
+      expect(update, isNotNull);
+      expect(update!.releasePageUrl, kReleasesLatestUrl);
     });
 
     test('returns null when no apk asset exists', () {
