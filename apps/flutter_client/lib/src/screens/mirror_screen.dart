@@ -228,19 +228,33 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       session = hit.first;
     } else {
       final media = MediaQuery.of(context);
+      final padding = media.padding;
+      var w = media.size.width;
+      var h = media.size.height -
+          padding.top -
+          padding.bottom -
+          kToolbarHeight;
+      if (h < 200) h = media.size.height;
+      // Phone-OS virtual monitors are portrait; the host letterboxes if you
+      // rotate. Sending landscape here is what produced a strip at the top.
+      if (w > h) {
+        final tmp = w;
+        w = h;
+        h = tmp;
+      }
       final created = await client.requestMap(
         'appSession.create',
         {
           'appId': widget.target.sessionAppId,
-          'width': media.size.width.round(),
-          'height': media.size.height.round(),
+          'width': w.round(),
+          'height': h.round(),
           'dpr': media.devicePixelRatio,
         },
         const Duration(seconds: 20),
       );
       session = AppSessionInfo.fromJson(created);
-      // Give the app a beat to draw its first window before streaming.
-      await Future.delayed(const Duration(milliseconds: 1200));
+      // Host already waited for the first window and fitted it.
+      await Future.delayed(const Duration(milliseconds: 400));
     }
     if (!mounted) return;
     _session = session;

@@ -105,10 +105,17 @@ function MirrorView() {
             session = list.find((s) => s.sessionId === target.sessionId && s.status === 'running') ?? null;
             if (!session) throw new Error('That app session has ended. Launch the app again.');
           } else {
+            let w = Math.round(window.innerWidth);
+            let h = Math.round(window.innerHeight);
+            if (w > h) {
+              const tmp = w;
+              w = h;
+              h = tmp;
+            }
             session = await client.request('appSession.create', {
               appId: target.virtualAppId,
-              width: Math.round(window.innerWidth),
-              height: Math.round(window.innerHeight),
+              width: w,
+              height: h,
               dpr: window.devicePixelRatio || 1,
             }, 20000) as {
               sessionId: string;
@@ -127,7 +134,7 @@ function MirrorView() {
           setSessionId(session.sessionId);
 
           // Give the app a beat to draw its first window before streaming.
-          if (target.virtualAppId) await new Promise((r) => setTimeout(r, 1200));
+          if (target.virtualAppId) await new Promise((r) => setTimeout(r, 400));
 
           const cap = (await client.request('screen.startCapture', {
             quality: 'medium',
