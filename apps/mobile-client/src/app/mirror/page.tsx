@@ -61,6 +61,8 @@ function MirrorView() {
   const frameCountRef = useRef(0);
   const startedRef = useRef(false);
   const kbRef = useRef<HTMLInputElement | null>(null);
+  const kbSyncedRef = useRef('');
+  const kbComposingRef = useRef(false);
 
   useEffect(() => {
     setTarget(parseTarget());
@@ -115,11 +117,12 @@ function MirrorView() {
         if (windowId) {
           setPhase('adopting');
           windowIdRef.current = windowId;
-          await client.request('window.adopt', {
+          const adopt = (await client.request('window.adopt', {
             windowId,
             viewportW: Math.round(window.innerWidth),
             viewportH: Math.round(window.innerHeight),
-          });
+          })) as { region?: HostRegion };
+          if (adopt.region) setRegion(adopt.region);
           captureParams = { ...captureParams, windowId };
         }
         if (cancelled) return;
@@ -212,7 +215,7 @@ function MirrorView() {
     return () => clearInterval(t);
   }, [phase]);
 
-  // ---- phone keyboard → host ---------------------------------------------------
+  // ---- phone keyboard → host (IME compose / glide friendly) ----------------
   const sendSpecialKey = useCallback(
     (key: string) => {
       client?.request('input.keyEvent', { key }).catch(() => {});
@@ -220,15 +223,45 @@ function MirrorView() {
     [client],
   );
 
+  const syncKbDiff = useCallback(
+    (newValue: string) => {
+      if (!client) return;
+      const oldValue = kbSyncedRef.current;
+      if (newValue === oldValue) return;
+      let common = 0;
+      const max = Math.min(oldValue.length, newValue.length);
+      while (common < max && oldValue[common] === newValue[common]) common++;
+      for (let i = 0; i < oldValue.length - common; i++) {
+        client.request('input.keyEvent', { key: 'BackSpace' }).catch(() => {});
+      }
+      const insert = newValue.slice(common);
+      if (insert) {
+        client.request('input.typeText', { text: insert }).catch(() => {});
+      }
+      kbSyncedRef.current = newValue;
+      if (newValue.length > 200 && kbRef.current) {
+        kbSyncedRef.current = '';
+        kbRef.current.value = '';
+      }
+    },
+    [client],
+  );
+
   const onKbInput = useCallback(() => {
     const el = kbRef.current;
-    if (!el || !client) return;
-    const text = el.value;
-    if (text) {
-      client.request('input.typeText', { text }).catch(() => {});
-      el.value = '';
-    }
-  }, [client]);
+    if (!el || kbComposingRef.current) return;
+    syncKbDiff(el.value);
+  }, [syncKbDiff]);
+
+  const onKbCompositionStart = useCallback(() => {
+    kbComposingRef.current = true;
+  }, []);
+
+  const onKbCompositionEnd = useCallback(() => {
+    kbComposingRef.current = false;
+    const el = kbRef.current;
+    if (el) syncKbDiff(el.value);
+  }, [syncKbDiff]);
 
   const onKbKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -243,7 +276,12 @@ function MirrorView() {
   );
 
   useEffect(() => {
-    if (kbOpen) kbRef.current?.focus();
+    if (kbOpen) {
+      kbSyncedRef.current = '';
+      kbComposingRef.current = false;
+      if (kbRef.current) kbRef.current.value = '';
+      kbRef.current?.focus();
+    }
   }, [kbOpen]);
 
   const title = target?.title || (target?.windowId || target?.appId ? 'App' : 'Desktop');
@@ -310,13 +348,30 @@ function MirrorView() {
           <input
             ref={kbRef}
             style={styles.kbInput}
-            placeholder="Type here — sent to the PC"
+            placeholder="Type — suggestions & glide OK"
             onInput={onKbInput}
+            onCompositionStart={onKbCompositionStart}
+            onCompositionEnd={onKbCompositionEnd}
             onKeyDown={onKbKeyDown}
-            autoCapitalize="none"
-            autoCorrect="off"
+            autoCapitalize="sentences"
+            autoCorrect="on"
+            autoComplete="on"
+            spellCheck
           />
-          <button style={styles.kbKey} onClick={() => sendSpecialKey('BackSpace')}>⌫</button>
+          <button
+            style={styles.kbKey}
+            onClick={() => {
+              const el = kbRef.current;
+              if (el && el.value.length > 0) {
+                el.value = el.value.slice(0, -1);
+                syncKbDiff(el.value);
+              } else {
+                sendSpecialKey('BackSpace');
+              }
+            }}
+          >
+            ⌫
+          </button>
           <button style={styles.kbKey} onClick={() => sendSpecialKey('Return')}>⏎</button>
           <button style={styles.kbKey} onClick={() => sendSpecialKey('Escape')}>Esc</button>
         </div>

@@ -12,24 +12,36 @@ import {
 
 describe('scaleToHost', () => {
   it('scales with matching aspect ratio (no letterbox)', () => {
-    const result = scaleToHost(50, 50, 100, 100, 1920, 1080);
+    // 16:9 view and host → no bars
+    const result = scaleToHost(960, 540, 1920, 1080, 1920, 1080);
     expect(result.x).toBe(960);
     expect(result.y).toBe(540);
   });
 
-  it('handles wider view than host (letterbox top/bottom)', () => {
-    const result = scaleToHost(100, 50, 200, 100, 1920, 1080);
-    expect(result.x).toBe(960);
-    expect(result.y).toBeGreaterThan(0);
-    expect(result.y).toBeLessThan(1080);
+  it('handles wider view than host (letterbox left/right)', () => {
+    // view 200x100 (aspect 2) vs host 16:9 → fit height, side bars
+    const center = scaleToHost(100, 50, 200, 100, 1920, 1080);
+    expect(center.x).toBe(960);
+    expect(center.y).toBe(540);
+
+    const leftEdge = scaleToHost(11.11, 50, 200, 100, 1920, 1080);
+    expect(leftEdge.x).toBe(0);
+    expect(leftEdge.y).toBe(540);
   });
 
-  it('handles taller view than host (letterbox left/right)', () => {
-    const result = scaleToHost(50, 100, 100, 200, 1920, 1080);
-    expect(result.x).toBeGreaterThan(0);
-    expect(result.x).toBeLessThan(1920);
-    expect(result.y).toBeGreaterThan(0);
-    expect(result.y).toBeLessThan(1080);
+  it('handles taller view than host (letterbox top/bottom)', () => {
+    // portrait phone-like view vs landscape host → fit width, top/bottom bars
+    const center = scaleToHost(50, 100, 100, 200, 1920, 1080);
+    expect(center.x).toBe(960);
+    expect(center.y).toBe(540);
+
+    // Top of the contained image → host y=0 (not mid-screen)
+    const topOfContent = scaleToHost(50, 71.875, 100, 200, 1920, 1080);
+    expect(topOfContent.y).toBe(0);
+
+    // Bottom of the contained image → host y=1080
+    const bottomOfContent = scaleToHost(50, 128.125, 100, 200, 1920, 1080);
+    expect(bottomOfContent.y).toBe(1080);
   });
 
   it('clamps output to host bounds', () => {

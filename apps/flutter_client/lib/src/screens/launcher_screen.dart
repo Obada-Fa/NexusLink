@@ -8,10 +8,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../rpc/models.dart';
 import '../state/connection.dart';
 import '../state/launcher.dart';
+import '../shell/native_registry.dart';
 import '../widgets/app_icon.dart';
-import 'files_screen.dart';
+import '../widgets/open_apps_bar.dart';
 import 'mirror_screen.dart';
-import 'system_screen.dart';
 
 class LauncherScreen extends ConsumerStatefulWidget {
   const LauncherScreen({super.key});
@@ -23,27 +23,29 @@ class LauncherScreen extends ConsumerStatefulWidget {
 class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   String _search = '';
 
-  void _openWindow(WindowInfo w, List<AppInfo> apps) {
-    Navigator.of(context).push(MaterialPageRoute(
+  Future<void> _openWindow(WindowInfo w, List<AppInfo> apps) async {
+    await Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => MirrorScreen(
         target: MirrorTarget(windowId: w.windowId, title: bestWindowName(w, apps)),
       ),
     ));
+    if (mounted) ref.read(windowsProvider.notifier).refresh();
   }
 
-  void _launchApp(AppInfo a, List<WindowInfo> windows) {
+  Future<void> _launchApp(AppInfo a, List<WindowInfo> windows) async {
     // Already running → jump into its window instead of launching a second copy.
     for (final w in windows) {
       if (windowMatchesApp(w, a)) {
-        _openWindow(w, ref.read(appsProvider).value ?? []);
+        await _openWindow(w, ref.read(appsProvider).value ?? []);
         return;
       }
     }
-    Navigator.of(context).push(MaterialPageRoute(
+    await Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => MirrorScreen(
         target: MirrorTarget(appId: a.appId, wmClass: a.wmClass, title: a.name),
       ),
     ));
+    if (mounted) ref.read(windowsProvider.notifier).refresh();
   }
 
   @override
@@ -78,7 +80,12 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
                 ],
               ),
             ),
-            if (windows.isNotEmpty) _taskbar(windows, apps),
+            if (windows.isNotEmpty)
+              OpenAppsBar(
+                windows: windows,
+                apps: apps,
+                onTap: (w) => _openWindow(w, apps),
+              ),
             _dock(context),
           ],
         ),
@@ -89,6 +96,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   Widget _header(BuildContext context) {
     final host = ref.watch(connectionProvider).hostUrl ?? '';
     final label = Uri.tryParse(host)?.host ?? 'PC';
+    final windowsAsync = ref.watch(windowsProvider);
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 12, 10),
       child: Row(
@@ -99,6 +107,12 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
               child: Text(label,
                   style: const TextStyle(
                       fontSize: 13, fontWeight: FontWeight.w500))),
+          if (windowsAsync.hasError)
+            IconButton(
+              tooltip: 'Retry window list',
+              icon: const Icon(Icons.refresh, size: 18, color: Colors.orangeAccent),
+              onPressed: () => ref.read(windowsProvider.notifier).refresh(),
+            ),
           IconButton(
             icon: const Icon(Icons.power_settings_new, size: 18),
             onPressed: () {
@@ -120,58 +134,6 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
                 fontWeight: FontWeight.w600,
                 color: Colors.white.withValues(alpha: 0.4))),
       );
-
-  /// Windows-style taskbar of everything open on the PC: always visible above
-  /// the dock (survives search + scrolling), one icon per open window, tap to
-  /// jump into that window's mirror. Long-press a tile to see the full title.
-  Widget _taskbar(List<WindowInfo> windows, List<AppInfo> apps) {
-    return Container(
-      margin: const EdgeInsets.fromLTRB(14, 0, 14, 0),
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-      height: 66,
-      decoration: BoxDecoration(
-        color: const Color(0xFF151522),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFF22223A)),
-      ),
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: windows.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 4),
-        itemBuilder: (_, i) {
-          final w = windows[i];
-          final name = bestWindowName(w, apps);
-          return Tooltip(
-            message: '$name — ${w.title}',
-            triggerMode: TooltipTriggerMode.longPress,
-            child: InkWell(
-              onTap: () => _openWindow(w, apps),
-              borderRadius: BorderRadius.circular(10),
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    AppIconTile(icon: w.icon, name: name, size: 34),
-                    const SizedBox(height: 3),
-                    Container(
-                      width: 14,
-                      height: 3,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF4ADE80),
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
 
   Widget _appsHeader() {
     return Padding(
@@ -250,13 +212,6 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   }
 
   Widget _dock(BuildContext context) {
-    void push(Widget screen) => Navigator.of(context)
-        .push(MaterialPageRoute(builder: (_) => screen));
-    final items = <(IconData, String, VoidCallback?)>[
-      (Icons.desktop_windows, 'Desktop', () => _openDesktop(context)),
-      (Icons.folder, 'Files', () => push(const FilesScreen())),
-      (Icons.memory, 'System', () => push(const SystemScreen())),
-    ];
     return Container(
       margin: const EdgeInsets.fromLTRB(14, 4, 14, 8),
       padding: const EdgeInsets.symmetric(vertical: 8),
@@ -267,38 +222,38 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: items
-            .map((it) => InkWell(
-                  onTap: it.$3,
-                  borderRadius: BorderRadius.circular(10),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 10, vertical: 4),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(it.$1,
-                            size: 20,
-                            color: it.$3 == null
-                                ? Colors.white.withValues(alpha: 0.25)
-                                : Colors.white.withValues(alpha: 0.75)),
-                        const SizedBox(height: 3),
-                        Text(it.$2,
-                            style: TextStyle(
-                                fontSize: 9.5,
-                                color: Colors.white.withValues(alpha: 0.4))),
-                      ],
-                    ),
-                  ),
-                ))
-            .toList(),
+        children: kNativeTools.map((tool) {
+          return InkWell(
+            onTap: () async {
+              final screen = screenForNativeTool(tool.id);
+              if (screen == null) return;
+              await Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => screen),
+              );
+              if (context.mounted) {
+                ref.read(windowsProvider.notifier).refresh();
+              }
+            },
+            borderRadius: BorderRadius.circular(10),
+            child: Padding(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(tool.icon,
+                      size: 20, color: Colors.white.withValues(alpha: 0.75)),
+                  const SizedBox(height: 3),
+                  Text(tool.label,
+                      style: TextStyle(
+                          fontSize: 9.5,
+                          color: Colors.white.withValues(alpha: 0.4))),
+                ],
+              ),
+            ),
+          );
+        }).toList(),
       ),
     );
-  }
-
-  void _openDesktop(BuildContext context) {
-    Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => const MirrorScreen(target: MirrorTarget()),
-    ));
   }
 }
