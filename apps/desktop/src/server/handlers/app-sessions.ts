@@ -42,6 +42,8 @@ interface AppSession {
   pulseModule: number | null;
   /** Name of the pulse sink whose .monitor the WebRTC pipeline captures. */
   pulseSink: string | null;
+  /** Keep re-fitting Chrome after it remaps (first paint often undoes size). */
+  fitTimer: ReturnType<typeof setInterval> | null;
 }
 
 const sessions = new Map<string, AppSession>();
@@ -88,6 +90,10 @@ async function waitForX(display: string, timeoutMs = 6000): Promise<void> {
 const OPENBOX_RC = `<?xml version="1.0" encoding="UTF-8"?>
 <openbox_config xmlns="http://openbox.org/3.4/rc">
   <applications>
+    <application type="normal">
+      <decor>no</decor>
+      <maximized>yes</maximized>
+    </application>
     <application class="*">
       <decor>no</decor>
       <maximized>yes</maximized>
@@ -95,6 +101,79 @@ const OPENBOX_RC = `<?xml version="1.0" encoding="UTF-8"?>
   </applications>
 </openbox_config>
 `;
+
+/** Phone-OS sessions are always portrait; landscape rotation letterboxes on the client. */
+export function ensurePortrait(width: number, height: number): { width: number; height: number } {
+  const w = Math.max(1, Math.round(width));
+  const h = Math.max(1, Math.round(height));
+  return w <= h ? { width: w, height: h } : { width: h, height: w };
+}
+
+function listSessionWindowIds(display: string): string[] {
+  const env = { DISPLAY: display };
+  const wm = run(['wmctrl', '-l'], env);
+  if (wm.ok && wm.stdout.trim()) {
+    return wm.stdout.split('\n').flatMap((line) => {
+      const m = line.match(/^(0x[0-9a-f]+)/i);
+      return m ? [m[1]!] : [];
+    });
+  }
+  const xd = run(['xdotool', 'search', '--onlyvisible'], env);
+  return xd.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+}
+
+function fitWindowsOnce(
+  display: string,
+  width: number,
+  height: number,
+  mode: 'maximize' | 'fullscreen',
+): number {
+  const env = { DISPLAY: display };
+  const ids = listSessionWindowIds(display);
+  for (const id of ids) {
+    run(['wmctrl', '-i', '-r', id, '-e', `0,0,0,${width},${height}`], env);
+    run(['xdotool', 'windowmove', id, '0', '0'], env);
+    run(['xdotool', 'windowsize', id, String(width), String(height)], env);
+    if (mode === 'fullscreen') {
+      run(['wmctrl', '-i', '-r', id, '-b', 'add,fullscreen'], env);
+    } else {
+      run(['wmctrl', '-i', '-r', id, '-b', 'add,maximized_vert,maximized_horz'], env);
+    }
+  }
+  return ids.length;
+}
+
+async function fillSessionWindows(
+  display: string,
+  width: number,
+  height: number,
+  mode: 'maximize' | 'fullscreen',
+  timeoutMs = 3000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fitWindowsOnce(display, width, height, mode) > 0) return;
+    await Bun.sleep(150);
+  }
+}
+
+function scheduleRefit(
+  session: AppSession,
+  width: number,
+  height: number,
+  mode: 'maximize' | 'fullscreen',
+): void {
+  if (session.fitTimer) clearInterval(session.fitTimer);
+  const started = Date.now();
+  session.fitTimer = setInterval(() => {
+    if (!sessions.has(session.info.sessionId) || Date.now() - started > 8000) {
+      if (session.fitTimer) clearInterval(session.fitTimer);
+      session.fitTimer = null;
+      return;
+    }
+    fitWindowsOnce(session.info.display, width, height, mode);
+  }, 400);
+}
 
 /**
  * Effective render scale: honor the phone's DPR but clamp total pixels so the
@@ -152,7 +231,8 @@ export async function createAppSession(
   logicalH: number,
   dpr = 1,
 ): Promise<AppSessionInfo> {
-  const geo = computeSessionGeometry(logicalW, logicalH, dpr);
+  const portrait = ensurePortrait(logicalW, logicalH);
+  const geo = computeSessionGeometry(portrait.width, portrait.height, dpr);
   const displayNum = findFreeDisplay();
   const display = `:${displayNum}`;
   const sessionId = crypto.randomUUID();
@@ -195,7 +275,7 @@ export async function createAppSession(
   };
   const session: AppSession = {
     info, displayNum, xvfb, wm: null, app: null, sessionDir,
-    pulseModule: null, pulseSink: null,
+    pulseModule: null, pulseSink: null, fitTimer: null,
   };
   sessions.set(sessionId, session);
 
@@ -243,6 +323,16 @@ export async function createAppSession(
       markExited(sessionId);
     }).catch(() => {});
 
+    const fillMode = profile || chromiumBin ? 'fullscreen' : 'maximize';
+    await fillSessionWindows(
+      display,
+      geo.width,
+      geo.height,
+      fillMode,
+      fillMode === 'fullscreen' ? 5000 : 2500,
+    );
+    scheduleRefit(session, geo.width, geo.height, fillMode);
+
     info.status = 'running';
     broadcast({ type: 'app-session-update', session: { ...info } });
     return { ...info };
@@ -263,6 +353,10 @@ function markExited(sessionId: string): void {
 }
 
 function teardown(session: AppSession): void {
+  if (session.fitTimer) {
+    clearInterval(session.fitTimer);
+    session.fitTimer = null;
+  }
   for (const proc of [session.app, session.wm, session.xvfb]) {
     try {
       proc?.kill();

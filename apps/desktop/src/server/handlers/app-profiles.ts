@@ -109,16 +109,45 @@ export function resolveChromiumBin(appId: string, exec?: string): string | null 
 }
 
 /**
+ * Desktop Chrome will not create a browser window narrower than ~500 CSS px,
+ * so a phone-logical width (360–430) with DSF=2 can never maximize. Drop DSF
+ * just enough that the DIP width stays at least this wide, keeping the
+ * framebuffer (physical pixels) portrait and full-phone.
+ */
+export const CHROME_MIN_DIP_WIDTH = 560;
+
+export function chromiumLayout(ctx: LaunchContext): { dsf: number; dipW: number; dipH: number } {
+  const wantDsf = Math.max(1, ctx.dpr || 1);
+  let dipW = Math.max(1, Math.round(ctx.width / wantDsf));
+  let dsf = wantDsf;
+  if (dipW < CHROME_MIN_DIP_WIDTH) {
+    dipW = Math.min(CHROME_MIN_DIP_WIDTH, ctx.width);
+    dsf = ctx.width / dipW;
+    if (dsf < 1) {
+      dsf = 1;
+      dipW = ctx.width;
+    }
+  }
+  const dipH = Math.max(1, Math.round(ctx.height / dsf));
+  return { dsf: Math.round(dsf * 100) / 100, dipW, dipH };
+}
+
+/**
  * Chromium in "phone browser" trim: isolated profile (so an already-running
- * desktop Brave/Chrome is not reused), mobile UA, touch events, scale matched
- * to the phone. Shared by the built-in Browser tile and .desktop browsers.
+ * desktop Brave/Chrome is not reused), mobile UA, window sized to the
+ * portrait framebuffer, fullscreen so the desktop min-width cannot letterbox
+ * a landscape strip at the top of the virtual monitor.
  */
 export function buildChromiumArgv(bin: string, ctx: LaunchContext): string[] {
+  const { dsf, dipW, dipH } = chromiumLayout(ctx);
   return [
     bin,
     `--user-data-dir=${ctx.sessionDir}/chrome-profile`,
     `--user-agent=${MOBILE_UA}`,
-    `--force-device-scale-factor=${ctx.dpr.toFixed(2)}`,
+    `--force-device-scale-factor=${dsf.toFixed(2)}`,
+    `--window-size=${dipW},${dipH}`,
+    '--window-position=0,0',
+    '--start-fullscreen',
     '--touch-events=enabled',
     '--no-first-run',
     '--no-default-browser-check',
@@ -127,8 +156,6 @@ export function buildChromiumArgv(bin: string, ctx: LaunchContext): string[] {
     '--disable-dev-shm-usage',
     '--ozone-platform=x11',
     '--disable-gpu',
-    '--start-maximized',
-    '--window-position=0,0',
     'https://www.google.com',
   ];
 }

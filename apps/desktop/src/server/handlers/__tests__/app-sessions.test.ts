@@ -10,9 +10,11 @@ import {
   getSessionDisplay,
   listAppSessions,
   closeAppSession,
+  ensurePortrait,
 } from '../app-sessions';
 import { startCapture, stopCapture, FRAME_MAGIC } from '../capture';
 import { typeText } from '../input';
+import { findChromeBin } from '../app-profiles';
 
 const hasStack =
   existsSync('/usr/bin/Xvfb') &&
@@ -40,6 +42,16 @@ describe('computeSessionGeometry', () => {
     const g = computeSessionGeometry(393, 851, 2.625);
     expect(g.width % 2).toBe(0);
     expect(g.height % 2).toBe(0);
+  });
+});
+
+describe('ensurePortrait', () => {
+  test('leaves portrait sizes alone', () => {
+    expect(ensurePortrait(390, 844)).toEqual({ width: 390, height: 844 });
+  });
+
+  test('swaps landscape so the virtual monitor is phone-shaped', () => {
+    expect(ensurePortrait(844, 390)).toEqual({ width: 390, height: 844 });
   });
 });
 
@@ -97,6 +109,61 @@ describe.if(hasStack)('app session integration (Xvfb + xterm)', () => {
         const closed = closeAppSession(info.sessionId);
         expect(closed.ok).toBe(true);
         expect(getSessionDisplay(info.sessionId)).toBeNull();
+      }
+    },
+    30_000,
+  );
+});
+
+const hasChrome = hasStack && !!findChromeBin() && existsSync('/usr/bin/xwininfo');
+
+function windowGeom(display: string, windowId: string): { width: number; height: number } | null {
+  const out = Bun.spawnSync(['xwininfo', '-id', windowId], {
+    env: { ...process.env, DISPLAY: display },
+    stderr: 'ignore',
+  });
+  const text = out.stdout?.toString() ?? '';
+  const w = text.match(/Width:\s*(\d+)/)?.[1];
+  const h = text.match(/Height:\s*(\d+)/)?.[1];
+  if (!w || !h) return null;
+  return { width: parseInt(w, 10), height: parseInt(h, 10) };
+}
+
+function sessionWindowIds(display: string): string[] {
+  const out = Bun.spawnSync(['wmctrl', '-l'], {
+    env: { ...process.env, DISPLAY: display },
+    stderr: 'ignore',
+  });
+  return (out.stdout?.toString() ?? '')
+    .split('\n')
+    .flatMap((line) => {
+      const m = line.match(/^(0x[0-9a-f]+)/i);
+      return m ? [m[1]!] : [];
+    });
+}
+
+describe.if(hasChrome)('chromium fills the portrait virtual monitor', () => {
+  test(
+    'Chrome window covers the Xvfb (not a landscape strip on black)',
+    async () => {
+      const info = await createAppSession('nexus.chrome-mobile', 390, 844, 2);
+      try {
+        expect(info.width).toBeLessThan(info.height);
+        const deadline = Date.now() + 12_000;
+        let best = { width: 0, height: 0 };
+        while (Date.now() < deadline) {
+          for (const id of sessionWindowIds(info.display)) {
+            const g = windowGeom(info.display, id);
+            if (g && g.width * g.height > best.width * best.height) best = g;
+          }
+          if (best.height >= info.height * 0.85 && best.width >= info.width * 0.85) break;
+          await Bun.sleep(250);
+        }
+        expect(best.width).toBeGreaterThanOrEqual(Math.round(info.width * 0.85));
+        expect(best.height).toBeGreaterThanOrEqual(Math.round(info.height * 0.85));
+        expect(best.height).toBeGreaterThan(best.width);
+      } finally {
+        closeAppSession(info.sessionId);
       }
     },
     30_000,
