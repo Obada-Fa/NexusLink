@@ -7,7 +7,7 @@ import { validateToken, generateToken, handleSessionPair, validateSessionTOTP, i
 import { setSend as setSignalingSend } from './handlers/signaling';
 import { mouseMove, mouseClick, mouseScroll, keyEvent, typeText, buttonDown, buttonUp, mouseMoveAbs } from './handlers/input';
 import { setSend as setCaptureSend, startCapture, stopCapture, stopCapturesForSocket, getScreenMetadata } from './handlers/capture';
-import { listWindows, listApps, launchApp, adoptWindow, releaseWindow, activateWindow, getWindowGeometry } from './handlers/windows';
+import { listWindows, listApps, launchApp, adoptWindow, releaseWindow, activateWindow, getWindowGeometry, getAdoptedCaptureRegion } from './handlers/windows';
 import { serveStatic, staticAvailable } from './static-server';
 import { printLaunchBanner } from './launch-banner';
 import { startSidecarReader } from './sidecar-reader';
@@ -165,16 +165,18 @@ export async function startRpcServer(port = 45678) {
         result = await launchApp(params.appId as string);
         break;
       case 'screen.startCapture': {
-        // Per-window capture: resolve the window's current on-screen rect, grab
-        // only that region, and keep tracking the window if it moves.
+        // Per-window capture: prefer the phone-aspect adopt crop so the stream
+        // matches the phone (no letterbox). Fall back to the raw window rect.
         const windowId = params.windowId as string | undefined;
-        const region = windowId ? getWindowGeometry(windowId) ?? undefined : undefined;
+        const region = windowId
+          ? (getAdoptedCaptureRegion(windowId) ?? getWindowGeometry(windowId) ?? undefined)
+          : undefined;
         result = startCapture(
           (params.quality as 'low' | 'medium' | 'high') ?? 'medium',
           (params.fps as number) ?? 12,
           ws,
           region,
-          windowId ? () => getWindowGeometry(windowId) : undefined,
+          windowId ? () => getAdoptedCaptureRegion(windowId) ?? getWindowGeometry(windowId) : undefined,
         );
         break;
       }
