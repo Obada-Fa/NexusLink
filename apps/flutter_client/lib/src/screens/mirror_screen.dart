@@ -132,11 +132,17 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         setState(() => _phase = MirrorPhase.adopting);
         _windowId = windowId;
         final media = MediaQuery.of(context);
-        await client.request('window.adopt', {
+        // Use adopt's returned region immediately so touch mapping is correct
+        // even before the first capture frame / stream-region push.
+        final adopt = await client.request('window.adopt', {
           'windowId': windowId,
           'viewportW': media.size.width.round(),
           'viewportH': media.size.height.round(),
-        });
+        }) as Map<String, dynamic>;
+        if (adopt['region'] != null) {
+          _setRegion(
+              CaptureRegion.fromJson(adopt['region'] as Map<String, dynamic>));
+        }
         params['windowId'] = windowId;
       }
 
