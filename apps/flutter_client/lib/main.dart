@@ -8,6 +8,7 @@ import 'src/discovery/mdns_discovery.dart';
 import 'src/state/connection.dart';
 import 'src/state/last_host.dart';
 import 'src/screens/launcher_screen.dart';
+import 'src/widgets/update_banner.dart';
 
 void main() {
   runApp(const ProviderScope(child: NexusLinkApp()));
@@ -221,6 +222,8 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                       : () => _connect(_urlController.text),
                   child: const Text('Connect'),
                 ),
+                const SizedBox(height: 24),
+                const UpdateBanner(),
               ],
             ),
           ),

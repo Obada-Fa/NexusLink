@@ -76,6 +76,9 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       // while streaming so a pending long-press fires even without new frames.
       _engine.tick(_nowMs);
     })..start();
+    // Hide system bars so the stage aspect matches the phone (no letterbox
+    // from status/nav chrome skewing adopt).
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     WidgetsBinding.instance.addPostFrameCallback((_) => _start());
   }
 
@@ -131,12 +134,17 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       if (windowId != null) {
         setState(() => _phase = MirrorPhase.adopting);
         _windowId = windowId;
+        // Immersive full-bleed stage: adopt to the phone's real pixel size so
+        // the host capture aspect matches what we paint (no AppBar skew).
         final media = MediaQuery.of(context);
-        await client.request('window.adopt', {
+        final adopt = await client.request('window.adopt', {
           'windowId': windowId,
           'viewportW': media.size.width.round(),
           'viewportH': media.size.height.round(),
-        });
+        }) as Map<String, dynamic>;
+        if (adopt['region'] != null) {
+          _setRegion(CaptureRegion.fromJson(adopt['region'] as Map<String, dynamic>));
+        }
         params['windowId'] = windowId;
       }
 
@@ -191,6 +199,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     _fpsTimer?.cancel();
     _kbController.dispose();
     _kbFocus.dispose();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     final client = _client;
     final id = _streamId;
     final win = _windowId;
@@ -297,10 +306,15 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         (widget.target.windowId != null || widget.target.appId != null
             ? 'App'
             : 'Desktop');
+    // Immersive: AppBar overlays the stream so adopt uses the full stage
+    // aspect (no letterbox from chrome stealing height).
     return Scaffold(
       backgroundColor: Colors.black,
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0A0A0F),
+        backgroundColor: Colors.black.withValues(alpha: 0.45),
+        elevation: 0,
+        scrolledUnderElevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.home_outlined),
           onPressed: () => Navigator.of(context).maybePop(),
@@ -329,10 +343,12 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           ),
         ],
       ),
-      body: Column(
+      body: Stack(
+        fit: StackFit.expand,
         children: [
-          Expanded(child: _stage()),
-          if (_keyboardOpen) _keyboardBar(),
+          _stage(),
+          if (_keyboardOpen)
+            Positioned(left: 0, right: 0, bottom: 0, child: _keyboardBar()),
         ],
       ),
     );
@@ -348,15 +364,21 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
             onPointerMove: _onPointerMove,
             onPointerUp: (e) => _onPointerUp(e.pointer),
             onPointerCancel: (e) => _onPointerUp(e.pointer),
-            child: Container(
+            child: ColoredBox(
               color: Colors.black,
-              width: double.infinity,
-              height: double.infinity,
-              alignment: Alignment.center,
               child: _frame == null
-                  ? const CircularProgressIndicator()
-                  : Image.memory(_frame!,
-                      gaplessPlayback: true, fit: BoxFit.contain),
+                  ? const Center(child: CircularProgressIndicator())
+                  : Image.memory(
+                      _frame!,
+                      gaplessPlayback: true,
+                      // Contain never stretches. With phone-aspect capture the
+                      // frame fills edge-to-edge (no bars); residual mismatch
+                      // letterboxes instead of distorting.
+                      fit: BoxFit.contain,
+                      width: constraints.maxWidth,
+                      height: constraints.maxHeight,
+                      alignment: Alignment.center,
+                    ),
             ),
           );
         });
