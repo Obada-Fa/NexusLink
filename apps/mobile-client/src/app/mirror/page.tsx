@@ -21,6 +21,10 @@ interface MirrorTarget {
   appId?: string;
   wmClass?: string;
   title?: string;
+  /** Launch this app into a NEW virtual session sized to the phone. */
+  virtualAppId?: string;
+  /** Re-attach to an existing virtual session. */
+  sessionId?: string;
 }
 
 /** "org.gnome.Calculator" → "orggnomecalculator" — dashes/dots vary in the wild. */
@@ -36,6 +40,8 @@ function parseTarget(): MirrorTarget {
     appId: p.get('app') ?? undefined,
     wmClass: p.get('cls') ?? undefined,
     title: p.get('title') ?? undefined,
+    virtualAppId: p.get('vapp') ?? undefined,
+    sessionId: p.get('s') ?? undefined,
   };
 }
 
@@ -55,6 +61,8 @@ function MirrorView() {
 
   const streamIdRef = useRef<string | null>(null);
   const windowIdRef = useRef<string | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const unsubRef = useRef<(() => void) | null>(null);
@@ -75,6 +83,85 @@ function MirrorView() {
     const begin = async () => {
       try {
         let windowId = target.windowId ?? null;
+
+        // Virtual session flow: the app runs on its own headless display sized
+        // EXACTLY like this phone — nothing moves on the PC's real desktop and
+        // the stream is the full surface, 1:1. No adopt, no cropping possible.
+        if (target.virtualAppId || target.sessionId) {
+          setPhase('launching');
+          let session: {
+            sessionId: string;
+            width: number;
+            height: number;
+            status: string;
+          } | null = null;
+          if (target.sessionId) {
+            const list = (await client.request('appSession.list')) as Array<{
+              sessionId: string;
+              width: number;
+              height: number;
+              status: string;
+            }>;
+            session = list.find((s) => s.sessionId === target.sessionId && s.status === 'running') ?? null;
+            if (!session) throw new Error('That app session has ended. Launch the app again.');
+          } else {
+            session = (await client.request('appSession.create', {
+              appId: target.virtualAppId,
+              width: Math.round(window.innerWidth),
+              height: Math.round(window.innerHeight),
+              dpr: window.devicePixelRatio || 1,
+            }, 20000)) as { sessionId: string; width: number; height: number; status: string };
+          }
+          if (cancelled) return;
+          sessionIdRef.current = session.sessionId;
+          setSessionId(session.sessionId);
+
+          // Give the app a beat to draw its first window before streaming.
+          if (target.virtualAppId) await new Promise((r) => setTimeout(r, 1200));
+
+          const cap = (await client.request('screen.startCapture', {
+            quality: 'medium',
+            fps: 24,
+            sessionId: session.sessionId,
+          })) as { streamId: string; streamKey: number; region?: HostRegion };
+          if (cancelled) {
+            void client.request('screen.stopCapture', { streamId: cap.streamId }).catch(() => {});
+            return;
+          }
+          streamIdRef.current = cap.streamId;
+          setRegion(cap.region ?? { x: 0, y: 0, width: session.width, height: session.height });
+
+          let lastUrl: string | null = null;
+          const unsubFrames = client.subscribeBinary((buf: ArrayBuffer) => {
+            if (buf.byteLength <= FRAME_HEADER_BYTES) return;
+            const view = new DataView(buf);
+            if (view.getUint32(0, true) !== FRAME_MAGIC) return;
+            if (view.getUint32(4, true) !== cap.streamKey) return;
+            frameCountRef.current++;
+            if (imgRef.current) {
+              const url = URL.createObjectURL(
+                new Blob([new Uint8Array(buf, FRAME_HEADER_BYTES)], { type: 'image/jpeg' }),
+              );
+              imgRef.current.src = url;
+              if (lastUrl) URL.revokeObjectURL(lastUrl);
+              lastUrl = url;
+            }
+          });
+          // If the app inside the session exits, bounce back to the launcher.
+          const unsubSession = client.subscribe('app-session-update', (msg: unknown) => {
+            const update = msg as { session?: { sessionId: string; status: string } };
+            if (update.session?.sessionId === sessionIdRef.current && update.session.status === 'exited') {
+              setErrorMsg('The app has exited.');
+              setPhase('error');
+            }
+          });
+          unsubRef.current = () => {
+            unsubFrames();
+            unsubSession();
+          };
+          setPhase('streaming');
+          return;
+        }
 
         // Launch flow: start the app on the PC, then wait for its window.
         if (!windowId && target.appId) {
@@ -197,10 +284,22 @@ function MirrorView() {
 
   useEffect(() => () => teardown(false), [teardown]);
 
+  // Home keeps the virtual session alive on the PC (like backgrounding an app
+  // on a phone); the launcher lists it for one-tap re-attach.
   const goHome = useCallback(() => {
     teardown(true);
     router.push('/');
   }, [teardown, router]);
+
+  // Explicit close = quit the app: tear the whole virtual session down.
+  const closeSession = useCallback(() => {
+    teardown(false);
+    const sid = sessionIdRef.current;
+    if (sid && client) {
+      client.request('appSession.close', { sessionId: sid }).catch(() => {});
+    }
+    router.push('/');
+  }, [teardown, client, router]);
 
   // ---- FPS HUD ---------------------------------------------------------------
   useEffect(() => {
@@ -215,7 +314,8 @@ function MirrorView() {
   // ---- phone keyboard → host ---------------------------------------------------
   const sendSpecialKey = useCallback(
     (key: string) => {
-      client?.request('input.keyEvent', { key }).catch(() => {});
+      const sid = sessionIdRef.current;
+      client?.request('input.keyEvent', { key, ...(sid ? { sessionId: sid } : {}) }).catch(() => {});
     },
     [client],
   );
@@ -225,7 +325,8 @@ function MirrorView() {
     if (!el || !client) return;
     const text = el.value;
     if (text) {
-      client.request('input.typeText', { text }).catch(() => {});
+      const sid = sessionIdRef.current;
+      client.request('input.typeText', { text, ...(sid ? { sessionId: sid } : {}) }).catch(() => {});
       el.value = '';
     }
   }, [client]);
@@ -265,7 +366,19 @@ function MirrorView() {
         >
           {'⌨'}
         </button>
-        {phase === 'streaming' && <GestureOverlay viewportRef={viewportRef} region={region} showHud={false} />}
+        {sessionId && (
+          <button onClick={closeSession} style={styles.barBtn} aria-label="Close app">
+            {'✕'}
+          </button>
+        )}
+        {phase === 'streaming' && (
+          <GestureOverlay
+            viewportRef={viewportRef}
+            region={region}
+            sessionId={sessionId ?? undefined}
+            showHud={false}
+          />
+        )}
       </header>
 
       <div style={styles.stage}>
