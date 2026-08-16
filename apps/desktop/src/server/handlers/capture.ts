@@ -30,6 +30,8 @@ interface CaptureSession {
   /** Re-resolves the tracked window's rect; set for per-window captures. */
   resolveRegion?: () => Region | null;
   watchdog?: ReturnType<typeof setInterval>;
+  /** X display being grabbed (virtual app sessions use their own). */
+  display: string;
 }
 
 /** Binary frame header: u32 magic 'NLF1' | u32 streamKey | f64 timestampMs (LE). */
@@ -165,7 +167,11 @@ function clampRegion(want: Region): Region {
   return { x, y, width, height };
 }
 
-function spawnGrabber(grab: Region, ffArgs: { fps: number; scaleW: number; q: number }) {
+function spawnGrabber(
+  grab: Region,
+  ffArgs: { fps: number; scaleW: number; q: number },
+  display: string = DISPLAY,
+) {
   // Portrait regions are narrow — don't upscale past the source width.
   const outW = Math.min(ffArgs.scaleW, grab.width) & ~1;
   return Bun.spawn(
@@ -175,7 +181,7 @@ function spawnGrabber(grab: Region, ffArgs: { fps: number; scaleW: number; q: nu
       '-f', 'x11grab',
       '-framerate', String(ffArgs.fps),
       '-video_size', `${grab.width}x${grab.height}`,
-      '-i', `${DISPLAY}+${grab.x},${grab.y}`,
+      '-i', `${display}+${grab.x},${grab.y}`,
       '-vf', `scale=${outW}:-2`,
       '-q:v', String(ffArgs.q),
       '-f', 'image2pipe',
@@ -185,7 +191,7 @@ function spawnGrabber(grab: Region, ffArgs: { fps: number; scaleW: number; q: nu
     {
       stdout: 'pipe',
       stderr: 'ignore',
-      env: { ...process.env, DISPLAY },
+      env: { ...process.env, DISPLAY: display },
     } as unknown as SpawnOpts,
   );
 }
@@ -205,6 +211,7 @@ export function startCapture(
   ws: WebSocket,
   region?: Region,
   resolveRegion?: () => Region | null,
+  display?: string,
 ): { streamId: string; streamKey: number; region: Region } {
   const id = crypto.randomUUID();
   const key = nextStreamKey++;
@@ -212,14 +219,27 @@ export function startCapture(
   const clampedFps = Math.max(1, Math.min(30, Math.round(fps || 24)));
   const ffArgs = { fps: clampedFps, scaleW, q };
 
-  // Region capture: an adopted window's rect, or the primary monitor for the
-  // full-desktop mirror.
-  const want =
-    region && region.width > 16 && region.height > 16 ? region : getPrimaryMonitor();
-  const grab = clampRegion(want);
+  // Virtual app sessions grab their whole (phone-shaped) screen exactly as
+  // given; the physical path clamps against the real desktop geometry.
+  let grab: Region;
+  if (display && region) {
+    grab = {
+      x: region.x,
+      y: region.y,
+      width: region.width & ~1,
+      height: region.height & ~1,
+    };
+  } else {
+    const want =
+      region && region.width > 16 && region.height > 16 ? region : getPrimaryMonitor();
+    grab = clampRegion(want);
+  }
 
-  const proc = spawnGrabber(grab, ffArgs);
-  const session: CaptureSession = { id, key, proc, ws, region: grab, ffArgs, resolveRegion };
+  const proc = spawnGrabber(grab, ffArgs, display);
+  const session: CaptureSession = {
+    id, key, proc, ws, region: grab, ffArgs, resolveRegion,
+    display: display ?? DISPLAY,
+  };
   sessions.set(id, session);
 
   void pumpFrames(session).catch(() => {});
@@ -241,7 +261,7 @@ export function startCapture(
         // already gone
       }
       session.region = next;
-      session.proc = spawnGrabber(next, ffArgs);
+      session.proc = spawnGrabber(next, ffArgs, session.display);
       void pumpFrames(session).catch(() => {});
       if (sendFn && ws.readyState === 1) {
         sendFn(ws, { type: 'stream-region', streamId: id, region: next });
