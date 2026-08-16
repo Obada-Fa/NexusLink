@@ -43,6 +43,9 @@ dependencies:
   elliptic: ^0.3.12
   crypto: ^3.0.7
   shared_preferences: ^2.5.3
+  flutter_webrtc: ^1.6.0
+  xterm: ^4.0.0
+  flutter_markdown_plus: ^1.0.12
 dev_dependencies:
   flutter_test:
     sdk: flutter

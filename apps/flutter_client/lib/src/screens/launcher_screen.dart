@@ -9,9 +9,11 @@ import '../rpc/models.dart';
 import '../state/connection.dart';
 import '../state/launcher.dart';
 import '../widgets/app_icon.dart';
+import 'agent_screen.dart';
 import 'files_screen.dart';
 import 'mirror_screen.dart';
 import 'system_screen.dart';
+import 'terminal_screen.dart';
 
 class LauncherScreen extends ConsumerStatefulWidget {
   const LauncherScreen({super.key});
@@ -31,17 +33,25 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     ));
   }
 
-  void _launchApp(AppInfo a, List<WindowInfo> windows) {
-    // Already running → jump into its window instead of launching a second copy.
-    for (final w in windows) {
-      if (windowMatchesApp(w, a)) {
-        _openWindow(w, ref.read(appsProvider).value ?? []);
+  void _attachSession(AppSessionInfo s) {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => MirrorScreen(
+        target: MirrorTarget(sessionId: s.sessionId, title: s.name),
+      ),
+    ));
+  }
+
+  void _launchApp(AppInfo a, List<AppSessionInfo> sessions) {
+    // Already running in a virtual session → re-attach (like switching apps).
+    for (final s in sessions) {
+      if (s.appId == a.appId) {
+        _attachSession(s);
         return;
       }
     }
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => MirrorScreen(
-        target: MirrorTarget(appId: a.appId, wmClass: a.wmClass, title: a.name),
+        target: MirrorTarget(sessionAppId: a.appId, title: a.name),
       ),
     ));
   }
@@ -50,8 +60,10 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   Widget build(BuildContext context) {
     final windowsAsync = ref.watch(windowsProvider);
     final appsAsync = ref.watch(appsProvider);
+    final sessionsAsync = ref.watch(appSessionsProvider);
     final windows = windowsAsync.value ?? [];
     final apps = appsAsync.value ?? [];
+    final sessions = sessionsAsync.value ?? [];
     final q = _search.trim().toLowerCase();
     final filteredApps = q.isEmpty
         ? apps
@@ -66,6 +78,11 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
               child: ListView(
                 padding: const EdgeInsets.symmetric(horizontal: 14),
                 children: [
+                  if (sessions.isNotEmpty && q.isEmpty) ...[
+                    _sectionTitle('Running on your phone'),
+                    _sessionRow(sessions),
+                    const SizedBox(height: 8),
+                  ],
                   _appsHeader(),
                   if (appsAsync.isLoading)
                     const Padding(
@@ -73,7 +90,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
                       child: Center(child: CircularProgressIndicator()),
                     )
                   else
-                    _appGrid(filteredApps, windows),
+                    _appGrid(filteredApps, windows, sessions),
                   const SizedBox(height: 12),
                 ],
               ),
@@ -173,6 +190,59 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     );
   }
 
+  Widget _sessionRow(List<AppSessionInfo> sessions) {
+    return SizedBox(
+      height: 88,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: sessions.length,
+        separatorBuilder: (_, _) => const SizedBox(width: 10),
+        itemBuilder: (_, i) {
+          final s = sessions[i];
+          return InkWell(
+            onTap: () => _attachSession(s),
+            borderRadius: BorderRadius.circular(14),
+            child: Container(
+              width: 132,
+              padding: const EdgeInsets.fromLTRB(10, 10, 8, 8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF151522),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: const Color(0xFF22223A)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      AppIconTile(icon: s.icon, name: s.name, size: 34),
+                      const Spacer(),
+                      GestureDetector(
+                        onTap: () {
+                          ref
+                              .read(activeClientProvider)
+                              ?.notify('appSession.close',
+                                  {'sessionId': s.sessionId});
+                        },
+                        child: const Icon(Icons.close, size: 14, color: Colors.white38),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(s.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w600)),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Widget _appsHeader() {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
@@ -200,7 +270,8 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     );
   }
 
-  Widget _appGrid(List<AppInfo> apps, List<WindowInfo> windows) {
+  Widget _appGrid(
+      List<AppInfo> apps, List<WindowInfo> windows, List<AppSessionInfo> sessions) {
     return GridView.builder(
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
@@ -213,9 +284,10 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
       itemCount: apps.length,
       itemBuilder: (_, i) {
         final a = apps[i];
-        final running = windows.any((w) => windowMatchesApp(w, a));
+        final running = sessions.any((s) => s.appId == a.appId) ||
+            windows.any((w) => windowMatchesApp(w, a));
         return InkWell(
-          onTap: () => _launchApp(a, windows),
+          onTap: () => _launchApp(a, sessions),
           borderRadius: BorderRadius.circular(12),
           child: Column(
             children: [
@@ -254,6 +326,8 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
         .push(MaterialPageRoute(builder: (_) => screen));
     final items = <(IconData, String, VoidCallback?)>[
       (Icons.desktop_windows, 'Desktop', () => _openDesktop(context)),
+      (Icons.terminal, 'Term', () => push(const TerminalScreen())),
+      (Icons.auto_awesome, 'Agents', () => push(const AgentScreen())),
       (Icons.folder, 'Files', () => push(const FilesScreen())),
       (Icons.memory, 'System', () => push(const SystemScreen())),
     ];

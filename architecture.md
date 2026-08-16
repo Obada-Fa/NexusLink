@@ -86,6 +86,21 @@ topology below. When the Rust sidecar + WebRTC land, capture/input become backen
 same RPC surface (`screen.*`, `input.*`), and the `rpc` DataChannel tunnels these exact
 messages over WAN — no client changes. `xdotool`/`ffmpeg` remain the X11 fallback.
 
+## 2.3 Shipped: Virtual app sessions (native-feel path)
+
+Tapping an app no longer resizes a real window on the PC. Each launch creates a
+headless `Xvfb` display sized to the phone (`appSession.create`), with openbox
+undecorated+maximized, DPI/scale env, and a Chromium **mobile** profile
+(`--user-agent` Android Chrome, `--force-device-scale-factor`, `--touch-events`).
+Capture and xdotool bind to `DISPLAY=:N` so touch maps 1:1. Home backgrounds the
+session; the launcher lists it under "Running on your phone".
+
+Video still starts as MJPEG-over-WS; `webrtc.start` upgrades to GStreamer
+`webrtcbin` H.264 (+ Opus from a per-session Pulse null-sink) when available.
+Terminals now use a real PTY (`pty-host.py`). AI agents (Claude Code, Cursor CLI,
+demo adapter) speak stream-json on the host and a chat UI on the phone
+(`agent.*` RPC + `agent-event` pushes).
+
 ### 2.2 Shipped: Mobile OS Abstraction, LAN/X11 edition (Module B v1)
 
 The phone home screen is now a real launcher and per-app portrait sessions work end-to-end
