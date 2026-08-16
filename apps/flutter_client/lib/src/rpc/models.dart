@@ -71,6 +71,119 @@ class FileEntry {
       );
 }
 
+/// A phone-shaped virtual display on the PC running one app (Tier 1).
+class AppSessionInfo {
+  final String sessionId;
+  final String appId;
+  final String name;
+  final String? icon;
+  final String display;
+  final int width;
+  final int height;
+  final double dpr;
+  final String status; // starting | running | exited
+
+  AppSessionInfo({
+    required this.sessionId,
+    required this.appId,
+    required this.name,
+    this.icon,
+    required this.display,
+    required this.width,
+    required this.height,
+    required this.dpr,
+    required this.status,
+  });
+
+  factory AppSessionInfo.fromJson(Map<String, dynamic> j) => AppSessionInfo(
+        sessionId: j['sessionId'] as String,
+        appId: (j['appId'] as String?) ?? '',
+        name: (j['name'] as String?) ?? 'App',
+        icon: j['icon'] as String?,
+        display: (j['display'] as String?) ?? '',
+        width: (j['width'] as num?)?.toInt() ?? 0,
+        height: (j['height'] as num?)?.toInt() ?? 0,
+        dpr: (j['dpr'] as num?)?.toDouble() ?? 1,
+        status: (j['status'] as String?) ?? 'running',
+      );
+}
+
+/// An AI agent CLI on the PC (Claude Code, Cursor CLI, demo agent).
+class AgentInfo {
+  final String id;
+  final String name;
+  final bool available;
+
+  AgentInfo({required this.id, required this.name, required this.available});
+
+  factory AgentInfo.fromJson(Map<String, dynamic> j) => AgentInfo(
+        id: j['id'] as String,
+        name: (j['name'] as String?) ?? j['id'] as String,
+        available: j['available'] as bool? ?? false,
+      );
+}
+
+class AgentSessionInfo {
+  final String agentSessionId;
+  final String agent;
+  final String cwd;
+  final String title;
+  final bool busy;
+  final String status;
+
+  AgentSessionInfo({
+    required this.agentSessionId,
+    required this.agent,
+    required this.cwd,
+    required this.title,
+    required this.busy,
+    required this.status,
+  });
+
+  factory AgentSessionInfo.fromJson(Map<String, dynamic> j) => AgentSessionInfo(
+        agentSessionId: j['agentSessionId'] as String,
+        agent: (j['agent'] as String?) ?? '',
+        cwd: (j['cwd'] as String?) ?? '',
+        title: (j['title'] as String?) ?? 'Agent',
+        busy: j['busy'] as bool? ?? false,
+        status: (j['status'] as String?) ?? 'running',
+      );
+}
+
+/// Normalized event from the host agent gateway.
+class AgentEvent {
+  final int seq;
+  final int ts;
+  final String kind;
+  final String? text;
+  final String? toolName;
+  final String? toolInput;
+  final String? toolOutput;
+  final String? refId;
+
+  AgentEvent({
+    required this.seq,
+    required this.ts,
+    required this.kind,
+    this.text,
+    this.toolName,
+    this.toolInput,
+    this.toolOutput,
+    this.refId,
+  });
+
+  factory AgentEvent.fromJson(Map<String, dynamic> j) => AgentEvent(
+        seq: (j['seq'] as num?)?.toInt() ?? 0,
+        ts: (j['ts'] as num?)?.toInt() ?? 0,
+        kind: (j['kind'] as String?) ?? 'status',
+        text: j['text'] as String?,
+        toolName: j['toolName'] as String?,
+        toolInput: j['toolInput'] as String?,
+        toolOutput: j['toolOutput'] as String?,
+        refId: j['refId'] as String?,
+      );
+}
+
 class CaptureRegion {
   final int x, y, width, height;
   CaptureRegion(this.x, this.y, this.width, this.height);

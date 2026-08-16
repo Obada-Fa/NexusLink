@@ -1,17 +1,26 @@
 # NexusLink
 
-Remote desktop: host from Tauri desktop, control from mobile PWA. ECDH-paired WebSocket RPC, room-based relay signaling, gesture-engine touch-to-input translation.
+Remote desktop that feels like a phone OS: the PC runs the apps, the phone is the
+screen. Tapping an app opens it in a **phone-shaped virtual display** on the host
+(your real desktop is never resized). Chrome launches with a mobile user-agent so
+sites reflow like native Chrome. Claude Code and Cursor CLI run on the PC and
+show up as a chat UI on the phone.
 
 ## Architecture
 
 ```
-desktop (Tauri+Next.js) ──┐
-                           ├── relay (Bun WS) ──┐
-mobile-client (Next.js PWA)┘                    │
-                                                │
-shared: @nexuslink/rpc-types, gesture-engine, ui-components
-sidecar: Rust JSON-RPC helper
+phone (PWA or Flutter)
+  launcher ── WS RPC :45678 ── PC host (Bun)
+                 │
+                 ├── appSession  → Xvfb + openbox per app (exact phone pixels)
+                 ├── MJPEG WS    → ffmpeg x11grab of that display (always-on)
+                 ├── WebRTC      → GStreamer webrtcbin H.264 + Opus (upgrade)
+                 ├── PTY         → python pty-host.py → xterm on the phone
+                 └── agents      → Claude Code / Cursor CLI stream-json → chat UI
 ```
+
+Control plane is the existing ECDH-paired JSON WebSocket. Video upgrades to
+WebRTC when GStreamer is present; MJPEG stays as the automatic fallback.
 
 ## Install
 
@@ -19,8 +28,13 @@ sidecar: Rust JSON-RPC helper
 bun install
 ```
 
-Requires [Bun](https://bun.sh) >= 1.x. Linux/X11 host needs `ffmpeg` + `xdotool`
-(screen capture + input injection). Rust is only needed for the future Tauri/sidecar WAN path.
+Linux/X11 host needs:
+
+- `ffmpeg`, `xdotool`, `wmctrl`, `xclip` (already used by the LAN path)
+- `xvfb`, `openbox` (per-app virtual displays)
+- `python3` + GStreamer (`gstreamer1.0-tools`, `gstreamer1.0-plugins-{good,bad}`,
+  `gir1.2-gst-plugins-bad-1.0`) for H.264 WebRTC
+- `pulseaudio-utils` for per-session audio sinks
 
 ## Quick Start (LAN) — scan & go
 
@@ -30,9 +44,10 @@ bun run lan          # builds the PWA, then starts the unified host on :45678
 
 The host prints a **QR code** and its LAN URLs (e.g. `http://192.168.2.30:45678`).
 
-- **Phone** (same Wi-Fi): scan the QR → the browser opens and **auto-connects** → tap
-  Mirror Mode → Start. No IP to type.
-- **PC**: open `http://localhost:45678`.
+- **Phone** (same Wi-Fi): scan the QR → the browser opens and **auto-connects**.
+  Tap an app — it opens full-screen on the phone, nothing moves on the PC.
+  The dock has Terminal and Agents (Claude Code / Cursor CLI / demo agent).
+- **PC**: open `http://localhost:45678`. Your desktop stays fully usable.
 
 One port serves the app *and* the control WebSocket. The client derives the host from the
 page it was served from, so there is no address to enter.
@@ -101,17 +116,19 @@ RELAY_PORT=3033 bun run start
 ## Stack
 
 - **Desktop**: Tauri 2.0, Next.js 14, Bun RPC server (port 45678)
-- **Mobile**: Next.js 14, Zustand, xterm.js, PWA manifest
+- **Mobile**: Next.js 14 PWA + Flutter (Riverpod, flutter_webrtc, xterm, markdown)
 - **Relay**: Bun WebSocket server (port 3033)
 - **Packages**: TypeScript types, touch gesture engine, SVG UI components
 - **Sidecar**: Rust (Tokio, Serde) JSON-RPC helper
+- **Host extras**: Xvfb virtual displays, GStreamer webrtcbin, PTY helper, agent gateway
 
 ## Project Layout
 
 ```
 apps/
-  desktop/          Tauri + Next.js host app
+  desktop/          Tauri + Next.js host app (virtual sessions, WebRTC, agents)
   mobile-client/    Next.js PWA client
+  flutter_client/   Flutter Android client
   relay/            Bun WebSocket signaling relay
 packages/
   rpc-types/        Shared TypeScript RPC types
