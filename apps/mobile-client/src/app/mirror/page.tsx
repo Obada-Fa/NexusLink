@@ -115,11 +115,12 @@ function MirrorView() {
         if (windowId) {
           setPhase('adopting');
           windowIdRef.current = windowId;
-          await client.request('window.adopt', {
+          const adopt = (await client.request('window.adopt', {
             windowId,
             viewportW: Math.round(window.innerWidth),
             viewportH: Math.round(window.innerHeight),
-          });
+          })) as { region?: HostRegion };
+          if (adopt.region) setRegion(adopt.region);
           captureParams = { ...captureParams, windowId };
         }
         if (cancelled) return;

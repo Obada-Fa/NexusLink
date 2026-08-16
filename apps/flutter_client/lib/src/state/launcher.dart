@@ -18,7 +18,7 @@ final appsProvider = FutureProvider<List<AppInfo>>((ref) async {
   return raw.map((e) => AppInfo.fromJson(e as Map<String, dynamic>)).toList();
 });
 
-/// Running windows — refreshed every 5s while the launcher is on screen.
+/// Running windows — refreshed while connected (launcher + mirror both watch).
 final windowsProvider =
     NotifierProvider<WindowsNotifier, AsyncValue<List<WindowInfo>>>(
         WindowsNotifier.new);
@@ -37,7 +37,8 @@ class WindowsNotifier extends Notifier<AsyncValue<List<WindowInfo>>> {
     if (client == null) return const AsyncValue.data([]);
     // Kick off the first fetch + polling after this build returns.
     Future.microtask(refresh);
-    _timer ??= Timer.periodic(const Duration(seconds: 5), (_) => refresh());
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(seconds: 3), (_) => refresh());
     return const AsyncValue.loading();
   }
 
@@ -50,7 +51,10 @@ class WindowsNotifier extends Notifier<AsyncValue<List<WindowInfo>>> {
           raw.map((e) => WindowInfo.fromJson(e as Map<String, dynamic>)).toList();
       if (!_disposed) state = AsyncValue.data(list);
     } catch (e, st) {
-      if (!_disposed && state is! AsyncData) state = AsyncValue.error(e, st);
+      // Keep the last good list so the taskbar does not vanish on a blip.
+      if (!_disposed && state is! AsyncData) {
+        state = AsyncValue.error(e, st);
+      }
     }
   }
 }

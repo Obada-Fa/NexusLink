@@ -13,6 +13,8 @@ import '../gestures/gesture_engine.dart';
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
+import '../state/launcher.dart';
+import '../widgets/open_apps_bar.dart';
 
 /// What to show: an existing window (windowId), an app to launch (appId), or
 /// neither → the full desktop (primary monitor).
@@ -303,6 +305,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         (widget.target.windowId != null || widget.target.appId != null
             ? 'App'
             : 'Desktop');
+    final windows = ref.watch(windowsProvider).value ?? [];
+    final apps = ref.watch(appsProvider).value ?? [];
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
@@ -339,6 +343,24 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         children: [
           Expanded(child: _stage()),
           if (_keyboardOpen) _keyboardBar(),
+          if (!_keyboardOpen && windows.isNotEmpty)
+            OpenAppsBar(
+              windows: windows,
+              apps: apps,
+              compact: true,
+              activeWindowId: _windowId,
+              onTap: (w) {
+                if (w.windowId == _windowId) return;
+                Navigator.of(context).pushReplacement(MaterialPageRoute(
+                  builder: (_) => MirrorScreen(
+                    target: MirrorTarget(
+                      windowId: w.windowId,
+                      title: bestWindowName(w, apps),
+                    ),
+                  ),
+                ));
+              },
+            ),
         ],
       ),
     );
