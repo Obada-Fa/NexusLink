@@ -265,7 +265,7 @@ function MirrorView() {
         >
           {'⌨'}
         </button>
-        {phase === 'streaming' && <GestureOverlay viewportRef={viewportRef} region={region} showHud={false} />}
+        {phase === 'streaming' && <GestureOverlay viewportRef={viewportRef} region={region} showHud />}
       </header>
 
       <div style={styles.stage}>

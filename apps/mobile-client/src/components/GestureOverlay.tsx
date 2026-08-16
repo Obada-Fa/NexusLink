@@ -4,7 +4,8 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { GestureEngine, type GestureEvent } from '@nexuslink/gesture-engine';
 import { useConnectionStore } from '@/store/connection';
 
-type PrecisionMode = 'normal' | 'precision';
+/** RustDesk-style input paradigm for the mirror viewport. */
+type InputMode = 'touch' | 'mouse';
 
 export interface HostRegion {
   x: number;
@@ -29,7 +30,7 @@ export default function GestureOverlay({
   const engineRef = useRef<GestureEngine | null>(null);
   const regionRef = useRef<HostRegion | null>(region ?? null);
   regionRef.current = region ?? null;
-  const [precision, setPrecision] = useState<PrecisionMode>('normal');
+  const [inputMode, setInputMode] = useState<InputMode>('touch');
   const [lastGesture, setLastGesture] = useState<string>('');
 
   const handleGesture = useCallback(
@@ -71,8 +72,8 @@ export default function GestureOverlay({
             .request('input.mouseScroll', {
               deltaX: event.deltaX,
               deltaY: event.deltaY,
-              x: event.x + ox,
-              y: event.y + oy,
+              // Mouse mode scrolls at the cursor; touch mode scrolls at fingers.
+              ...(inputMode === 'touch' ? { x: event.x + ox, y: event.y + oy } : {}),
             })
             .catch(() => {});
           break;
@@ -107,7 +108,7 @@ export default function GestureOverlay({
           break;
       }
     },
-    [client, status],
+    [client, status, inputMode],
   );
 
   useEffect(() => {
@@ -115,8 +116,8 @@ export default function GestureOverlay({
     if (!el) return;
 
     const callbacks = { onGesture: handleGesture };
-    // Direct manipulation is the default paradigm: one-finger pan = momentum scroll.
-    const engine = new GestureEngine(el, callbacks, { mode: 'direct' });
+    // RustDesk-style touch mode: one-finger pan = left drag at absolute coords.
+    const engine = new GestureEngine(el, callbacks, { mode: 'touch' });
     engine.attach();
     engineRef.current = engine;
 
@@ -147,13 +148,13 @@ export default function GestureOverlay({
   useEffect(() => {
     const engine = engineRef.current;
     if (!engine) return;
-    // Precision mode switches the engine to relative-cursor control with reduced
-    // sensitivity for fine targeting (architecture.md Module C2).
-    engine.setPrecision(precision === 'precision');
-  }, [precision]);
+    // Touch ↔ Mouse mirrors RustDesk's touchMode toggle.
+    engine.setMode(inputMode === 'touch' ? 'touch' : 'trackpad');
+    engine.setPrecision(false);
+  }, [inputMode]);
 
-  const togglePrecision = useCallback(() => {
-    setPrecision((prev) => (prev === 'normal' ? 'precision' : 'normal'));
+  const toggleInputMode = useCallback(() => {
+    setInputMode((prev) => (prev === 'touch' ? 'mouse' : 'touch'));
   }, []);
 
   if (!showHud) return null;
@@ -161,16 +162,25 @@ export default function GestureOverlay({
   return (
     <>
       <button
-        onClick={togglePrecision}
+        onClick={toggleInputMode}
         style={{
-          ...styles.precisionBtn,
-          background: precision === 'precision' ? '#2a6aff' : 'transparent',
-          color: precision === 'precision' ? '#fff' : '#888',
-          borderColor: precision === 'precision' ? '#2a6aff' : '#333',
+          ...styles.modeBtn,
+          background: inputMode === 'touch' ? '#2a6aff' : 'transparent',
+          color: inputMode === 'touch' ? '#fff' : '#888',
+          borderColor: inputMode === 'touch' ? '#2a6aff' : '#333',
         }}
-        aria-label={`Precision mode: ${precision}`}
+        aria-label={
+          inputMode === 'touch'
+            ? 'Touch mode: tap = click, drag = drag, 2 fingers = scroll'
+            : 'Mouse mode: 1 finger moves the cursor, 2 fingers scroll'
+        }
+        title={
+          inputMode === 'touch'
+            ? 'Touch mode (tap/drag). Switch to Mouse.'
+            : 'Mouse mode (relative cursor). Switch to Touch.'
+        }
       >
-        {precision === 'precision' ? 'Precision: ON' : 'Precision: OFF'}
+        {inputMode === 'touch' ? 'Touch' : 'Mouse'}
       </button>
 
       {lastGesture ? (
@@ -181,7 +191,7 @@ export default function GestureOverlay({
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  precisionBtn: {
+  modeBtn: {
     padding: '4px 10px',
     borderRadius: '4px',
     border: '1px solid',

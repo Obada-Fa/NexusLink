@@ -210,14 +210,14 @@ class ManualScheduler implements FrameScheduler {
 // Engine — direct-manipulation behaviours
 // ---------------------------------------------------------------------------
 
-describe('GestureEngine v2 (direct mode)', () => {
+describe('GestureEngine v2 (touch mode)', () => {
   function setup(scheduler?: FrameScheduler) {
     const { el } = createMockElement();
     const events: GestureEvent[] = [];
     const callbacks: GestureCallbacks = { onGesture: (e) => events.push(e) };
     const now = scheduler ? () => (scheduler as ManualScheduler).now() : undefined;
     const engine = new GestureEngine(el as unknown as HTMLElement, callbacks, {
-      mode: 'direct',
+      mode: 'touch',
       scheduler,
       now,
     });
@@ -226,34 +226,31 @@ describe('GestureEngine v2 (direct mode)', () => {
     return { el, events, engine };
   }
 
-  it('one-finger vertical pan emits mouse-scroll (not mouse-move)', () => {
+  it('one-finger vertical pan emits drag events (not scroll)', () => {
     const { el, events, engine } = setup();
     el.dispatchEvent(new MockTouchEvent('touchstart', [touch(200, 600)]));
     el.dispatchEvent(new MockTouchEvent('touchmove', [touch(200, 540)]));
     el.dispatchEvent(new MockTouchEvent('touchmove', [touch(200, 480)]));
     el.dispatchEvent(new MockTouchEvent('touchend', []));
 
-    const scrolls = events.filter((e) => e.type === 'mouse-scroll');
-    const moves = events.filter((e) => e.type === 'mouse-move');
-    expect(scrolls.length).toBeGreaterThan(0);
-    expect(moves.length).toBe(0);
-    // Vertical pan locks to the vertical axis: no horizontal scroll component.
-    for (const s of scrolls) {
-      if (s.type === 'mouse-scroll') expect(s.deltaX).toBe(0);
-    }
+    expect(events.filter((e) => e.type === 'drag-start')).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'drag-move').length).toBeGreaterThan(0);
+    expect(events.filter((e) => e.type === 'drag-end')).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'mouse-scroll')).toHaveLength(0);
+    expect(events.filter((e) => e.type === 'mouse-move')).toHaveLength(0);
     engine.detach();
   });
 
-  it('produces a momentum fling after a fast flick, cancelled by a new touch', () => {
+  it('produces a momentum fling after a fast two-finger flick, cancelled by a new touch', () => {
     const sched = new ManualScheduler();
     const { el, events, engine } = setup(sched);
 
-    el.dispatchEvent(new MockTouchEvent('touchstart', [touch(200, 600)]));
+    el.dispatchEvent(new MockTouchEvent('touchstart', [touch(100, 600), touch(150, 600)]));
     let y = 600;
     for (let i = 0; i < 5; i++) {
       sched.tick(16);
       y -= 40;
-      el.dispatchEvent(new MockTouchEvent('touchmove', [touch(200, y)]));
+      el.dispatchEvent(new MockTouchEvent('touchmove', [touch(100, y), touch(150, y)]));
     }
     el.dispatchEvent(new MockTouchEvent('touchend', []));
 
@@ -274,16 +271,16 @@ describe('GestureEngine v2 (direct mode)', () => {
     engine.detach();
   });
 
-  it('slow drag below the fling threshold does not start inertia', () => {
+  it('slow two-finger pan below the fling threshold does not start inertia', () => {
     const sched = new ManualScheduler();
     const { el, events, engine } = setup(sched);
 
-    el.dispatchEvent(new MockTouchEvent('touchstart', [touch(200, 600)]));
+    el.dispatchEvent(new MockTouchEvent('touchstart', [touch(100, 600), touch(150, 600)]));
     let y = 600;
     for (let i = 0; i < 4; i++) {
       sched.tick(200); // very slow: ~large dt => low velocity
       y -= 5;
-      el.dispatchEvent(new MockTouchEvent('touchmove', [touch(200, y)]));
+      el.dispatchEvent(new MockTouchEvent('touchmove', [touch(100, y), touch(150, y)]));
     }
     el.dispatchEvent(new MockTouchEvent('touchend', []));
     for (let i = 0; i < 20; i++) sched.frame(16);
@@ -292,7 +289,7 @@ describe('GestureEngine v2 (direct mode)', () => {
     engine.detach();
   });
 
-  it('long-press then move emits a context click followed by a drag', async () => {
+  it('long-press then move does not start a left-drag', async () => {
     const { el, events, engine } = setup();
     el.dispatchEvent(new MockTouchEvent('touchstart', [touch(100, 200)]));
     await new Promise((r) => setTimeout(r, LONGPRESS_THRESHOLD_MS + 40));
@@ -301,13 +298,9 @@ describe('GestureEngine v2 (direct mode)', () => {
     el.dispatchEvent(new MockTouchEvent('touchend', []));
 
     const context = events.filter((e) => e.type === 'mouse-click' && e.button === 'right');
-    const dragStart = events.filter((e) => e.type === 'drag-start');
-    const dragMove = events.filter((e) => e.type === 'drag-move');
-    const dragEnd = events.filter((e) => e.type === 'drag-end');
     expect(context.length).toBe(1);
-    expect(dragStart.length).toBe(1);
-    expect(dragMove.length).toBeGreaterThanOrEqual(1);
-    expect(dragEnd.length).toBe(1);
+    expect(events.filter((e) => e.type === 'drag-start')).toHaveLength(0);
+    expect(events.filter((e) => e.type === 'drag-move')).toHaveLength(0);
     engine.detach();
   });
 
@@ -335,13 +328,13 @@ describe('GestureEngine v2 (direct mode)', () => {
     engine.detach();
   });
 
-  it('precision flag forces relative cursor movement even in direct mode', () => {
+  it('precision flag forces relative cursor movement even in touch mode', () => {
     const { el } = createMockElement();
     const events: GestureEvent[] = [];
     const engine = new GestureEngine(
       el as unknown as HTMLElement,
       { onGesture: (e) => events.push(e) },
-      { mode: 'direct', precision: true },
+      { mode: 'touch', precision: true },
     );
     engine.setHostDimensions(1080, 1920);
     engine.attach();
@@ -352,6 +345,7 @@ describe('GestureEngine v2 (direct mode)', () => {
 
     expect(events.some((e) => e.type === 'mouse-move')).toBe(true);
     expect(events.some((e) => e.type === 'mouse-scroll')).toBe(false);
+    expect(events.some((e) => e.type === 'drag-start')).toBe(false);
     engine.detach();
   });
 });
