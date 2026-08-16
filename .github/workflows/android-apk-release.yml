@@ -1,0 +1,100 @@
+# Build and attach a release APK when you push a version tag.
+#
+# Tag format (must match AppVersion.parse in the Flutter updater):
+#   v1.0.1+2
+#   android-v1.0.1+2
+#
+# Example:
+#   git tag v1.0.1+2
+#   git push origin v1.0.1+2
+#
+# No always-on server required — phones pull the APK from GitHub Releases.
+
+name: Android APK release
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'android-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Build name+code, e.g. 1.0.1+2'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/flutter_client
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Resolve version from tag or input
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAW="${{ github.event.inputs.version || github.ref_name }}"
+          RAW="${RAW#android-}"
+          RAW="${RAW#v}"
+          NAME="${RAW%%+*}"
+          CODE="${RAW##*+}"
+          if [[ "$CODE" == "$RAW" ]]; then CODE="1"; fi
+          if ! [[ "$CODE" =~ ^[0-9]+$ ]]; then CODE="1"; fi
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          echo "Building $NAME+$CODE"
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build release APK
+        run: |
+          flutter build apk --release \
+            --build-name="${{ steps.ver.outputs.name }}" \
+            --build-number="${{ steps.ver.outputs.code }}"
+
+      - name: Rename artifact
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk \
+            "nexuslink-${{ steps.ver.outputs.name }}+${{ steps.ver.outputs.code }}.apk"
+
+      - name: Upload APK artifact (workflow)
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexuslink-apk
+          path: apps/flutter_client/nexuslink-*.apk
+
+      - name: Create / update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: NexusLink Android ${{ steps.ver.outputs.name }}+${{ steps.ver.outputs.code }}
+          generate_release_notes: true
+          files: |
+            apps/flutter_client/nexuslink-${{ steps.ver.outputs.name }}+${{ steps.ver.outputs.code }}.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
