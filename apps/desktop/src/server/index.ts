@@ -150,6 +150,7 @@ export async function startRpcServer(port = 45678) {
           params.windowId as string,
           params.viewportW as number | undefined,
           params.viewportH as number | undefined,
+          params.dpr as number | undefined,
         );
         break;
       case 'window.release':
@@ -162,7 +163,11 @@ export async function startRpcServer(port = 45678) {
         result = await listApps();
         break;
       case 'apps.launch':
-        result = await launchApp(params.appId as string);
+        result = await launchApp(params.appId as string, {
+          width: params.viewportW as number | undefined,
+          height: params.viewportH as number | undefined,
+          dpr: params.dpr as number | undefined,
+        });
         break;
       case 'screen.startCapture': {
         // Per-window capture: resolve the window's current on-screen rect, grab

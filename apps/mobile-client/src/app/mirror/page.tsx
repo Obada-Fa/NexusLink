@@ -10,7 +10,7 @@ import { useConnectionStore } from '@/store/connection';
 import ConnectionProvider from '@/components/ConnectionProvider';
 import GestureOverlay, { type HostRegion } from '@/components/GestureOverlay';
 
-type Phase = 'connecting' | 'launching' | 'adopting' | 'streaming' | 'error';
+type Phase = 'connecting' | 'measuring' | 'launching' | 'adopting' | 'streaming' | 'error';
 
 /** Binary frame header from the host: u32 magic 'NLF1' | u32 streamKey | f64 ts (LE). */
 const FRAME_MAGIC = 0x4e4c4631;
@@ -26,6 +26,11 @@ interface MirrorTarget {
 /** "org.gnome.Calculator" → "orggnomecalculator" — dashes/dots vary in the wild. */
 function normClass(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function isBraveTarget(t: MirrorTarget): boolean {
+  const blob = `${t.appId ?? ''} ${t.wmClass ?? ''} ${t.title ?? ''}`.toLowerCase();
+  return blob.includes('brave');
 }
 
 function parseTarget(): MirrorTarget {
@@ -52,21 +57,41 @@ function MirrorView() {
   const [region, setRegion] = useState<HostRegion | null>(null);
   const [fps, setFps] = useState(0);
   const [kbOpen, setKbOpen] = useState(false);
+  const [fillFrame, setFillFrame] = useState(false);
 
   const streamIdRef = useRef<string | null>(null);
   const windowIdRef = useRef<string | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
   const unsubRef = useRef<(() => void) | null>(null);
   const frameCountRef = useRef(0);
   const startedRef = useRef(false);
   const kbRef = useRef<HTMLInputElement | null>(null);
+  const stageSizeRef = useRef<{ w: number; h: number } | null>(null);
 
   useEffect(() => {
     setTarget(parseTarget());
   }, []);
 
-  // ---- session bring-up: (launch →) adopt → capture ------------------------
+  // Measure the real mirror stage (excludes the top bar) before adopting so the
+  // host window aspect matches the phone content area — avoids letterboxing.
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const measure = () => {
+      const r = el.getBoundingClientRect();
+      if (r.width >= 2 && r.height >= 2) {
+        stageSizeRef.current = { w: Math.round(r.width), h: Math.round(r.height) };
+      }
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [target, phase]);
+
+  // ---- session bring-up: measure → (launch →) adopt → capture --------------
   useEffect(() => {
     if (status !== 'connected' || !client || !target || startedRef.current) return;
     startedRef.current = true;
@@ -74,12 +99,31 @@ function MirrorView() {
 
     const begin = async () => {
       try {
+        setPhase('measuring');
+        // Wait a couple frames for layout so stageSizeRef is accurate.
+        for (let i = 0; i < 20 && !cancelled; i++) {
+          await new Promise((r) => requestAnimationFrame(() => r(null)));
+          if (stageSizeRef.current) break;
+          await new Promise((r) => setTimeout(r, 16));
+        }
+        const stage = stageSizeRef.current ?? {
+          w: Math.round(window.innerWidth),
+          h: Math.round(window.innerHeight * 0.92),
+        };
+        const dpr = Math.min(3, window.devicePixelRatio || 2);
+        const brave = isBraveTarget(target);
+
         let windowId = target.windowId ?? null;
 
         // Launch flow: start the app on the PC, then wait for its window.
         if (!windowId && target.appId) {
           setPhase('launching');
-          const launched = (await client.request('apps.launch', { appId: target.appId })) as {
+          const launched = (await client.request('apps.launch', {
+            appId: target.appId,
+            viewportW: stage.w,
+            viewportH: stage.h,
+            dpr,
+          })) as {
             ok: boolean;
             wmClass?: string;
           };
@@ -96,6 +140,7 @@ function MirrorView() {
             }>;
             const hit = wins.find((w) => {
               if (w.appId && w.appId === target.appId) return true;
+              if (brave && /brave/i.test(w.wmClass)) return true;
               const nWin = normClass(w.wmClass.split('.').pop() ?? '');
               return (
                 nWin.length >= 4 && nCls.length >= 4 && (nCls.includes(nWin) || nWin.includes(nCls))
@@ -106,7 +151,11 @@ function MirrorView() {
               break;
             }
           }
-          if (!windowId) throw new Error('The app started but no window appeared yet. Go back and tap it under "Open on your PC".');
+          if (!windowId) {
+            throw new Error(
+              'The app started but no window appeared yet. Go back and tap it under "Open on your PC".',
+            );
+          }
         }
         if (cancelled) return;
 
@@ -115,11 +164,13 @@ function MirrorView() {
         if (windowId) {
           setPhase('adopting');
           windowIdRef.current = windowId;
-          await client.request('window.adopt', {
+          const adopted = (await client.request('window.adopt', {
             windowId,
-            viewportW: Math.round(window.innerWidth),
-            viewportH: Math.round(window.innerHeight),
-          });
+            viewportW: stage.w,
+            viewportH: stage.h,
+            dpr,
+          })) as { region?: HostRegion; mobileBrowser?: boolean };
+          if (adopted.mobileBrowser || brave) setFillFrame(true);
           captureParams = { ...captureParams, windowId };
         }
         if (cancelled) return;
@@ -265,14 +316,21 @@ function MirrorView() {
         >
           {'⌨'}
         </button>
-        {phase === 'streaming' && <GestureOverlay viewportRef={viewportRef} region={region} showHud={false} />}
+        {phase === 'streaming' && (
+          <GestureOverlay viewportRef={viewportRef} region={region} showHud={false} />
+        )}
       </header>
 
-      <div style={styles.stage}>
+      <div ref={stageRef} style={styles.stage}>
         {phase === 'streaming' ? (
           <div ref={viewportRef} style={styles.viewport}>
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img ref={imgRef} alt="host screen" style={styles.frame} draggable={false} />
+            <img
+              ref={imgRef}
+              alt="host screen"
+              style={{ ...styles.frame, objectFit: fillFrame ? 'fill' : 'contain' }}
+              draggable={false}
+            />
           </div>
         ) : phase === 'error' ? (
           <div style={styles.centerBox}>
@@ -292,14 +350,20 @@ function MirrorView() {
           </div>
         ) : (
           <div style={styles.centerBox}>
-            <style dangerouslySetInnerHTML={{ __html: '@keyframes nl-spin{to{transform:rotate(360deg)}}' }} />
+            <style
+              dangerouslySetInnerHTML={{
+                __html: '@keyframes nl-spin{to{transform:rotate(360deg)}}',
+              }}
+            />
             <div style={styles.spinner} />
             <p style={styles.centerText}>
               {phase === 'launching'
                 ? `Opening ${title} on your PC…`
                 : phase === 'adopting'
                   ? 'Fitting the app to your screen…'
-                  : 'Connecting…'}
+                  : phase === 'measuring'
+                    ? 'Preparing your screen…'
+                    : 'Connecting…'}
             </p>
           </div>
         )}
@@ -316,9 +380,15 @@ function MirrorView() {
             autoCapitalize="none"
             autoCorrect="off"
           />
-          <button style={styles.kbKey} onClick={() => sendSpecialKey('BackSpace')}>⌫</button>
-          <button style={styles.kbKey} onClick={() => sendSpecialKey('Return')}>⏎</button>
-          <button style={styles.kbKey} onClick={() => sendSpecialKey('Escape')}>Esc</button>
+          <button style={styles.kbKey} onClick={() => sendSpecialKey('BackSpace')}>
+            ⌫
+          </button>
+          <button style={styles.kbKey} onClick={() => sendSpecialKey('Return')}>
+            ⏎
+          </button>
+          <button style={styles.kbKey} onClick={() => sendSpecialKey('Escape')}>
+            Esc
+          </button>
         </div>
       )}
     </div>

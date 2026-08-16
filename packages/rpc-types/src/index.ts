@@ -97,7 +97,7 @@ export type Params<M extends RpcMethod> =
     : M extends 'window.list'
     ? {}
     : M extends 'window.adopt'
-    ? { windowId: string; viewportW?: number; viewportH?: number }
+    ? { windowId: string; viewportW?: number; viewportH?: number; dpr?: number }
     : M extends 'window.release'
     ? { windowId: string }
     : M extends 'window.activate'
@@ -105,7 +105,7 @@ export type Params<M extends RpcMethod> =
     : M extends 'apps.list'
     ? {}
     : M extends 'apps.launch'
-    ? { appId: string }
+    ? { appId: string; viewportW?: number; viewportH?: number; dpr?: number }
     : M extends 'session.pair'
     ? { publicKey: string }
     : M extends 'session.authenticate'
@@ -170,7 +170,7 @@ export type Result<M extends RpcMethod> =
     : M extends 'window.list'
     ? WindowInfo[]
     : M extends 'window.adopt'
-    ? { region: CaptureRegion }
+    ? { region: CaptureRegion; mobileBrowser?: boolean }
     : M extends 'window.release'
     ? { ok: boolean }
     : M extends 'window.activate'

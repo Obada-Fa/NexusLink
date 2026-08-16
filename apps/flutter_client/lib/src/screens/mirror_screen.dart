@@ -48,6 +48,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   int _fps = 0;
   bool _keyboardOpen = false;
   bool _precision = false;
+  /// Brave mobile sessions stretch to the stage (no letterbox bars).
+  bool _fillFrame = false;
 
   final _kbController = TextEditingController();
   final _kbFocus = FocusNode();
@@ -92,12 +94,26 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     }
     try {
       var windowId = widget.target.windowId;
+      final media = MediaQuery.of(context);
+      // Stage = screen minus app bar — must match the mirrored content area or
+      // the host window aspect letterboxes (black bars) on the phone.
+      final stageW = media.size.width;
+      final stageH = media.size.height -
+          kToolbarHeight -
+          media.padding.top -
+          media.padding.bottom;
+      final dpr = media.devicePixelRatio.clamp(1.0, 3.0);
+      final brave = _isBraveTarget(widget.target);
 
       // Launch flow: start the app, poll window.list until its window appears.
       if (windowId == null && widget.target.appId != null) {
         setState(() => _phase = MirrorPhase.launching);
-        final launched = await client.request(
-            'apps.launch', {'appId': widget.target.appId}) as Map<String, dynamic>;
+        final launched = await client.request('apps.launch', {
+          'appId': widget.target.appId,
+          'viewportW': stageW.round(),
+          'viewportH': stageH.round(),
+          'dpr': dpr,
+        }) as Map<String, dynamic>;
         if (launched['ok'] != true) {
           throw 'The host could not launch this app.';
         }
@@ -112,6 +128,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
             final w = WindowInfo.fromJson(raw as Map<String, dynamic>);
             final nWin = normClass(w.wmClass.split('.').last);
             if ((w.appId != null && w.appId == widget.target.appId) ||
+                (brave && w.wmClass.toLowerCase().contains('brave')) ||
                 (nWin.length >= 4 &&
                     nCls.length >= 4 &&
                     (nCls.contains(nWin) || nWin.contains(nCls)))) {
@@ -131,12 +148,15 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       if (windowId != null) {
         setState(() => _phase = MirrorPhase.adopting);
         _windowId = windowId;
-        final media = MediaQuery.of(context);
-        await client.request('window.adopt', {
+        final adopted = await client.request('window.adopt', {
           'windowId': windowId,
-          'viewportW': media.size.width.round(),
-          'viewportH': media.size.height.round(),
-        });
+          'viewportW': stageW.round(),
+          'viewportH': stageH.round(),
+          'dpr': dpr,
+        }) as Map<String, dynamic>;
+        if (adopted['mobileBrowser'] == true || brave) {
+          _fillFrame = true;
+        }
         params['windowId'] = windowId;
       }
 
@@ -175,6 +195,12 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         });
       }
     }
+  }
+
+  bool _isBraveTarget(MirrorTarget t) {
+    final blob =
+        '${t.appId ?? ''} ${t.wmClass ?? ''} ${t.title ?? ''}'.toLowerCase();
+    return blob.contains('brave');
   }
 
   /// Touch space IS the captured region: the engine maps view→region-local, and
@@ -355,8 +381,13 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
               alignment: Alignment.center,
               child: _frame == null
                   ? const CircularProgressIndicator()
-                  : Image.memory(_frame!,
-                      gaplessPlayback: true, fit: BoxFit.contain),
+                  : Image.memory(
+                      _frame!,
+                      gaplessPlayback: true,
+                      fit: _fillFrame ? BoxFit.fill : BoxFit.contain,
+                      width: double.infinity,
+                      height: double.infinity,
+                    ),
             ),
           );
         });

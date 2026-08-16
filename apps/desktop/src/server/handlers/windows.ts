@@ -9,6 +9,12 @@ import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import type { WindowInfo, AppInfo, CaptureRegion } from '@nexuslink/rpc-types';
 import { getScreenMetadata, getPrimaryMonitor } from './capture';
+import {
+  adoptBraveMobile,
+  isBraveAppId,
+  isBraveWmClass,
+  launchBraveMobile,
+} from './browser-mobile';
 
 const DISPLAY = process.env.DISPLAY || ':0';
 
@@ -245,10 +251,25 @@ export async function listApps(): Promise<AppInfo[]> {
   return out;
 }
 
-export async function launchApp(appId: string): Promise<{ ok: boolean; wmClass?: string }> {
+export async function launchApp(
+  appId: string,
+  viewport?: { width?: number; height?: number; dpr?: number },
+): Promise<{ ok: boolean; wmClass?: string }> {
   const catalog = await getCatalog();
   const app = catalog.apps.find((a) => a.appId === appId);
   if (!app) return { ok: false };
+
+  // Brave gets a dedicated chromeless mobile profile (CDP device metrics + UA)
+  // instead of the user's desktop browser squeezed into a phone frame.
+  if (isBraveAppId(app.appId) || isBraveWmClass(app.wmClass) || isBraveAppId(appId)) {
+    const launched = await launchBraveMobile({
+      width: viewport?.width ?? 390,
+      height: viewport?.height ?? 844,
+      dpr: viewport?.dpr,
+    });
+    if (launched.ok) return { ok: true, wmClass: launched.wmClass };
+    // Fall through to the normal desktop launch if the binary/CDP path fails.
+  }
 
   // gio launch handles Exec field codes, DBusActivatable, working dirs, etc.
   try {
@@ -379,12 +400,16 @@ function isMaximized(windowId: string): boolean {
 /**
  * Shape a window into a portrait phone viewport (right-anchored, height-fit) and
  * focus it. Returns the resulting on-screen region for capture + input mapping.
+ *
+ * For Brave, also pushes CDP mobile device metrics so the page layout matches
+ * the phone CSS viewport (native mobile sites, not a squeezed desktop UI).
  */
 export async function adoptWindow(
   windowId: string,
   viewportW = 390,
   viewportH = 844,
-): Promise<{ region: CaptureRegion }> {
+  dpr = 2,
+): Promise<{ region: CaptureRegion; mobileBrowser?: boolean }> {
   const screen = getScreenMetadata();
   // Anchor inside the PRIMARY monitor — on multi-monitor hosts the WM fights
   // placements on other outputs, and the user's attention is here anyway.
@@ -413,9 +438,29 @@ export async function adoptWindow(
   run(['wmctrl', '-i', '-a', windowId]);
 
   // Read back what the WM actually granted (decorations can shift the rect, and
-  // some WMs re-place the window a beat later).
-  await Bun.sleep(300);
-  const actual = getWindowGeometry(windowId);
+  // some WMs re-place the window a beat later). Chromium also fights the first
+  // resize — a second pass sticks the portrait frame.
+  await Bun.sleep(280);
+  run(['wmctrl', '-i', '-r', windowId, '-e', `0,${x},${y},${width},${height}`]);
+  await Bun.sleep(200);
+
+  let actual = getWindowGeometry(windowId);
+
+  // Brave min-width can leave a squat frame (letterboxing on the phone). Prefer
+  // width-fit to the phone aspect when the first pass came out too wide.
+  if (actual && actual.height > 0) {
+    const gotAspect = actual.width / actual.height;
+    if (gotAspect > aspect * 1.08) {
+      const w2 = Math.min(mon.width - 32, actual.width);
+      const h2 = Math.min(mon.height - marginTop - marginBottom, Math.round(w2 / aspect));
+      const x2 = mon.x + mon.width - w2 - 16;
+      const y2 = mon.y + marginTop;
+      run(['wmctrl', '-i', '-r', windowId, '-e', `0,${x2},${y2},${w2},${h2}`]);
+      await Bun.sleep(200);
+      actual = getWindowGeometry(windowId) ?? actual;
+    }
+  }
+
   const region = actual ?? { x, y, width, height };
 
   // Clamp into screen bounds and even-align for the capture pipeline.
@@ -424,7 +469,32 @@ export async function adoptWindow(
   const rw = Math.min(screen.width - rx, region.width) & ~1;
   const rh = Math.min(screen.height - ry, region.height) & ~1;
 
-  return { region: { x: rx, y: ry, width: rw, height: rh } };
+  let mobileBrowser = false;
+  const props = run(['xprop', '-id', windowId, 'WM_CLASS']);
+  if (isBraveWmClass(props) || /brave/i.test(props)) {
+    // Layout CSS size = the portrait client area we just shaped. Mobile UA +
+    // mobile:true make sites serve phone layouts while the pixels still fill
+    // the window (no CDP letterbox inside the capture).
+    const layoutW = rw > 0 ? rw : viewportW;
+    const layoutH = rh > 0 ? rh : viewportH;
+    mobileBrowser = await adoptBraveMobile({
+      width: layoutW,
+      height: layoutH,
+      dpr,
+    });
+    // Re-read after CDP may have adjusted the inner viewport / window.
+    await Bun.sleep(150);
+    const after = getWindowGeometry(windowId);
+    if (after) {
+      const ax = Math.max(0, after.x);
+      const ay = Math.max(0, after.y);
+      const aw = Math.min(screen.width - ax, after.width) & ~1;
+      const ah = Math.min(screen.height - ay, after.height) & ~1;
+      return { region: { x: ax, y: ay, width: aw, height: ah }, mobileBrowser };
+    }
+  }
+
+  return { region: { x: rx, y: ry, width: rw, height: rh }, mobileBrowser };
 }
 
 /** Restore a previously adopted window to its original geometry. */
