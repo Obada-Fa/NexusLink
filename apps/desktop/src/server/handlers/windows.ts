@@ -376,9 +376,26 @@ function isMaximized(windowId: string): boolean {
   return props.includes('MAXIMIZED_VERT') || props.includes('MAXIMIZED_HORZ');
 }
 
+/** True if the live window geometry is close enough to the portrait target. */
+function geometryClose(
+  actual: CaptureRegion,
+  target: { x: number; y: number; width: number; height: number },
+  tol = 32,
+): boolean {
+  return (
+    Math.abs(actual.x - target.x) <= tol &&
+    Math.abs(actual.y - target.y) <= tol &&
+    Math.abs(actual.width - target.width) <= tol &&
+    Math.abs(actual.height - target.height) <= tol
+  );
+}
+
 /**
  * Shape a window into a portrait phone viewport (right-anchored, height-fit) and
  * focus it. Returns the resulting on-screen region for capture + input mapping.
+ *
+ * Chromium/Brave often fight the first `wmctrl -e` with restore-bounds; we
+ * re-clamp several times over ~1.5s until geometry sticks (or attempts exhaust).
  */
 export async function adoptWindow(
   windowId: string,
@@ -395,28 +412,49 @@ export async function adoptWindow(
     if (orig) savedGeometry.set(windowId, { ...orig, maximized: isMaximized(windowId) });
   }
 
-  run(['wmctrl', '-i', '-r', windowId, '-b', 'remove,maximized_vert,maximized_horz']);
-  run(['wmctrl', '-i', '-r', windowId, '-b', 'remove,fullscreen']);
-  run(['wmctrl', '-i', '-r', windowId, '-b', 'remove,hidden']);
-
-  // Height-fit portrait rect with margins for panels/decorations; right-anchored so
-  // the desktop stays usable on the left.
-  const marginTop = 48;
-  const marginBottom = 16;
+  // Height-fit portrait rect with tight margins for panels/decorations;
+  // right-anchored so the desktop stays usable on the left.
+  const marginTop = 24;
+  const marginBottom = 8;
   const height = mon.height - marginTop - marginBottom;
   const aspect = viewportW > 0 && viewportH > 0 ? viewportW / viewportH : 390 / 844;
   const width = Math.min(mon.width - 32, Math.round(height * aspect));
   const x = mon.x + mon.width - width - 16;
   const y = mon.y + marginTop;
+  const target = { x, y, width, height };
 
-  run(['wmctrl', '-i', '-r', windowId, '-e', `0,${x},${y},${width},${height}`]);
+  const stripChrome = () => {
+    run(['wmctrl', '-i', '-r', windowId, '-b', 'remove,maximized_vert,maximized_horz']);
+    run(['wmctrl', '-i', '-r', windowId, '-b', 'remove,fullscreen']);
+    run(['wmctrl', '-i', '-r', windowId, '-b', 'remove,hidden']);
+  };
+
+  const place = () => {
+    run(['wmctrl', '-i', '-r', windowId, '-e', `0,${x},${y},${width},${height}`]);
+  };
+
+  stripChrome();
+  place();
   run(['wmctrl', '-i', '-a', windowId]);
 
-  // Read back what the WM actually granted (decorations can shift the rect, and
-  // some WMs re-place the window a beat later).
-  await Bun.sleep(300);
-  const actual = getWindowGeometry(windowId);
-  const region = actual ?? { x, y, width, height };
+  // Re-clamp loop: Chromium restore-bounds often undoes the first resize.
+  const attempts = 5;
+  let actual: CaptureRegion | null = null;
+  for (let i = 0; i < attempts; i++) {
+    await Bun.sleep(i === 0 ? 300 : 250);
+    actual = getWindowGeometry(windowId);
+    if (actual && geometryClose(actual, target)) break;
+    if (i < attempts - 1) {
+      console.warn(
+        `[adopt] ${windowId} drifted (got ${actual ? `${actual.width}x${actual.height}` : 'null'}; want ${width}x${height}) — re-clamp ${i + 2}/${attempts}`,
+      );
+      stripChrome();
+      place();
+      run(['wmctrl', '-i', '-a', windowId]);
+    }
+  }
+
+  const region = actual ?? target;
 
   // Clamp into screen bounds and even-align for the capture pipeline.
   const rx = Math.max(0, region.x);
