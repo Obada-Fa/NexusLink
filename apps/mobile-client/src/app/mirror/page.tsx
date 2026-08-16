@@ -110,16 +110,19 @@ function MirrorView() {
         }
         if (cancelled) return;
 
-        // Adopt: shape the window like a phone screen and focus it.
+        // Adopt: shape the window to the phone stage aspect and focus it.
+        // Overlay chrome means the stage IS the full viewport — use that size
+        // so capture aspect matches what we paint (no letterbox from header).
         let captureParams: Record<string, unknown> = { quality: 'medium', fps: 24 };
         if (windowId) {
           setPhase('adopting');
           windowIdRef.current = windowId;
-          await client.request('window.adopt', {
+          const adopt = (await client.request('window.adopt', {
             windowId,
             viewportW: Math.round(window.innerWidth),
             viewportH: Math.round(window.innerHeight),
-          });
+          })) as { region?: HostRegion };
+          if (adopt.region) setRegion(adopt.region);
           captureParams = { ...captureParams, windowId };
         }
         if (cancelled) return;
@@ -250,29 +253,13 @@ function MirrorView() {
 
   return (
     <div style={styles.wrapper}>
-      <header style={styles.topBar}>
-        <button onClick={goHome} style={styles.barBtn} aria-label="Home">
-          {'⌂'}
-        </button>
-        <span style={styles.title}>
-          {title}
-          {phase === 'streaming' && fps > 0 ? ` · ${fps}fps` : ''}
-        </span>
-        <button
-          onClick={() => setKbOpen((v) => !v)}
-          style={{ ...styles.barBtn, color: kbOpen ? '#2a6aff' : '#888' }}
-          aria-label="Keyboard"
-        >
-          {'⌨'}
-        </button>
-        {phase === 'streaming' && <GestureOverlay viewportRef={viewportRef} region={region} showHud={false} />}
-      </header>
-
+      {/* Full-bleed stage first so aspect = phone viewport; chrome overlays. */}
       <div style={styles.stage}>
         {phase === 'streaming' ? (
           <div ref={viewportRef} style={styles.viewport}>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img ref={imgRef} alt="host screen" style={styles.frame} draggable={false} />
+            <GestureOverlay viewportRef={viewportRef} region={region} showHud={false} />
           </div>
         ) : phase === 'error' ? (
           <div style={styles.centerBox}>
@@ -305,6 +292,23 @@ function MirrorView() {
         )}
       </div>
 
+      <header style={styles.topBar}>
+        <button onClick={goHome} style={styles.barBtn} aria-label="Home">
+          {'⌂'}
+        </button>
+        <span style={styles.title}>
+          {title}
+          {phase === 'streaming' && fps > 0 ? ` · ${fps}fps` : ''}
+        </span>
+        <button
+          onClick={() => setKbOpen((v) => !v)}
+          style={{ ...styles.barBtn, color: kbOpen ? '#2a6aff' : '#888' }}
+          aria-label="Keyboard"
+        >
+          {'⌨'}
+        </button>
+      </header>
+
       {kbOpen && (
         <div style={styles.kbBar}>
           <input
@@ -335,6 +339,7 @@ export default function MirrorPage() {
 
 const styles: Record<string, React.CSSProperties> = {
   wrapper: {
+    position: 'relative',
     display: 'flex',
     flexDirection: 'column',
     height: '100dvh',
@@ -344,13 +349,18 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
   },
   topBar: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 5,
     display: 'flex',
     alignItems: 'center',
     gap: 8,
     padding: '6px 10px',
-    background: '#0a0a0f',
-    borderBottom: '1px solid #16162a',
-    flexShrink: 0,
+    paddingTop: 'calc(6px + env(safe-area-inset-top))',
+    background: 'rgba(10,10,15,0.55)',
+    borderBottom: '1px solid rgba(22,22,42,0.4)',
   },
   barBtn: {
     width: 34,
@@ -373,7 +383,12 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
   },
-  stage: { flex: 1, display: 'flex', minHeight: 0, background: '#000' },
+  stage: {
+    position: 'absolute',
+    inset: 0,
+    display: 'flex',
+    background: '#000',
+  },
   viewport: {
     position: 'relative',
     width: '100%',
@@ -391,6 +406,7 @@ const styles: Record<string, React.CSSProperties> = {
     maxHeight: '100%',
     width: '100%',
     height: '100%',
+    // Contain never stretches. Phone-aspect capture fills edge-to-edge.
     objectFit: 'contain',
     pointerEvents: 'none',
     display: 'block',
@@ -426,12 +442,16 @@ const styles: Record<string, React.CSSProperties> = {
     animation: 'nl-spin 0.8s linear infinite',
   },
   kbBar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 5,
     display: 'flex',
     gap: 6,
     padding: '8px 10px calc(8px + env(safe-area-inset-bottom))',
-    background: '#0f0f1a',
+    background: 'rgba(15,15,26,0.92)',
     borderTop: '1px solid #1c1c30',
-    flexShrink: 0,
   },
   kbInput: {
     flex: 1,
