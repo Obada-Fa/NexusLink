@@ -1,17 +1,16 @@
 // Dart port of the NexusLink `GestureEngine` facade
 // (packages/gesture-engine/src/index.ts).
 //
-// Direct-manipulation touch translation (architecture.md Module C). The
-// default `direct` mode treats the finger as touching content at an absolute
-// host coordinate: a one-finger pan is a momentum scroll, not a cursor drag.
-// The legacy relative-cursor behaviour survives as `trackpad` mode (a.k.a.
-// Precision mode).
+// Default [GestureMode.touch] matches RustDesk mobile touch mode: the finger
+// is the pointer at an absolute host coordinate (tap = click, one-finger pan
+// = left drag). [GestureMode.trackpad] is the mouse/precision fallback
+// (relative cursor). Drive [tick] from a Flutter `Ticker` for long-press
+// evaluation and two-finger scroll inertia.
 //
 // Differences from the TS class, dictated by the Flutter environment:
 //  - No DOM attach/detach; the owning widget forwards pointer events via
 //    [onTouchStart] / [onTouchMove] / [onTouchEnd] with explicit timestamps.
-//  - No requestAnimationFrame; drive [tick] from a Flutter `Ticker` (it also
-//    evaluates the pending long press, replacing the TS setTimeout).
+//  - No requestAnimationFrame; drive [tick] from a Flutter `Ticker`.
 //  - View size comes from [setViewSize] instead of getBoundingClientRect /
 //    ResizeObserver.
 //
@@ -28,7 +27,7 @@ export 'scroll_physics.dart';
 class GestureEngine {
   GestureEngine({
     required this._onGesture,
-    GestureMode mode = GestureMode.direct,
+    GestureMode mode = GestureMode.touch,
     bool precision = false,
   }) {
     _classifier = TouchClassifier(

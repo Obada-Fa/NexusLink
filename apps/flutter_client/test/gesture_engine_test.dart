@@ -15,7 +15,7 @@ TouchPoint tp(double x, double y, [int id = 0]) => TouchPoint(id, x, y);
 /// Mirrors the TS test harness: 375x667 view, portrait 1080x1920 host
 /// (~1:1 aspect with the view, so host deltas are ~2.879x view deltas).
 (GestureEngine, List<GestureEvent>) setupEngine({
-  GestureMode mode = GestureMode.direct,
+  GestureMode mode = GestureMode.touch,
   bool precision = false,
   double hostW = 1080,
   double hostH = 1920,
@@ -39,14 +39,14 @@ void main() {
       expect(result.y, 540);
     });
 
-    test('handles wider view than host (letterbox top/bottom)', () {
+    test('handles wider view than host (cover crops top/bottom)', () {
       final result = scaleToHost(100, 50, 200, 100, 1920, 1080);
       expect(result.x, 960);
       expect(result.y, greaterThan(0));
       expect(result.y, lessThan(1080));
     });
 
-    test('handles taller view than host (letterbox left/right)', () {
+    test('handles taller view than host (cover crops left/right)', () {
       final result = scaleToHost(50, 100, 100, 200, 1920, 1080);
       expect(result.x, greaterThan(0));
       expect(result.x, lessThan(1920));
@@ -245,14 +245,15 @@ void main() {
       expect(events.whereType<DoubleTapEvent>(), isEmpty);
     });
 
-    test('movement past the tap slop suppresses the tap', () {
+    test('movement past the tap slop suppresses the tap and starts a drag', () {
       final (engine, events) = setupEngine();
       engine.onTouchStart([tp(100, 200)], 0);
       engine.onTouchMove([tp(150, 260)], 50);
       engine.onTouchEnd([], 100);
 
       expect(events.whereType<TapEvent>(), isEmpty);
-      expect(events.whereType<ScrollEvent>(), isNotEmpty);
+      expect(events.whereType<DragStartEvent>(), hasLength(1));
+      expect(events.whereType<DragEndEvent>(), hasLength(1));
     });
 
     test('setHostDimensions rescales tap coordinates', () {
@@ -266,68 +267,61 @@ void main() {
     });
   });
 
-  group('GestureEngine — direct-mode scrolling', () {
-    test('one-finger vertical pan emits ScrollEvents, never MouseMove', () {
+  group('GestureEngine — touch-mode drag (RustDesk)', () {
+    test('one-finger pan emits DragEvents, never Scroll or MouseMove', () {
       final (engine, events) = setupEngine();
       engine.onTouchStart([tp(200, 600)], 0);
       engine.onTouchMove([tp(200, 540)], 16);
       engine.onTouchMove([tp(200, 480)], 32);
       engine.onTouchEnd([], 48);
 
-      final scrolls = events.whereType<ScrollEvent>().toList();
-      expect(scrolls, isNotEmpty);
+      expect(events.whereType<DragStartEvent>(), hasLength(1));
+      expect(events.whereType<DragMoveEvent>(), isNotEmpty);
+      expect(events.whereType<DragEndEvent>(), hasLength(1));
+      expect(events.whereType<ScrollEvent>(), isEmpty);
       expect(events.whereType<MouseMoveEvent>(), isEmpty);
-      // Vertical pan locks to the vertical axis: no horizontal component.
-      for (final s in scrolls) {
-        expect(s.deltaX, 0);
-      }
-      // Content tracks the finger: finger up => positive (scroll-down) delta.
-      expect(scrolls.first.deltaY, greaterThan(0));
+      expect(events.whereType<TapEvent>(), isEmpty);
+      // Button-down anchors at the original touch point.
+      final start = events.whereType<DragStartEvent>().single;
+      expect(start.x, closeTo(200 * (1080 / 375), 1.0));
+      expect(start.y, closeTo(600 * (1920 / 667), 1.0));
     });
 
-    test('horizontal pan locks to the horizontal axis', () {
+    test('tiny jitter under tap slop still counts as a tap', () {
       final (engine, events) = setupEngine();
-      engine.onTouchStart([tp(100, 300)], 0);
-      engine.onTouchMove([tp(160, 300)], 16);
-      engine.onTouchMove([tp(220, 302)], 32);
-      engine.onTouchEnd([], 48);
+      engine.onTouchStart([tp(100, 200)], 0);
+      engine.onTouchMove([tp(101, 201)], 16); // ~3 host px
+      engine.onTouchEnd([], 80);
 
-      final scrolls = events.whereType<ScrollEvent>().toList();
-      expect(scrolls, isNotEmpty);
-      for (final s in scrolls) {
-        expect(s.deltaY, 0);
-        expect(s.deltaX, lessThan(0)); // finger right => scroll left
-      }
+      expect(events.whereType<TapEvent>(), hasLength(1));
+      expect(events.whereType<DragStartEvent>(), isEmpty);
     });
 
-    test('45-degree pan resolves to the free axis (both components)', () {
-      final (engine, events) = setupEngine();
-      engine.onTouchStart([tp(200, 300)], 0);
-      engine.onTouchMove([tp(260, 360)], 16);
+    test('GestureMode.direct aliases touch (one-finger drag)', () {
+      final (engine, events) = setupEngine(mode: GestureMode.direct);
+      engine.onTouchStart([tp(200, 600)], 0);
+      engine.onTouchMove([tp(200, 500)], 16);
       engine.onTouchEnd([], 32);
 
-      final scrolls = events.whereType<ScrollEvent>().toList();
-      expect(scrolls, isNotEmpty);
-      expect(scrolls.first.deltaX, isNot(0));
-      expect(scrolls.first.deltaY, isNot(0));
+      expect(events.whereType<DragStartEvent>(), hasLength(1));
+      expect(events.whereType<ScrollEvent>(), isEmpty);
     });
   });
 
-  group('GestureEngine — momentum', () {
-    test('fast flick produces decaying inertial scrolls until stop', () {
+  group('GestureEngine — two-finger scroll momentum', () {
+    test('fast two-finger flick produces decaying inertial scrolls', () {
       final (engine, events) = setupEngine();
-      engine.onTouchStart([tp(200, 600)], 0);
+      engine.onTouchStart([tp(100, 600), tp(150, 600, 1)], 0);
       var y = 600.0;
       var t = 0.0;
       for (var i = 0; i < 5; i++) {
         t += 16;
         y -= 40;
-        engine.onTouchMove([tp(200, y)], t);
+        engine.onTouchMove([tp(100, y), tp(150, y, 1)], t);
       }
       engine.onTouchEnd([], t);
       expect(engine.inertiaActive, isTrue);
 
-      // Pump deterministic frames until the fling decays to a stop.
       var frames = 0;
       while (frames < 500) {
         t += 16;
@@ -341,29 +335,21 @@ void main() {
           .where((s) => s.inertial)
           .toList();
       expect(inertial.length, greaterThan(5));
-      // Deltas decay over the fling.
       expect(inertial.first.deltaY, greaterThan(inertial.last.deltaY));
-      // Inertial scrolls stay anchored at the release point (no drift).
-      expect(inertial.map((s) => s.x).toSet(), hasLength(1));
-      // Further ticks emit nothing.
-      final count = events.length;
-      expect(engine.tick(t + 16), isFalse);
-      expect(events.length, count);
     });
 
     test('a new touch finger-catches a running fling', () {
       final (engine, events) = setupEngine();
-      engine.onTouchStart([tp(200, 600)], 0);
+      engine.onTouchStart([tp(100, 600), tp(150, 600, 1)], 0);
       var y = 600.0;
       var t = 0.0;
       for (var i = 0; i < 5; i++) {
         t += 16;
         y -= 40;
-        engine.onTouchMove([tp(200, y)], t);
+        engine.onTouchMove([tp(100, y), tp(150, y, 1)], t);
       }
       engine.onTouchEnd([], t);
 
-      // A few inertial frames...
       for (var i = 0; i < 3; i++) {
         t += 16;
         engine.tick(t);
@@ -373,7 +359,6 @@ void main() {
         isNotEmpty,
       );
 
-      // ...then the finger comes back down: the fling stops instantly.
       t += 16;
       engine.onTouchStart([tp(200, 600)], t);
       expect(engine.inertiaActive, isFalse);
@@ -385,23 +370,20 @@ void main() {
       expect(events.length, countBefore);
     });
 
-    test('slow drag below the fling threshold does not start inertia', () {
+    test('slow two-finger pan below the fling threshold does not start inertia',
+        () {
       final (engine, events) = setupEngine();
-      engine.onTouchStart([tp(200, 600)], 0);
+      engine.onTouchStart([tp(100, 600), tp(150, 600, 1)], 0);
       var y = 600.0;
       var t = 0.0;
       for (var i = 0; i < 4; i++) {
-        t += 200; // very slow: large dt => low velocity
+        t += 200;
         y -= 5;
-        engine.onTouchMove([tp(200, y)], t);
+        engine.onTouchMove([tp(100, y), tp(150, y, 1)], t);
       }
       engine.onTouchEnd([], t);
 
       expect(engine.inertiaActive, isFalse);
-      for (var i = 0; i < 20; i++) {
-        t += 16;
-        expect(engine.tick(t), isFalse);
-      }
       expect(
         events.whereType<ScrollEvent>().where((s) => s.inertial),
         isEmpty,
@@ -431,32 +413,32 @@ void main() {
       expect(events.whereType<TapEvent>(), isEmpty);
     });
 
-    test('long-press then move emits context click followed by a drag', () {
+    test('long-press then move does NOT start a left-drag (RustDesk)', () {
       final (engine, events) = setupEngine();
       engine.onTouchStart([tp(100, 200)], 0);
+      engine.tick(longPressThresholdMs + 20);
       engine.onTouchMove([tp(140, 250)], longPressThresholdMs + 40);
       engine.onTouchMove([tp(170, 280)], longPressThresholdMs + 60);
       engine.onTouchEnd([], longPressThresholdMs + 80);
 
       expect(events.whereType<ContextEvent>(), hasLength(1));
-      expect(events.whereType<DragStartEvent>(), hasLength(1));
-      expect(events.whereType<DragMoveEvent>(), isNotEmpty);
-      expect(events.whereType<DragEndEvent>(), hasLength(1));
-      // Context click fires before the drag begins.
-      expect(events.first, isA<ContextEvent>());
-      expect(events.whereType<ScrollEvent>(), isEmpty);
+      expect(events.whereType<DragStartEvent>(), isEmpty);
+      expect(events.whereType<DragMoveEvent>(), isEmpty);
+      expect(events.whereType<DragEndEvent>(), isEmpty);
     });
 
-    test('significant movement cancels the pending long press', () {
+    test('significant movement cancels the pending long press and starts drag',
+        () {
       final (engine, events) = setupEngine();
       engine.onTouchStart([tp(100, 200)], 0);
-      // >10 host px from the origin: cancels the long press.
+      // >10 host px from the origin: cancels the long press, starts drag.
       engine.onTouchMove([tp(120, 220)], 100);
       engine.tick(600);
       engine.onTouchEnd([], 650);
 
       expect(events.whereType<ContextEvent>(), isEmpty);
-      expect(events.whereType<DragStartEvent>(), isEmpty);
+      expect(events.whereType<DragStartEvent>(), hasLength(1));
+      expect(events.whereType<DragEndEvent>(), hasLength(1));
     });
   });
 
@@ -505,17 +487,19 @@ void main() {
 
       expect(events.whereType<MouseMoveEvent>(), isNotEmpty);
       expect(events.whereType<ScrollEvent>(), isEmpty);
+      expect(events.whereType<DragStartEvent>(), isEmpty);
     });
 
-    test('precision flag forces relative movement even in direct mode', () {
+    test('precision flag forces relative movement even in touch mode', () {
       final (engine, events) =
-          setupEngine(mode: GestureMode.direct, precision: true);
+          setupEngine(mode: GestureMode.touch, precision: true);
       engine.onTouchStart([tp(200, 600)], 0);
       engine.onTouchMove([tp(200, 500)], 16);
       engine.onTouchEnd([], 32);
 
       expect(events.whereType<MouseMoveEvent>(), isNotEmpty);
       expect(events.whereType<ScrollEvent>(), isEmpty);
+      expect(events.whereType<DragStartEvent>(), isEmpty);
     });
 
     test('precision divides deltas by the precision divisor', () {

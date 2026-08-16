@@ -4,7 +4,8 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { GestureEngine, type GestureEvent } from '@nexuslink/gesture-engine';
 import { useConnectionStore } from '@/store/connection';
 
-type PrecisionMode = 'normal' | 'precision';
+/** RustDesk-style input paradigm for the mirror viewport. */
+type InputMode = 'touch' | 'mouse';
 
 export interface HostRegion {
   x: number;
@@ -29,7 +30,8 @@ export default function GestureOverlay({
   const engineRef = useRef<GestureEngine | null>(null);
   const regionRef = useRef<HostRegion | null>(region ?? null);
   regionRef.current = region ?? null;
-  const [precision, setPrecision] = useState<PrecisionMode>('normal');
+  const inputModeRef = useRef<InputMode>('touch');
+  const [inputMode, setInputMode] = useState<InputMode>('touch');
   const [lastGesture, setLastGesture] = useState<string>('');
 
   const handleGesture = useCallback(
@@ -41,6 +43,7 @@ export default function GestureOverlay({
       const off = regionRef.current;
       const ox = off ? off.x : 0;
       const oy = off ? off.y : 0;
+      const mode = inputModeRef.current;
 
       // Fire-and-forget: input is latency-sensitive, so we never await the RPC.
       switch (event.type) {
@@ -58,7 +61,6 @@ export default function GestureOverlay({
           setLastGesture('dbl-click');
           const dx = event.x + ox;
           const dy = event.y + oy;
-          // Two clicks 50ms apart so the host registers a native double-click.
           client.request('input.mouseClick', { button: 'left', x: dx, y: dy }).catch(() => {});
           setTimeout(() => {
             client.request('input.mouseClick', { button: 'left', x: dx, y: dy }).catch(() => {});
@@ -71,8 +73,7 @@ export default function GestureOverlay({
             .request('input.mouseScroll', {
               deltaX: event.deltaX,
               deltaY: event.deltaY,
-              x: event.x + ox,
-              y: event.y + oy,
+              ...(mode === 'touch' ? { x: event.x + ox, y: event.y + oy } : {}),
             })
             .catch(() => {});
           break;
@@ -92,8 +93,6 @@ export default function GestureOverlay({
             .catch(() => {});
           break;
         case 'zoom':
-          // Pinch-zoom → Ctrl+wheel at the pinch midpoint. scale is a signed
-          // delta; positive = fingers apart = zoom in = wheel up (negative dy).
           setLastGesture(`zoom ${event.scale.toFixed(2)}`);
           client
             .request('input.mouseScroll', {
@@ -115,13 +114,11 @@ export default function GestureOverlay({
     if (!el) return;
 
     const callbacks = { onGesture: handleGesture };
-    // Direct manipulation is the default paradigm: one-finger pan = momentum scroll.
-    const engine = new GestureEngine(el, callbacks, { mode: 'direct' });
+    // RustDesk-style touch mode: one-finger pan = left drag at absolute coords.
+    const engine = new GestureEngine(el, callbacks, { mode: 'touch' });
     engine.attach();
     engineRef.current = engine;
 
-    // Adopted-window mode: touch space IS the captured region. Otherwise fall
-    // back to full-screen metadata.
     if (region && region.width > 0 && region.height > 0) {
       engine.setHostDimensions(region.width, region.height);
     } else if (client && status === 'connected') {
@@ -133,9 +130,7 @@ export default function GestureOverlay({
             engine.setHostDimensions(meta.width, meta.height);
           }
         })
-        .catch(() => {
-          // Default 1920x1080 already set
-        });
+        .catch(() => {});
     }
 
     return () => {
@@ -145,59 +140,77 @@ export default function GestureOverlay({
   }, [viewportRef, handleGesture, client, status, region]);
 
   useEffect(() => {
+    inputModeRef.current = inputMode;
     const engine = engineRef.current;
     if (!engine) return;
-    // Precision mode switches the engine to relative-cursor control with reduced
-    // sensitivity for fine targeting (architecture.md Module C2).
-    engine.setPrecision(precision === 'precision');
-  }, [precision]);
+    engine.setMode(inputMode === 'touch' ? 'touch' : 'trackpad');
+    engine.setPrecision(false);
+  }, [inputMode]);
 
-  const togglePrecision = useCallback(() => {
-    setPrecision((prev) => (prev === 'normal' ? 'precision' : 'normal'));
+  const toggleInputMode = useCallback(() => {
+    setInputMode((prev) => (prev === 'touch' ? 'mouse' : 'touch'));
   }, []);
 
   if (!showHud) return null;
 
   return (
-    <>
+    <div style={styles.hud}>
       <button
-        onClick={togglePrecision}
+        onClick={toggleInputMode}
         style={{
-          ...styles.precisionBtn,
-          background: precision === 'precision' ? '#2a6aff' : 'transparent',
-          color: precision === 'precision' ? '#fff' : '#888',
-          borderColor: precision === 'precision' ? '#2a6aff' : '#333',
+          ...styles.modeBtn,
+          background: inputMode === 'touch' ? '#2a6aff' : 'rgba(0,0,0,0.45)',
+          color: inputMode === 'touch' ? '#fff' : '#e8e8f0',
+          borderColor: inputMode === 'touch' ? '#2a6aff' : 'rgba(255,255,255,0.2)',
         }}
-        aria-label={`Precision mode: ${precision}`}
+        aria-label={
+          inputMode === 'touch'
+            ? 'Touch mode: tap = click, drag = drag, 2 fingers = scroll'
+            : 'Mouse mode: 1 finger moves the cursor, 2 fingers scroll'
+        }
+        title={
+          inputMode === 'touch'
+            ? 'Touch mode (tap/drag). Switch to Mouse.'
+            : 'Mouse mode (relative cursor). Switch to Touch.'
+        }
       >
-        {precision === 'precision' ? 'Precision: ON' : 'Precision: OFF'}
+        {inputMode === 'touch' ? 'Touch' : 'Mouse'}
       </button>
 
-      {lastGesture ? (
-        <span style={styles.gestureHint}>{lastGesture}</span>
-      ) : null}
-    </>
+      {lastGesture ? <span style={styles.gestureHint}>{lastGesture}</span> : null}
+    </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  precisionBtn: {
+  hud: {
+    position: 'absolute',
+    top: 'calc(8px + env(safe-area-inset-top))',
+    right: 10,
+    zIndex: 6,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    pointerEvents: 'none',
+  },
+  modeBtn: {
+    pointerEvents: 'auto',
     padding: '4px 10px',
     borderRadius: '4px',
     border: '1px solid',
     fontSize: '11px',
     fontWeight: 600,
     cursor: 'pointer',
-    background: 'transparent',
     transition: 'background 0.15s, color 0.15s',
   },
   gestureHint: {
     fontSize: '10px',
-    color: '#555',
+    color: '#ccc',
     fontFamily: 'monospace',
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
-    maxWidth: '140px',
+    maxWidth: '120px',
+    textShadow: '0 1px 2px rgba(0,0,0,0.9)',
   },
 };
