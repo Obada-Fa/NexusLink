@@ -39,14 +39,14 @@ void main() {
       expect(result.y, 540);
     });
 
-    test('handles wider view than host (letterbox top/bottom)', () {
+    test('handles wider view than host (cover crops top/bottom)', () {
       final result = scaleToHost(100, 50, 200, 100, 1920, 1080);
       expect(result.x, 960);
       expect(result.y, greaterThan(0));
       expect(result.y, lessThan(1080));
     });
 
-    test('handles taller view than host (letterbox left/right)', () {
+    test('handles taller view than host (cover crops left/right)', () {
       final result = scaleToHost(50, 100, 100, 200, 1920, 1080);
       expect(result.x, greaterThan(0));
       expect(result.x, lessThan(1920));

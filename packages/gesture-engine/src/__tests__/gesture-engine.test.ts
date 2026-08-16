@@ -17,14 +17,16 @@ describe('scaleToHost', () => {
     expect(result.y).toBe(540);
   });
 
-  it('handles wider view than host (letterbox top/bottom)', () => {
+  it('handles wider view than host (cover crops top/bottom)', () => {
+    // View 2:1, host 16:9 — cover fills width; vertical content is taller than view.
     const result = scaleToHost(100, 50, 200, 100, 1920, 1080);
     expect(result.x).toBe(960);
     expect(result.y).toBeGreaterThan(0);
     expect(result.y).toBeLessThan(1080);
   });
 
-  it('handles taller view than host (letterbox left/right)', () => {
+  it('handles taller view than host (cover crops left/right)', () => {
+    // View 1:2, host 16:9 — cover fills height; horizontal content is wider than view.
     const result = scaleToHost(50, 100, 100, 200, 1920, 1080);
     expect(result.x).toBeGreaterThan(0);
     expect(result.x).toBeLessThan(1920);

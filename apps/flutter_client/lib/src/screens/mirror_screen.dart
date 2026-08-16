@@ -300,10 +300,15 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         (widget.target.windowId != null || widget.target.appId != null
             ? 'App'
             : 'Desktop');
+    // Immersive: AppBar overlays the stream so adopt uses the full stage
+    // aspect (no letterbox from chrome stealing height).
     return Scaffold(
       backgroundColor: Colors.black,
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0A0A0F),
+        backgroundColor: Colors.black.withValues(alpha: 0.45),
+        elevation: 0,
+        scrolledUnderElevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.home_outlined),
           onPressed: () => Navigator.of(context).maybePop(),
@@ -323,7 +328,6 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
             ),
             onPressed: () {
               setState(() => _touchMode = !_touchMode);
-              // Touch ↔ Mouse mirrors RustDesk's touchMode toggle.
               _engine.setMode(
                   _touchMode ? GestureMode.touch : GestureMode.trackpad);
               _engine.setPrecision(false);
@@ -339,10 +343,12 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           ),
         ],
       ),
-      body: Column(
+      body: Stack(
+        fit: StackFit.expand,
         children: [
-          Expanded(child: _stage()),
-          if (_keyboardOpen) _keyboardBar(),
+          _stage(),
+          if (_keyboardOpen)
+            Positioned(left: 0, right: 0, bottom: 0, child: _keyboardBar()),
         ],
       ),
     );
@@ -358,15 +364,18 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
             onPointerMove: _onPointerMove,
             onPointerUp: (e) => _onPointerUp(e.pointer),
             onPointerCancel: (e) => _onPointerUp(e.pointer),
-            child: Container(
+            child: ColoredBox(
               color: Colors.black,
-              width: double.infinity,
-              height: double.infinity,
-              alignment: Alignment.center,
               child: _frame == null
-                  ? const CircularProgressIndicator()
-                  : Image.memory(_frame!,
-                      gaplessPlayback: true, fit: BoxFit.contain),
+                  ? const Center(child: CircularProgressIndicator())
+                  : Image.memory(
+                      _frame!,
+                      gaplessPlayback: true,
+                      fit: BoxFit.cover,
+                      width: constraints.maxWidth,
+                      height: constraints.maxHeight,
+                      alignment: Alignment.center,
+                    ),
             ),
           );
         });

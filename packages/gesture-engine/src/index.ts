@@ -99,8 +99,12 @@ function defaultScheduler(): FrameScheduler {
 }
 
 /**
- * Map a touch point within a (possibly letterboxed) view element to the
- * corresponding pixel on the host screen. Unchanged from v1.
+ * Map a touch point within a (possibly cropped) view element to the
+ * corresponding pixel on the host screen.
+ *
+ * Matches CSS `object-fit: cover` / Flutter `BoxFit.cover`: the remote frame
+ * fills the view edge-to-edge; whichever axis overflows is cropped symmetrically.
+ * Touches in the cropped (off-screen) region clamp to the nearest host edge.
  */
 export function scaleToHost(
   touchX: number,
@@ -122,6 +126,9 @@ export function scaleToHost(
   let offsetX: number;
   let offsetY: number;
 
+  // object-fit: cover:
+  // - view relatively wider → fill width, crop top/bottom
+  // - view relatively taller → fill height, crop left/right
   if (viewAspect > hostAspect) {
     contentWidth = viewWidth;
     contentHeight = viewWidth / hostAspect;
