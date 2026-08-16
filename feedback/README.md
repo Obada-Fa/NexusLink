@@ -10,7 +10,8 @@ User-reported issues from phone testing. Docs only — no implementation here.
 | [`fullscreen-streaming.md`](./fullscreen-streaming.md) | Apps not fullscreen; streaming strategy |
 | [`brave-resize.md`](./brave-resize.md) | Brave did not resize on open |
 | [`taskbar.md`](./taskbar.md) | Bottom open/active apps bar stops working |
+| [`virtual-display.md`](./virtual-display.md) | Session virtual display (phone aspect) — preferred long-term |
 
 ## Latest batch
 
-**2026-08-16** — first dump captured across the files above.
+**2026-08-16** — first dump captured across the files above; plus virtual-display direction.
