@@ -1,6 +1,6 @@
 // App/desktop mirror viewport. Port of apps/mobile-client/src/app/mirror/page.tsx:
-// auto (launch →) adopt → capture → render binary frames, with direct-
-// manipulation touch via the ported GestureEngine (lib/src/gestures/).
+// auto (launch →) adopt → capture → render binary frames, with RustDesk-style
+// touch mode via the ported GestureEngine (lib/src/gestures/).
 
 import 'dart:async';
 
@@ -47,7 +47,10 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   int _frameCount = 0;
   int _fps = 0;
   bool _keyboardOpen = false;
-  bool _precision = false;
+  /// RustDesk-style input paradigm. `true` = Touch mode (default): finger is
+  /// the absolute pointer (tap/click, pan/drag). `false` = Mouse mode: one
+  /// finger moves a relative cursor, two fingers scroll.
+  bool _touchMode = true;
 
   final _kbController = TextEditingController();
   final _kbFocus = FocusNode();
@@ -229,14 +232,14 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         client.notify('input.mouseClick',
             {'button': 'middle', 'x': hx(e.x), 'y': hy(e.y)});
       case ScrollEvent():
-        // Trackpad mode scrolls at the cursor's current position (real
-        // trackpad semantics) — warping the pointer to the fingers on every
-        // two-finger scroll would fight the one-finger cursor control.
+        // Mouse (trackpad) mode scrolls at the cursor's current position —
+        // warping the pointer to the fingers on every two-finger scroll would
+        // fight one-finger cursor control. Touch mode scrolls at the fingers.
         client.notify('input.mouseScroll', {
           'deltaX': e.deltaX,
           'deltaY': e.deltaY,
-          if (!_precision) 'x': hx(e.x),
-          if (!_precision) 'y': hy(e.y),
+          if (_touchMode) 'x': hx(e.x),
+          if (_touchMode) 'y': hy(e.y),
         });
       case MouseMoveEvent():
         client.notify('input.mouseMove', {'dx': e.dx, 'dy': e.dy});
@@ -311,12 +314,19 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         ),
         actions: [
           IconButton(
-            tooltip: 'Trackpad mode: 1 finger moves the cursor, 2 fingers scroll',
-            icon: Icon(Icons.mouse,
-                color: _precision ? const Color(0xFF2A6AFF) : null),
+            tooltip: _touchMode
+                ? 'Touch mode: tap = click, drag = drag, 2 fingers = scroll'
+                : 'Mouse mode: 1 finger moves the cursor, 2 fingers scroll',
+            icon: Icon(
+              _touchMode ? Icons.touch_app : Icons.mouse,
+              color: const Color(0xFF2A6AFF),
+            ),
             onPressed: () {
-              setState(() => _precision = !_precision);
-              _engine.setPrecision(_precision);
+              setState(() => _touchMode = !_touchMode);
+              // Touch ↔ Mouse mirrors RustDesk's touchMode toggle.
+              _engine.setMode(
+                  _touchMode ? GestureMode.touch : GestureMode.trackpad);
+              _engine.setPrecision(false);
             },
           ),
           IconButton(

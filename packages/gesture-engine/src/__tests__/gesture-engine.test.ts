@@ -226,8 +226,7 @@ describe('GestureEngine', () => {
     const { el, getRect } = createMockElement();
     const events: GestureEvent[] = [];
     const callbacks: GestureCallbacks = { onGesture: (e) => events.push(e) };
-    // v2: one-finger pan is a momentum scroll in the default `direct` mode.
-    // Relative cursor movement is the legacy `trackpad` (Precision) behaviour.
+    // Relative cursor movement is Mouse / Precision (trackpad) behaviour.
     const engine = new GestureEngine(el as unknown as HTMLElement, callbacks, { mode: 'trackpad' });
 
     Object.defineProperty(el, 'getBoundingClientRect', { value: getRect, configurable: true });

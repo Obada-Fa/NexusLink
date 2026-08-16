@@ -1,20 +1,19 @@
 // NexusLink Gesture Engine v2
 //
-// Direct-manipulation touch translation (architecture.md Module C). The default
-// `direct` mode treats the finger as touching content at an absolute host
-// coordinate: a one-finger pan is a momentum scroll, not a cursor drag. The legacy
-// relative-cursor behaviour survives as `trackpad` mode (a.k.a. Precision mode).
+// Default `touch` mode matches RustDesk mobile touch mode: the finger is the
+// pointer at an absolute host coordinate (tap = click, one-finger pan = left
+// drag, two-finger pan = scroll, long-press = right click). `trackpad` is the
+// mouse/precision fallback (relative cursor). `direct` is kept as an alias of
+// `touch` for older callers.
 //
 // Public surface (`GestureEngine`, `attach`/`detach`, `setHostDimensions`,
 // `scaleToHost`, and the exported sensitivity constants) is preserved. Internals
 // are delegated to ./classifier, ./scroll-physics, and ./input-mapper.
 
 import {
-  resolveAxis,
-  projectToAxis,
   isTap,
   isDoubleTap,
-  type Axis,
+  TAP_MAX_MOVE_PX,
   type GestureState,
 } from './classifier';
 import {
@@ -43,7 +42,7 @@ export const PINCH_MIN_DELTA_PX = 6;
 /** Screen-px → zoom-scale factor per pinch step. */
 export const PINCH_ZOOM_SCALE = 0.005;
 
-export type GestureMode = 'direct' | 'trackpad';
+export type GestureMode = 'touch' | 'trackpad' | 'direct';
 
 export type GestureEvent =
   | { type: 'mouse-move'; dx: number; dy: number }
@@ -67,7 +66,10 @@ export interface FrameScheduler {
 }
 
 export interface GestureOptions {
-  /** 'direct' (default): one-finger pan = momentum scroll. 'trackpad': relative cursor. */
+  /**
+   * 'touch' (default, RustDesk-style): one-finger pan = left drag.
+   * 'trackpad': relative cursor. 'direct' aliases 'touch'.
+   */
   mode?: GestureMode;
   /** Force relative-cursor control with reduced sensitivity (overrides mode). */
   precision?: boolean;
@@ -172,7 +174,6 @@ export class GestureEngine {
   private lastTapTime = 0;
   private lastTapPos: { x: number; y: number } | null = null;
 
-  private axis: Axis = 'none';
   private dragStarted = false;
   private maxTouches = 0;
 
@@ -193,7 +194,7 @@ export class GestureEngine {
   constructor(element: HTMLElement, callbacks: GestureCallbacks, options: GestureOptions = {}) {
     this.element = element;
     this.callbacks = callbacks;
-    this.mode = options.mode ?? 'direct';
+    this.mode = options.mode ?? 'touch';
     this.precision = options.precision ?? false;
     this.scheduler = options.scheduler ?? defaultScheduler();
     this.now = options.now ?? (() => Date.now());
@@ -255,7 +256,9 @@ export class GestureEngine {
 
   /** Effective mode: precision forces relative-cursor (trackpad) behaviour. */
   private effectiveMode(): GestureMode {
-    return this.precision ? 'trackpad' : this.mode;
+    if (this.precision) return 'trackpad';
+    if (this.mode === 'direct') return 'touch';
+    return this.mode;
   }
 
   private emit(gesture: GestureEvent): void {
@@ -310,7 +313,6 @@ export class GestureEngine {
     this.scrollCarryY = 0;
     this.longPressFired = false;
     this.dragStarted = false;
-    this.axis = 'none';
     this.maxTouches = 0;
     this.state = 'idle';
   }
@@ -320,7 +322,6 @@ export class GestureEngine {
     this.startPos = host;
     this.startTime = this.now();
     this.lastPos = host;
-    this.axis = 'none';
     this.scrollCarryX = 0;
     this.scrollCarryY = 0;
     this.moveAccumDx = 0;
@@ -380,15 +381,9 @@ export class GestureEngine {
   private handleSingleMove(touch: Touch): void {
     const host = this.toHost(touch);
 
-    // Held-then-move => drag (long press already emitted its context click).
+    // After a long-press context click: do not turn the lingering hold into a
+    // left-drag (RustDesk touch mode). Stay idle until release.
     if (this.longPressFired) {
-      if (!this.dragStarted) {
-        this.dragStarted = true;
-        this.state = 'dragging';
-        this.emit({ type: 'drag-start', x: host.x, y: host.y });
-      } else {
-        this.emit({ type: 'drag-move', x: host.x, y: host.y });
-      }
       this.lastPos = host;
       return;
     }
@@ -406,25 +401,16 @@ export class GestureEngine {
     const rawDx = host.x - this.lastPos.x;
     const rawDy = host.y - this.lastPos.y;
 
-    if (this.effectiveMode() === 'direct') {
-      this.state = 'scrolling';
-      // Lock axis once travel is decisive.
-      if (this.axis === 'none') {
-        this.axis = resolveAxis(host.x - this.startPos.x, host.y - this.startPos.y);
-      }
-      const proj = projectToAxis(rawDx, rawDy, this.axis);
-      // Content tracks the finger: scroll delta is opposite to finger travel.
-      const sdx = -proj.dx;
-      const sdy = -proj.dy;
-      this.velocity.addSample(sdx, sdy, this.now());
-      this.scrollCarryX += sdx;
-      this.scrollCarryY += sdy;
-      const ix = Math.trunc(this.scrollCarryX);
-      const iy = Math.trunc(this.scrollCarryY);
-      if (ix !== 0 || iy !== 0) {
-        this.scrollCarryX -= ix;
-        this.scrollCarryY -= iy;
-        this.emit({ type: 'mouse-scroll', deltaX: ix, deltaY: iy, x: host.x, y: host.y });
+    if (this.effectiveMode() === 'touch') {
+      // RustDesk touch mode: one-finger pan = left-button drag at absolute
+      // host coordinates. Start once travel clears the tap slop.
+      if (this.dist(host, this.startPos) > TAP_MAX_MOVE_PX) {
+        if (!this.dragStarted) {
+          this.dragStarted = true;
+          this.state = 'dragging';
+          this.emit({ type: 'drag-start', x: this.startPos.x, y: this.startPos.y });
+        }
+        this.emit({ type: 'drag-move', x: host.x, y: host.y });
       }
     } else {
       // Trackpad: relative cursor movement.
@@ -451,7 +437,7 @@ export class GestureEngine {
 
   private handleMultiMove(t0: Touch, t1: Touch): void {
     this.clearLongPressTimer();
-    this.state = 'pinching';
+    this.state = 'scrolling';
 
     const midX = (t0.clientX + t1.clientX) / 2;
     const midY = (t0.clientY + t1.clientY) / 2;
@@ -464,12 +450,20 @@ export class GestureEngine {
     const host = this.toHost(t0);
 
     // Pinch dominates over pan → zoom; otherwise two-finger pan → scroll.
-    if (Math.abs(pinchDelta) >= PINCH_MIN_DELTA_PX && Math.abs(pinchDelta) > Math.hypot(panDx, panDy)) {
+    if (
+      this.effectiveMode() !== 'trackpad' &&
+      Math.abs(pinchDelta) >= PINCH_MIN_DELTA_PX &&
+      Math.abs(pinchDelta) > Math.hypot(panDx, panDy)
+    ) {
+      this.state = 'pinching';
       this.emit({ type: 'zoom', scale: pinchDelta * PINCH_ZOOM_SCALE, x: host.x, y: host.y });
     } else {
       // Content tracks the fingers.
-      this.scrollCarryX += -panDx;
-      this.scrollCarryY += -panDy;
+      const sdx = -panDx;
+      const sdy = -panDy;
+      this.velocity.addSample(sdx, sdy, this.now());
+      this.scrollCarryX += sdx;
+      this.scrollCarryY += sdy;
       const ix = Math.trunc(this.scrollCarryX);
       const iy = Math.trunc(this.scrollCarryY);
       if (ix !== 0 || iy !== 0) {
@@ -545,8 +539,8 @@ export class GestureEngine {
         return;
       }
 
-      // A one-finger direct scroll that ended with velocity → momentum fling.
-      if (this.effectiveMode() === 'direct' && this.state === 'scrolling') {
+      // Two-finger scroll released with velocity → momentum fling.
+      if (this.state === 'scrolling') {
         this.startInertia();
       }
     }

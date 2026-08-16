@@ -61,10 +61,16 @@ const double pinchMinDeltaPx = 6;
 /// Screen-px -> zoom-scale factor per pinch step.
 const double pinchZoomScale = 0.005;
 
-/// 'direct' (default): one-finger pan = momentum scroll at the absolute host
-/// coordinate under the finger. 'trackpad': legacy relative-cursor movement
-/// (a.k.a. Precision mode behaviour).
-enum GestureMode { direct, trackpad }
+/// Input paradigm for the mirror viewport.
+///
+/// - [touch] (default, RustDesk-style): the finger *is* the pointer at an
+///   absolute host coordinate. Tap = left click, one-finger pan = left drag,
+///   long-press = right click, two-finger pan = scroll, pinch = zoom.
+/// - [trackpad] (a.k.a. Mouse / Precision mode): one-finger relative cursor
+///   movement, two-finger scroll — like a laptop trackpad.
+/// - [direct]: legacy alias kept for callers; identical to [touch]. Prefer
+///   [touch] in new code.
+enum GestureMode { touch, trackpad, direct }
 
 enum Axis { none, vertical, horizontal, free }
 
@@ -218,15 +224,17 @@ typedef GestureCallback = void Function(GestureEvent event);
 typedef FlingCallback = void Function(
     double vx, double vy, double anchorX, double anchorY, double timestampMs);
 
-/// Touch FSM: tap / double-tap / scroll / long-press context / drag / pinch /
-/// two-finger pan / three-finger tap. Faithful port of the recognizer in
-/// packages/gesture-engine/src/index.ts.
+/// Touch FSM: tap / double-tap / long-press context / one-finger drag /
+/// two-finger scroll / pinch / three-finger tap.
+///
+/// Default [GestureMode.touch] matches RustDesk mobile touch mode: one-finger
+/// pan is a left-button drag at absolute host coordinates, not a scroll.
 class TouchClassifier {
   TouchClassifier({
     required this._toHost,
     required this._onGesture,
     this._onFlingStart,
-    this.mode = GestureMode.direct,
+    this.mode = GestureMode.touch,
     this.precision = false,
   });
 
@@ -254,7 +262,6 @@ class TouchClassifier {
   double _lastTapTime = 0;
   ({double x, double y})? _lastTapPos;
 
-  Axis _axis = Axis.none;
   bool _dragStarted = false;
   int _maxTouches = 0;
 
@@ -270,8 +277,12 @@ class TouchClassifier {
   double _prevPinchDist = 0;
 
   /// Effective mode: precision forces relative-cursor (trackpad) behaviour.
-  GestureMode get _effectiveMode =>
-      precision ? GestureMode.trackpad : mode;
+  /// [GestureMode.direct] is treated as [GestureMode.touch].
+  GestureMode get _effectiveMode {
+    if (precision) return GestureMode.trackpad;
+    if (mode == GestureMode.direct) return GestureMode.touch;
+    return mode;
+  }
 
   void _emit(GestureEvent event) => _onGesture(event);
 
@@ -293,7 +304,6 @@ class TouchClassifier {
     _longPressFired = false;
     _longPressArmed = false;
     _dragStarted = false;
-    _axis = Axis.none;
     _maxTouches = 0;
     _state = GestureState.idle;
   }
@@ -321,7 +331,6 @@ class TouchClassifier {
     _startPos = host;
     _startTime = timestampMs;
     _lastPos = host;
-    _axis = Axis.none;
     _scrollCarryX = 0;
     _scrollCarryY = 0;
     _moveAccumDx = 0;
@@ -372,15 +381,10 @@ class TouchClassifier {
 
     final host = _toHost(touch.x, touch.y);
 
-    // Held-then-move => drag (long press already emitted its context click).
+    // After a long-press context click: RustDesk touch mode does not turn the
+    // lingering hold into a left-drag (that would fight the right click). Stay
+    // idle until release.
     if (_longPressFired) {
-      if (!_dragStarted) {
-        _dragStarted = true;
-        _state = GestureState.dragging;
-        _emit(DragStartEvent(host.x, host.y));
-      } else {
-        _emit(DragMoveEvent(host.x, host.y));
-      }
       _lastPos = host;
       return;
     }
@@ -400,25 +404,18 @@ class TouchClassifier {
     final rawDx = host.x - last.x;
     final rawDy = host.y - last.y;
 
-    if (_effectiveMode == GestureMode.direct) {
-      _state = GestureState.scrolling;
-      // Lock axis once travel is decisive.
-      if (_axis == Axis.none) {
-        _axis = resolveAxis(host.x - start.x, host.y - start.y);
-      }
-      final proj = projectToAxis(rawDx, rawDy, _axis);
-      // Content tracks the finger: scroll delta is opposite to finger travel.
-      final sdx = -proj.dx;
-      final sdy = -proj.dy;
-      _velocity.addSample(sdx, sdy, timestampMs);
-      _scrollCarryX += sdx;
-      _scrollCarryY += sdy;
-      final ix = _scrollCarryX.truncate();
-      final iy = _scrollCarryY.truncate();
-      if (ix != 0 || iy != 0) {
-        _scrollCarryX -= ix;
-        _scrollCarryY -= iy;
-        _emit(ScrollEvent(ix, iy, host.x, host.y));
+    if (_effectiveMode == GestureMode.touch) {
+      // RustDesk touch mode: one-finger pan = left-button drag at absolute
+      // host coordinates. Start the drag once travel clears the tap slop so
+      // a tiny jitter still counts as a tap.
+      if (_dist(host, start) > tapMaxMovePx) {
+        if (!_dragStarted) {
+          _dragStarted = true;
+          _state = GestureState.dragging;
+          // Button-down at the original touch point (where the user aimed).
+          _emit(DragStartEvent(start.x, start.y));
+        }
+        _emit(DragMoveEvent(host.x, host.y));
       }
     } else {
       // Trackpad: relative cursor movement.
@@ -443,7 +440,7 @@ class TouchClassifier {
 
   void _handleMultiMove(TouchPoint t0, TouchPoint t1, double timestampMs) {
     _longPressArmed = false;
-    _state = GestureState.pinching;
+    _state = GestureState.scrolling;
 
     final midX = (t0.x + t1.x) / 2;
     final midY = (t0.y + t1.y) / 2;
@@ -464,11 +461,15 @@ class TouchClassifier {
     if (_effectiveMode != GestureMode.trackpad &&
         pinchDelta.abs() >= pinchMinDeltaPx &&
         pinchDelta.abs() > math.sqrt(panDx * panDx + panDy * panDy)) {
+      _state = GestureState.pinching;
       _emit(ZoomEvent(pinchDelta * pinchZoomScale, host.x, host.y));
     } else {
-      // Content tracks the fingers.
-      _scrollCarryX += -panDx;
-      _scrollCarryY += -panDy;
+      // Content tracks the fingers (two-finger scroll).
+      final sdx = -panDx;
+      final sdy = -panDy;
+      _velocity.addSample(sdx, sdy, timestampMs);
+      _scrollCarryX += sdx;
+      _scrollCarryY += sdy;
       final ix = _scrollCarryX.truncate();
       final iy = _scrollCarryY.truncate();
       if (ix != 0 || iy != 0) {
@@ -552,11 +553,8 @@ class TouchClassifier {
         return;
       }
 
-      // A one-finger direct scroll that ended with velocity -> momentum
-      // fling (the engine checks the start threshold). A finger that paused
-      // before lifting has stale velocity — flinging then feels haunted.
-      if (_effectiveMode == GestureMode.direct &&
-          _state == GestureState.scrolling &&
+      // Two-finger scroll released with velocity -> momentum fling.
+      if (_state == GestureState.scrolling &&
           timestampMs - _velocity.lastSampleTimeMs <= flingMaxSampleAgeMs) {
         _onFlingStart?.call(
           _velocity.vx,
