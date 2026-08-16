@@ -28,6 +28,23 @@ export type RpcMethod =
   | 'window.activate'
   | 'apps.list'
   | 'apps.launch'
+  | 'appSession.create'
+  | 'appSession.list'
+  | 'appSession.resize'
+  | 'appSession.close'
+  | 'webrtc.start'
+  | 'webrtc.signal'
+  | 'webrtc.stop'
+  | 'clipboard.get'
+  | 'clipboard.set'
+  | 'agent.list'
+  | 'agent.createSession'
+  | 'agent.listSessions'
+  | 'agent.prompt'
+  | 'agent.permission'
+  | 'agent.cancel'
+  | 'agent.close'
+  | 'agent.history'
   | 'session.pair'
   | 'session.authenticate'
   | 'session.heartbeat'
@@ -73,27 +90,27 @@ export type Params<M extends RpcMethod> =
     : M extends 'terminal.kill'
     ? { terminalId: string }
     : M extends 'screen.startCapture'
-    ? { quality: 'low' | 'medium' | 'high'; fps: number; windowId?: string }
+    ? { quality: 'low' | 'medium' | 'high'; fps: number; windowId?: string; sessionId?: string }
     : M extends 'screen.stopCapture'
     ? { streamId: string }
     : M extends 'screen.getMetadata'
     ? {}
     : M extends 'input.mouseMove'
-    ? { dx: number; dy: number }
+    ? { dx: number; dy: number; sessionId?: string }
     : M extends 'input.mouseClick'
-    ? { button: 'left' | 'right' | 'middle'; x?: number; y?: number }
+    ? { button: 'left' | 'right' | 'middle'; x?: number; y?: number; sessionId?: string }
     : M extends 'input.buttonDown'
-    ? { button: 'left' | 'right' | 'middle'; x?: number; y?: number }
+    ? { button: 'left' | 'right' | 'middle'; x?: number; y?: number; sessionId?: string }
     : M extends 'input.buttonUp'
-    ? { button: 'left' | 'right' | 'middle'; x?: number; y?: number }
+    ? { button: 'left' | 'right' | 'middle'; x?: number; y?: number; sessionId?: string }
     : M extends 'input.mouseMoveAbs'
-    ? { x: number; y: number }
+    ? { x: number; y: number; sessionId?: string }
     : M extends 'input.mouseScroll'
-    ? { deltaX: number; deltaY: number; x: number; y: number; modifiers?: string[] }
+    ? { deltaX: number; deltaY: number; x: number; y: number; modifiers?: string[]; sessionId?: string }
     : M extends 'input.keyEvent'
-    ? { key: string; modifiers?: string[] }
+    ? { key: string; modifiers?: string[]; sessionId?: string }
     : M extends 'input.typeText'
-    ? { text: string }
+    ? { text: string; sessionId?: string }
     : M extends 'window.list'
     ? {}
     : M extends 'window.adopt'
@@ -106,6 +123,40 @@ export type Params<M extends RpcMethod> =
     ? {}
     : M extends 'apps.launch'
     ? { appId: string }
+    : M extends 'appSession.create'
+    ? { appId: string; width: number; height: number; dpr?: number }
+    : M extends 'appSession.list'
+    ? {}
+    : M extends 'appSession.resize'
+    ? { sessionId: string; width: number; height: number }
+    : M extends 'appSession.close'
+    ? { sessionId: string }
+    : M extends 'webrtc.start'
+    ? { sessionId: string; fps?: number }
+    : M extends 'webrtc.signal'
+    ? { webrtcId: string; data: WebRtcSignal }
+    : M extends 'webrtc.stop'
+    ? { webrtcId: string }
+    : M extends 'clipboard.get'
+    ? { sessionId?: string }
+    : M extends 'clipboard.set'
+    ? { text: string; sessionId?: string }
+    : M extends 'agent.list'
+    ? {}
+    : M extends 'agent.createSession'
+    ? { agent: string; cwd?: string; title?: string }
+    : M extends 'agent.listSessions'
+    ? {}
+    : M extends 'agent.prompt'
+    ? { agentSessionId: string; text: string }
+    : M extends 'agent.permission'
+    ? { agentSessionId: string; requestId: string; allow: boolean }
+    : M extends 'agent.cancel'
+    ? { agentSessionId: string }
+    : M extends 'agent.close'
+    ? { agentSessionId: string }
+    : M extends 'agent.history'
+    ? { agentSessionId: string }
     : M extends 'session.pair'
     ? { publicKey: string }
     : M extends 'session.authenticate'
@@ -179,6 +230,40 @@ export type Result<M extends RpcMethod> =
     ? AppInfo[]
     : M extends 'apps.launch'
     ? { ok: boolean; wmClass?: string }
+    : M extends 'appSession.create'
+    ? AppSessionInfo
+    : M extends 'appSession.list'
+    ? AppSessionInfo[]
+    : M extends 'appSession.resize'
+    ? { width: number; height: number; resized: boolean }
+    : M extends 'appSession.close'
+    ? { ok: boolean }
+    : M extends 'webrtc.start'
+    ? { webrtcId?: string; available: boolean; reason?: string }
+    : M extends 'webrtc.signal'
+    ? void
+    : M extends 'webrtc.stop'
+    ? void
+    : M extends 'clipboard.get'
+    ? { text: string }
+    : M extends 'clipboard.set'
+    ? { ok: boolean }
+    : M extends 'agent.list'
+    ? AgentInfo[]
+    : M extends 'agent.createSession'
+    ? AgentSessionInfo
+    : M extends 'agent.listSessions'
+    ? AgentSessionInfo[]
+    : M extends 'agent.prompt'
+    ? { ok: boolean }
+    : M extends 'agent.permission'
+    ? { ok: boolean }
+    : M extends 'agent.cancel'
+    ? { ok: boolean }
+    : M extends 'agent.close'
+    ? { ok: boolean }
+    : M extends 'agent.history'
+    ? AgentEvent[]
     : M extends 'session.pair'
     ? { publicKey: string; totpIssuerUri: string }
     : M extends 'session.authenticate'
@@ -264,6 +349,71 @@ export interface AppInfo {
   wmClass?: string
 }
 
+/**
+ * A phone-shaped virtual display running one app on the host. The app renders
+ * at the phone's exact resolution/DPI on a headless X server — the host's real
+ * desktop is never touched, and the phone sees the full surface 1:1.
+ */
+export interface AppSessionInfo {
+  sessionId: string
+  appId: string
+  name: string
+  icon?: string
+  /** X display of the session's virtual screen, e.g. ":51" */
+  display: string
+  width: number
+  height: number
+  dpr: number
+  createdAt: number
+  status: 'starting' | 'running' | 'exited'
+}
+
+/** SDP / ICE payload relayed verbatim between the host encoder and the phone. */
+export type WebRtcSignal =
+  | { kind: 'offer' | 'answer'; sdp: string }
+  | { kind: 'ice'; candidate: string; sdpMLineIndex: number }
+
+/** An AI agent CLI installed on the host (Claude Code, Cursor CLI, ...). */
+export interface AgentInfo {
+  id: string
+  name: string
+  available: boolean
+  version?: string
+}
+
+export interface AgentSessionInfo {
+  agentSessionId: string
+  agent: string
+  cwd: string
+  title: string
+  createdAt: number
+  busy: boolean
+  status: 'running' | 'exited'
+}
+
+/** Normalized event emitted by any agent adapter (superset of stream-json). */
+export interface AgentEvent {
+  seq: number
+  ts: number
+  kind:
+    | 'user'
+    | 'text'
+    | 'text-delta'
+    | 'thinking'
+    | 'tool-start'
+    | 'tool-end'
+    | 'permission-request'
+    | 'result'
+    | 'error'
+    | 'status'
+  text?: string
+  toolName?: string
+  toolInput?: string
+  toolOutput?: string
+  /** Correlates tool-start/tool-end pairs and permission requests. */
+  refId?: string
+}
+
 export type WsMessage =
   | { type: 'rpc-request'; request: RpcRequest }
   | { type: 'rpc-response'; response: RpcResponse }
@@ -271,3 +421,6 @@ export type WsMessage =
   | { type: 'stream-region'; streamId: string; region: CaptureRegion }
   | { type: 'terminal-output'; terminalId: string; data: string }
   | { type: 'perf-update'; data: PerfSnapshot }
+  | { type: 'webrtc-signal'; webrtcId: string; data: WebRtcSignal }
+  | { type: 'app-session-update'; session: AppSessionInfo }
+  | { type: 'agent-event'; agentSessionId: string; event: AgentEvent }

@@ -9,6 +9,7 @@ import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import type { WindowInfo, AppInfo, CaptureRegion } from '@nexuslink/rpc-types';
 import { getScreenMetadata, getPrimaryMonitor } from './capture';
+import { listProfiles } from './app-profiles';
 
 const DISPLAY = process.env.DISPLAY || ':0';
 
@@ -241,8 +242,33 @@ export async function listApps(): Promise<AppInfo[]> {
       wmClass: app.wmClass ?? app.appId,
     });
   }
+  // Built-in virtual-session profiles (e.g. the mobile browser) appear as
+  // first-class launcher apps alongside the .desktop catalog.
+  for (const p of listProfiles()) {
+    if (out.some((a) => a.appId === p.appId)) continue;
+    out.push({
+      appId: p.appId,
+      name: p.name,
+      icon: await resolveIcon(p.iconName),
+      wmClass: p.appId,
+    });
+  }
   out.sort((a, b) => a.name.localeCompare(b.name));
   return out;
+}
+
+/** Catalog lookup for the virtual-session launcher (app-sessions.ts). */
+export async function getDesktopEntry(
+  appId: string,
+): Promise<{ exec?: string; name: string; iconName?: string } | null> {
+  const catalog = await getCatalog();
+  const app = catalog.apps.find((a) => a.appId === appId);
+  return app ? { exec: app.exec, name: app.name, iconName: app.iconName } : null;
+}
+
+/** Icon resolution for callers outside this module. */
+export async function resolveIconPublic(iconName: string | undefined): Promise<string | undefined> {
+  return resolveIcon(iconName);
 }
 
 export async function launchApp(appId: string): Promise<{ ok: boolean; wmClass?: string }> {
