@@ -1,0 +1,17 @@
+{
+  "name": "NexusLink",
+  "install": "curl -fsSL https://bun.sh/install | BUN_INSTALL=\"$HOME/.bun\" bash -s bun-v1.3.14 && (sudo ln -sf \"$HOME/.bun/bin/bun\" /usr/local/bin/bun && sudo ln -sf \"$HOME/.bun/bin/bunx\" /usr/local/bin/bunx || true) && export PATH=\"$HOME/.bun/bin:$PATH\" && bun install",
+  "terminals": [
+    {
+      "name": "dev",
+      "command": "export PATH=\"$HOME/.bun/bin:$PATH\" && bun run dev",
+      "description": "All NexusLink apps via turbo: desktop RPC host (ws/http :45678) + Next.js UI (:3000), mobile PWA (:3001), signaling relay (ws :3033). Run `bun run lan` instead for the single-port QR-pairing host."
+    }
+  ],
+  "ports": [
+    { "name": "desktop-next", "port": 3000 },
+    { "name": "mobile-pwa", "port": 3001 },
+    { "name": "relay-ws", "port": 3033 },
+    { "name": "host-rpc", "port": 45678 }
+  ]
+}
