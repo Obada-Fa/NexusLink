@@ -8,7 +8,10 @@ import { mkdirSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { AppSessionInfo, WsMessage } from '@nexuslink/rpc-types';
-import { getProfile, listProfiles, type LaunchContext } from './app-profiles';
+import {
+  getProfile, listProfiles, resolveChromiumBin, buildChromiumArgv,
+  type LaunchContext,
+} from './app-profiles';
 import { getDesktopEntry, resolveIconPublic } from './windows';
 
 type SpawnOpts = Parameters<typeof Bun.spawn>[1];
@@ -212,9 +215,16 @@ export async function createAppSession(
     const ctx: LaunchContext = { width: geo.width, height: geo.height, dpr: geo.dpr, sessionDir };
     let argv: string[];
     let extraEnv: Record<string, string> | undefined;
+    const chromiumBin = profile ? null : resolveChromiumBin(appId, desktopEntry?.exec);
     if (profile) {
       argv = profile.buildArgv(ctx);
       extraEnv = profile.buildEnv?.(ctx);
+    } else if (chromiumBin) {
+      // Brave/Chrome/Chromium .desktop Exec reuses the desktop profile and
+      // exits if that browser is already open. Give the virtual session its
+      // own user-data-dir plus mobile UA/scale so it actually appears.
+      argv = buildChromiumArgv(chromiumBin, ctx);
+      extraEnv = { GDK_SCALE: '1', QT_SCALE_FACTOR: '1' };
     } else {
       // .desktop Exec with field codes stripped, run through sh for quoting.
       const exec = (desktopEntry!.exec ?? '').replace(/%[fFuUdDnNickvm]/g, '').trim();
