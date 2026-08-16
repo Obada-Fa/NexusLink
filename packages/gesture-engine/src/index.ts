@@ -120,16 +120,19 @@ export function scaleToHost(
   let offsetX: number;
   let offsetY: number;
 
+  // object-fit: contain / BoxFit.contain:
+  // - view relatively wider → fit height, letterbox left/right
+  // - view relatively taller → fit width, letterbox top/bottom
   if (viewAspect > hostAspect) {
-    contentWidth = viewWidth;
-    contentHeight = viewWidth / hostAspect;
-    offsetX = 0;
-    offsetY = (viewHeight - contentHeight) / 2;
-  } else {
     contentHeight = viewHeight;
     contentWidth = viewHeight * hostAspect;
     offsetX = (viewWidth - contentWidth) / 2;
     offsetY = 0;
+  } else {
+    contentWidth = viewWidth;
+    contentHeight = viewWidth / hostAspect;
+    offsetX = 0;
+    offsetY = (viewHeight - contentHeight) / 2;
   }
 
   if (contentWidth <= 0 || contentHeight <= 0) {

@@ -32,26 +32,38 @@ TouchPoint tp(double x, double y, [int id = 0]) => TouchPoint(id, x, y);
 }
 
 void main() {
-  group('scaleToHost', () {
+  group('scaleToHost', () => {
     test('scales with matching aspect ratio (no letterbox)', () {
-      final result = scaleToHost(50, 50, 100, 100, 1920, 1080);
+      // 16:9 view and host → no bars
+      final result = scaleToHost(960, 540, 1920, 1080, 1920, 1080);
       expect(result.x, 960);
       expect(result.y, 540);
     });
 
-    test('handles wider view than host (letterbox top/bottom)', () {
-      final result = scaleToHost(100, 50, 200, 100, 1920, 1080);
-      expect(result.x, 960);
-      expect(result.y, greaterThan(0));
-      expect(result.y, lessThan(1080));
+    test('handles wider view than host (letterbox left/right)', () {
+      // view 200x100 (aspect 2) vs host 16:9 → fit height, side bars
+      final center = scaleToHost(100, 50, 200, 100, 1920, 1080);
+      expect(center.x, 960);
+      expect(center.y, 540);
+
+      final leftEdge = scaleToHost(11.11, 50, 200, 100, 1920, 1080);
+      expect(leftEdge.x, 0);
+      expect(leftEdge.y, 540);
     });
 
-    test('handles taller view than host (letterbox left/right)', () {
-      final result = scaleToHost(50, 100, 100, 200, 1920, 1080);
-      expect(result.x, greaterThan(0));
-      expect(result.x, lessThan(1920));
-      expect(result.y, greaterThan(0));
-      expect(result.y, lessThan(1080));
+    test('handles taller view than host (letterbox top/bottom)', () {
+      // portrait phone-like view vs landscape host → fit width, top/bottom bars
+      final center = scaleToHost(50, 100, 100, 200, 1920, 1080);
+      expect(center.x, 960);
+      expect(center.y, 540);
+
+      // Top of the contained image → host y=0 (not mid-screen)
+      final topOfContent = scaleToHost(50, 71.875, 100, 200, 1920, 1080);
+      expect(topOfContent.y, 0);
+
+      // Bottom of the contained image → host y=1080
+      final bottomOfContent = scaleToHost(50, 128.125, 100, 200, 1920, 1080);
+      expect(bottomOfContent.y, 1080);
     });
 
     test('clamps output to host bounds', () {
