@@ -42,11 +42,16 @@ Linux/X11 host needs:
 bun run lan          # builds the PWA, then starts the unified host on :45678
 ```
 
-The host prints a **QR code** and its LAN URLs (e.g. `http://192.168.2.30:45678`).
+The host prints a **QR code** for every address it is reachable at:
 
-- **Phone** (same Wi-Fi): scan the QR → the browser opens and **auto-connects**.
-  Tap an app — it opens full-screen on the phone, nothing moves on the PC.
-  The dock has Terminal and Agents (Claude Code / Cursor CLI / demo agent).
+- **Local Wi-Fi** (same network)
+- **Tailscale** (any network, as long as the phone and PC are on the same tailnet)
+
+Scan either square — the page auto-connects. Example: `http://192.168.2.30:45678` and `http://100.x.y.z:45678`.
+
+- **Phone**: scan the **local** QR on the same Wi-Fi, or the **Tailscale** QR from anywhere
+  on the tailnet — the browser opens and auto-connects. Tap an app — it opens full-screen
+  on the phone, nothing moves on the PC. The dock has Terminal and Agents.
 - **PC**: open `http://localhost:45678`. Your desktop stays fully usable.
 
 One port serves the app *and* the control WebSocket. The client derives the host from the
