@@ -30,6 +30,7 @@ export default function GestureOverlay({
   const engineRef = useRef<GestureEngine | null>(null);
   const regionRef = useRef<HostRegion | null>(region ?? null);
   regionRef.current = region ?? null;
+  const inputModeRef = useRef<InputMode>('touch');
   const [inputMode, setInputMode] = useState<InputMode>('touch');
   const [lastGesture, setLastGesture] = useState<string>('');
 
@@ -42,6 +43,7 @@ export default function GestureOverlay({
       const off = regionRef.current;
       const ox = off ? off.x : 0;
       const oy = off ? off.y : 0;
+      const mode = inputModeRef.current;
 
       // Fire-and-forget: input is latency-sensitive, so we never await the RPC.
       switch (event.type) {
@@ -59,7 +61,6 @@ export default function GestureOverlay({
           setLastGesture('dbl-click');
           const dx = event.x + ox;
           const dy = event.y + oy;
-          // Two clicks 50ms apart so the host registers a native double-click.
           client.request('input.mouseClick', { button: 'left', x: dx, y: dy }).catch(() => {});
           setTimeout(() => {
             client.request('input.mouseClick', { button: 'left', x: dx, y: dy }).catch(() => {});
@@ -72,8 +73,7 @@ export default function GestureOverlay({
             .request('input.mouseScroll', {
               deltaX: event.deltaX,
               deltaY: event.deltaY,
-              // Mouse mode scrolls at the cursor; touch mode scrolls at fingers.
-              ...(inputMode === 'touch' ? { x: event.x + ox, y: event.y + oy } : {}),
+              ...(mode === 'touch' ? { x: event.x + ox, y: event.y + oy } : {}),
             })
             .catch(() => {});
           break;
@@ -93,8 +93,6 @@ export default function GestureOverlay({
             .catch(() => {});
           break;
         case 'zoom':
-          // Pinch-zoom → Ctrl+wheel at the pinch midpoint. scale is a signed
-          // delta; positive = fingers apart = zoom in = wheel up (negative dy).
           setLastGesture(`zoom ${event.scale.toFixed(2)}`);
           client
             .request('input.mouseScroll', {
@@ -108,7 +106,7 @@ export default function GestureOverlay({
           break;
       }
     },
-    [client, status, inputMode],
+    [client, status],
   );
 
   useEffect(() => {
@@ -121,8 +119,6 @@ export default function GestureOverlay({
     engine.attach();
     engineRef.current = engine;
 
-    // Adopted-window mode: touch space IS the captured region. Otherwise fall
-    // back to full-screen metadata.
     if (region && region.width > 0 && region.height > 0) {
       engine.setHostDimensions(region.width, region.height);
     } else if (client && status === 'connected') {
@@ -134,9 +130,7 @@ export default function GestureOverlay({
             engine.setHostDimensions(meta.width, meta.height);
           }
         })
-        .catch(() => {
-          // Default 1920x1080 already set
-        });
+        .catch(() => {});
     }
 
     return () => {
@@ -146,9 +140,9 @@ export default function GestureOverlay({
   }, [viewportRef, handleGesture, client, status, region]);
 
   useEffect(() => {
+    inputModeRef.current = inputMode;
     const engine = engineRef.current;
     if (!engine) return;
-    // Touch ↔ Mouse mirrors RustDesk's touchMode toggle.
     engine.setMode(inputMode === 'touch' ? 'touch' : 'trackpad');
     engine.setPrecision(false);
   }, [inputMode]);
@@ -160,14 +154,14 @@ export default function GestureOverlay({
   if (!showHud) return null;
 
   return (
-    <>
+    <div style={styles.hud}>
       <button
         onClick={toggleInputMode}
         style={{
           ...styles.modeBtn,
-          background: inputMode === 'touch' ? '#2a6aff' : 'transparent',
-          color: inputMode === 'touch' ? '#fff' : '#888',
-          borderColor: inputMode === 'touch' ? '#2a6aff' : '#333',
+          background: inputMode === 'touch' ? '#2a6aff' : 'rgba(0,0,0,0.45)',
+          color: inputMode === 'touch' ? '#fff' : '#e8e8f0',
+          borderColor: inputMode === 'touch' ? '#2a6aff' : 'rgba(255,255,255,0.2)',
         }}
         aria-label={
           inputMode === 'touch'
@@ -183,31 +177,40 @@ export default function GestureOverlay({
         {inputMode === 'touch' ? 'Touch' : 'Mouse'}
       </button>
 
-      {lastGesture ? (
-        <span style={styles.gestureHint}>{lastGesture}</span>
-      ) : null}
-    </>
+      {lastGesture ? <span style={styles.gestureHint}>{lastGesture}</span> : null}
+    </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  hud: {
+    position: 'absolute',
+    top: 'calc(8px + env(safe-area-inset-top))',
+    right: 10,
+    zIndex: 6,
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    pointerEvents: 'none',
+  },
   modeBtn: {
+    pointerEvents: 'auto',
     padding: '4px 10px',
     borderRadius: '4px',
     border: '1px solid',
     fontSize: '11px',
     fontWeight: 600,
     cursor: 'pointer',
-    background: 'transparent',
     transition: 'background 0.15s, color 0.15s',
   },
   gestureHint: {
     fontSize: '10px',
-    color: '#555',
+    color: '#ccc',
     fontFamily: 'monospace',
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
-    maxWidth: '140px',
+    maxWidth: '120px',
+    textShadow: '0 1px 2px rgba(0,0,0,0.9)',
   },
 };

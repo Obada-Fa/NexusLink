@@ -3,13 +3,14 @@
 //
 // Pure function, no Flutter imports, so it is unit-testable in isolation.
 
-/// Map a touch point within a (possibly letterboxed) view to the corresponding
+/// Map a touch point within a (possibly cropped) view to the corresponding
 /// pixel on the host screen.
 ///
-/// The remote frame is rendered "contain"-style inside the view: whichever
-/// axis has spare room gets symmetric letterbox bars, and touches inside the
-/// bars clamp to the nearest host edge. Mirrors the TS implementation exactly
-/// (round, then clamp to `[0, host]`).
+/// Matches CSS `object-fit: cover` / Flutter [BoxFit.cover]: the remote frame
+/// fills the view edge-to-edge; whichever axis overflows is cropped
+/// symmetrically. Touches in the cropped region clamp to the nearest host
+/// edge. Mirrors the TS implementation exactly (round, then clamp to
+/// `[0, host]`).
 ({double x, double y}) scaleToHost(
   double touchX,
   double touchY,
@@ -30,6 +31,9 @@
   double offsetX;
   double offsetY;
 
+  // object-fit: cover / BoxFit.cover:
+  // - view relatively wider → fill width, crop top/bottom
+  // - view relatively taller → fill height, crop left/right
   if (viewAspect > hostAspect) {
     contentWidth = viewWidth;
     contentHeight = viewWidth / hostAspect;

@@ -1,8 +1,8 @@
 'use client';
 
 // The phone-OS app viewport: streams an adopted host window (or the full desktop)
-// and turns touch into direct manipulation. Auto-connects and auto-starts — the
-// user never has to press "Start".
+// edge-to-edge (no letterbox bars). Chrome overlays the stream so adopt uses the
+// real stage size — matching the Flutter client's immersive layout.
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
@@ -39,6 +39,22 @@ function parseTarget(): MirrorTarget {
   };
 }
 
+/** Stage size for adopt — never the full window (chrome must not skew aspect). */
+function readStageSize(el: HTMLElement | null): { w: number; h: number } {
+  if (el) {
+    const r = el.getBoundingClientRect();
+    if (r.width >= 32 && r.height >= 32) {
+      return { w: Math.round(r.width), h: Math.round(r.height) };
+    }
+  }
+  // Fallback before first layout: visualViewport tracks mobile browser chrome.
+  const vv = typeof window !== 'undefined' ? window.visualViewport : null;
+  return {
+    w: Math.round(vv?.width ?? window.innerWidth),
+    h: Math.round(vv?.height ?? window.innerHeight),
+  };
+}
+
 function MirrorView() {
   const status = useConnectionStore((s) => s.status);
   const client = useConnectionStore((s) => s.client);
@@ -52,6 +68,7 @@ function MirrorView() {
   const [region, setRegion] = useState<HostRegion | null>(null);
   const [fps, setFps] = useState(0);
   const [kbOpen, setKbOpen] = useState(false);
+  const [chromeVisible, setChromeVisible] = useState(true);
 
   const streamIdRef = useRef<string | null>(null);
   const windowIdRef = useRef<string | null>(null);
@@ -61,10 +78,58 @@ function MirrorView() {
   const frameCountRef = useRef(0);
   const startedRef = useRef(false);
   const kbRef = useRef<HTMLInputElement | null>(null);
+  const lastAdoptRef = useRef<{ w: number; h: number } | null>(null);
+  const chromeHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     setTarget(parseTarget());
   }, []);
+
+  // Soft-hide chrome a few seconds after streaming starts (tap top edge to reveal).
+  useEffect(() => {
+    if (phase !== 'streaming') return;
+    if (chromeHideTimer.current) clearTimeout(chromeHideTimer.current);
+    chromeHideTimer.current = setTimeout(() => setChromeVisible(false), 2500);
+    return () => {
+      if (chromeHideTimer.current) clearTimeout(chromeHideTimer.current);
+    };
+  }, [phase]);
+
+  const bumpChrome = useCallback(() => {
+    setChromeVisible(true);
+    if (chromeHideTimer.current) clearTimeout(chromeHideTimer.current);
+    chromeHideTimer.current = setTimeout(() => setChromeVisible(false), 3000);
+  }, []);
+
+  // Re-shape the host window whenever the stage size changes (rotate, keyboard).
+  const syncAdopt = useCallback(
+    async (force = false) => {
+      const windowId = windowIdRef.current;
+      if (!windowId || !client || status !== 'connected') return;
+      const { w, h } = readStageSize(viewportRef.current);
+      const prev = lastAdoptRef.current;
+      if (
+        !force &&
+        prev &&
+        Math.abs(prev.w - w) < 8 &&
+        Math.abs(prev.h - h) < 8
+      ) {
+        return;
+      }
+      lastAdoptRef.current = { w, h };
+      try {
+        const res = (await client.request('window.adopt', {
+          windowId,
+          viewportW: w,
+          viewportH: h,
+        })) as { region?: HostRegion };
+        if (res?.region) setRegion(res.region);
+      } catch {
+        // WM may reject mid-drag; next resize will retry.
+      }
+    },
+    [client, status],
+  );
 
   // ---- session bring-up: (launch →) adopt → capture ------------------------
   useEffect(() => {
@@ -106,19 +171,30 @@ function MirrorView() {
               break;
             }
           }
-          if (!windowId) throw new Error('The app started but no window appeared yet. Go back and tap it under "Open on your PC".');
+          if (!windowId) {
+            throw new Error(
+              'The app started but no window appeared yet. Go back and tap it under "Open on your PC".',
+            );
+          }
         }
         if (cancelled) return;
 
-        // Adopt: shape the window like a phone screen and focus it.
+        // Wait one frame so the full-bleed stage has a real layout size.
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        if (cancelled) return;
+
+        // Adopt: shape the window to the stage aspect (not the full window —
+        // overlay chrome must not introduce letterboxing).
         let captureParams: Record<string, unknown> = { quality: 'medium', fps: 24 };
         if (windowId) {
           setPhase('adopting');
           windowIdRef.current = windowId;
+          const { w, h } = readStageSize(viewportRef.current);
+          lastAdoptRef.current = { w, h };
           await client.request('window.adopt', {
             windowId,
-            viewportW: Math.round(window.innerWidth),
-            viewportH: Math.round(window.innerHeight),
+            viewportW: w,
+            viewportH: h,
           });
           captureParams = { ...captureParams, windowId };
         }
@@ -161,6 +237,7 @@ function MirrorView() {
         unsubRef.current = () => {
           unsubFrames();
           unsubRegion();
+          if (lastUrl) URL.revokeObjectURL(lastUrl);
         };
         setPhase('streaming');
       } catch (err) {
@@ -176,6 +253,25 @@ function MirrorView() {
       cancelled = true;
     };
   }, [status, client, target]);
+
+  // Keep host window aspect locked to the stage (rotate / keyboard / resize).
+  useEffect(() => {
+    if (phase !== 'streaming' || !windowIdRef.current) return;
+    const el = viewportRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    const ro = new ResizeObserver(() => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        void syncAdopt(false);
+      }, 120);
+    });
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      if (debounce) clearTimeout(debounce);
+    };
+  }, [phase, syncAdopt]);
 
   // ---- teardown -------------------------------------------------------------
   const teardown = useCallback(
@@ -243,37 +339,31 @@ function MirrorView() {
   );
 
   useEffect(() => {
-    if (kbOpen) kbRef.current?.focus();
-  }, [kbOpen]);
+    if (kbOpen) {
+      kbRef.current?.focus();
+      bumpChrome();
+    } else {
+      void syncAdopt(true);
+    }
+  }, [kbOpen, bumpChrome, syncAdopt]);
 
   const title = target?.title || (target?.windowId || target?.appId ? 'App' : 'Desktop');
+  const streaming = phase === 'streaming';
 
   return (
     <div style={styles.wrapper}>
-      <header style={styles.topBar}>
-        <button onClick={goHome} style={styles.barBtn} aria-label="Home">
-          {'⌂'}
-        </button>
-        <span style={styles.title}>
-          {title}
-          {phase === 'streaming' && fps > 0 ? ` · ${fps}fps` : ''}
-        </span>
-        <button
-          onClick={() => setKbOpen((v) => !v)}
-          style={{ ...styles.barBtn, color: kbOpen ? '#2a6aff' : '#888' }}
-          aria-label="Keyboard"
-        >
-          {'⌨'}
-        </button>
-        {phase === 'streaming' && <GestureOverlay viewportRef={viewportRef} region={region} showHud />}
-      </header>
-
-      <div style={styles.stage}>
-        {phase === 'streaming' ? (
-          <div ref={viewportRef} style={styles.viewport}>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img ref={imgRef} alt="host screen" style={styles.frame} draggable={false} />
-          </div>
+      {/* Full-bleed stage — always mounted so adopt can measure it. */}
+      <div
+        ref={viewportRef}
+        style={styles.viewport}
+        onPointerDown={(e) => {
+          // Tap near the top edge reveals chrome without stealing gestures mid-drag.
+          if (e.clientY < 48) bumpChrome();
+        }}
+      >
+        {streaming ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img ref={imgRef} alt="host screen" style={styles.frame} draggable={false} />
         ) : phase === 'error' ? (
           <div style={styles.centerBox}>
             <span style={styles.bigIcon}>{'⚠'}</span>
@@ -292,7 +382,11 @@ function MirrorView() {
           </div>
         ) : (
           <div style={styles.centerBox}>
-            <style dangerouslySetInnerHTML={{ __html: '@keyframes nl-spin{to{transform:rotate(360deg)}}' }} />
+            <style
+              dangerouslySetInnerHTML={{
+                __html: '@keyframes nl-spin{to{transform:rotate(360deg)}}',
+              }}
+            />
             <div style={styles.spinner} />
             <p style={styles.centerText}>
               {phase === 'launching'
@@ -303,7 +397,38 @@ function MirrorView() {
             </p>
           </div>
         )}
+        {streaming && (
+          <GestureOverlay viewportRef={viewportRef} region={region} showHud={chromeVisible} />
+        )}
       </div>
+
+      {/* Overlay chrome — does not shrink the stage / adopt aspect. */}
+      <header
+        style={{
+          ...styles.topBar,
+          opacity: chromeVisible || !streaming ? 1 : 0,
+          pointerEvents: chromeVisible || !streaming ? 'auto' : 'none',
+          transform: chromeVisible || !streaming ? 'translateY(0)' : 'translateY(-8px)',
+        }}
+      >
+        <button onClick={goHome} style={styles.barBtn} aria-label="Home">
+          {'⌂'}
+        </button>
+        <span style={styles.title}>
+          {title}
+          {streaming && fps > 0 ? ` · ${fps}fps` : ''}
+        </span>
+        <button
+          onClick={() => {
+            bumpChrome();
+            setKbOpen((v) => !v);
+          }}
+          style={{ ...styles.barBtn, color: kbOpen ? '#2a6aff' : '#e8e8f0' }}
+          aria-label="Keyboard"
+        >
+          {'⌨'}
+        </button>
+      </header>
 
       {kbOpen && (
         <div style={styles.kbBar}>
@@ -316,9 +441,15 @@ function MirrorView() {
             autoCapitalize="none"
             autoCorrect="off"
           />
-          <button style={styles.kbKey} onClick={() => sendSpecialKey('BackSpace')}>⌫</button>
-          <button style={styles.kbKey} onClick={() => sendSpecialKey('Return')}>⏎</button>
-          <button style={styles.kbKey} onClick={() => sendSpecialKey('Escape')}>Esc</button>
+          <button style={styles.kbKey} onClick={() => sendSpecialKey('BackSpace')}>
+            ⌫
+          </button>
+          <button style={styles.kbKey} onClick={() => sendSpecialKey('Return')}>
+            ⏎
+          </button>
+          <button style={styles.kbKey} onClick={() => sendSpecialKey('Escape')}>
+            Esc
+          </button>
         </div>
       )}
     </div>
@@ -335,30 +466,55 @@ export default function MirrorPage() {
 
 const styles: Record<string, React.CSSProperties> = {
   wrapper: {
-    display: 'flex',
-    flexDirection: 'column',
+    position: 'relative',
     height: '100dvh',
+    width: '100%',
     background: '#000',
     color: '#e0e0e0',
     fontFamily: 'system-ui, sans-serif',
     overflow: 'hidden',
   },
+  viewport: {
+    position: 'absolute',
+    inset: 0,
+    touchAction: 'none',
+    userSelect: 'none',
+    WebkitUserSelect: 'none',
+    background: '#000',
+    overflow: 'hidden',
+  },
+  frame: {
+    // Edge-to-edge: cover the stage. Adopt matches stage aspect so crop is tiny;
+    // residual WM rounding is cropped rather than letterboxed (no black bars).
+    position: 'absolute',
+    inset: 0,
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+    objectPosition: 'center',
+    pointerEvents: 'none',
+    display: 'block',
+  },
   topBar: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 5,
     display: 'flex',
     alignItems: 'center',
     gap: 8,
-    padding: '6px 10px',
-    background: '#0a0a0f',
-    borderBottom: '1px solid #16162a',
-    flexShrink: 0,
+    padding: 'calc(6px + env(safe-area-inset-top)) 10px 6px',
+    background: 'linear-gradient(to bottom, rgba(0,0,0,0.72), rgba(0,0,0,0.28), transparent)',
+    transition: 'opacity 0.25s ease, transform 0.25s ease',
   },
   barBtn: {
     width: 34,
     height: 30,
     borderRadius: 8,
-    border: '1px solid #22223a',
-    background: 'transparent',
-    color: '#888',
+    border: '1px solid rgba(255,255,255,0.18)',
+    background: 'rgba(0,0,0,0.35)',
+    color: '#e8e8f0',
     fontSize: 16,
     cursor: 'pointer',
     lineHeight: 1,
@@ -366,37 +522,17 @@ const styles: Record<string, React.CSSProperties> = {
   title: {
     fontSize: 13,
     fontWeight: 600,
-    color: '#ccc',
+    color: '#f0f0f5',
     flex: 1,
     textAlign: 'center',
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
-  },
-  stage: { flex: 1, display: 'flex', minHeight: 0, background: '#000' },
-  viewport: {
-    position: 'relative',
-    width: '100%',
-    height: '100%',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    touchAction: 'none',
-    userSelect: 'none',
-    WebkitUserSelect: 'none',
-    background: '#000',
-  },
-  frame: {
-    maxWidth: '100%',
-    maxHeight: '100%',
-    width: '100%',
-    height: '100%',
-    objectFit: 'contain',
-    pointerEvents: 'none',
-    display: 'block',
+    textShadow: '0 1px 2px rgba(0,0,0,0.8)',
   },
   centerBox: {
-    flex: 1,
+    position: 'absolute',
+    inset: 0,
     display: 'flex',
     flexDirection: 'column',
     alignItems: 'center',
@@ -426,12 +562,16 @@ const styles: Record<string, React.CSSProperties> = {
     animation: 'nl-spin 0.8s linear infinite',
   },
   kbBar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 6,
     display: 'flex',
     gap: 6,
     padding: '8px 10px calc(8px + env(safe-area-inset-bottom))',
-    background: '#0f0f1a',
+    background: 'rgba(15,15,26,0.94)',
     borderTop: '1px solid #1c1c30',
-    flexShrink: 0,
   },
   kbInput: {
     flex: 1,
