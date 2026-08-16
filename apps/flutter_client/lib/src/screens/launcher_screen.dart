@@ -8,11 +8,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../rpc/models.dart';
 import '../state/connection.dart';
 import '../state/launcher.dart';
+import '../shell/native_registry.dart';
 import '../widgets/app_icon.dart';
 import '../widgets/open_apps_bar.dart';
-import 'files_screen.dart';
 import 'mirror_screen.dart';
-import 'system_screen.dart';
 
 class LauncherScreen extends ConsumerStatefulWidget {
   const LauncherScreen({super.key});
@@ -213,13 +212,6 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   }
 
   Widget _dock(BuildContext context) {
-    void push(Widget screen) => Navigator.of(context)
-        .push(MaterialPageRoute(builder: (_) => screen));
-    final items = <(IconData, String, VoidCallback?)>[
-      (Icons.desktop_windows, 'Desktop', () => _openDesktop(context)),
-      (Icons.folder, 'Files', () => push(const FilesScreen())),
-      (Icons.memory, 'System', () => push(const SystemScreen())),
-    ];
     return Container(
       margin: const EdgeInsets.fromLTRB(14, 4, 14, 8),
       padding: const EdgeInsets.symmetric(vertical: 8),
@@ -230,39 +222,42 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: items
-            .map((it) => InkWell(
-                  onTap: it.$3,
-                  borderRadius: BorderRadius.circular(10),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 10, vertical: 4),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(it.$1,
-                            size: 20,
-                            color: it.$3 == null
-                                ? Colors.white.withValues(alpha: 0.25)
-                                : Colors.white.withValues(alpha: 0.75)),
-                        const SizedBox(height: 3),
-                        Text(it.$2,
-                            style: TextStyle(
-                                fontSize: 9.5,
-                                color: Colors.white.withValues(alpha: 0.4))),
-                      ],
-                    ),
-                  ),
-                ))
-            .toList(),
+        children: kNativeTools.map((tool) {
+          return InkWell(
+            onTap: () async {
+              final screen = screenForNativeTool(tool.id);
+              if (screen == null) return;
+              // Native RPC tools never start capture; desktopMirror streams.
+              assert(
+                tool.isNativeRpc || tool.kind == NativeRouteKind.desktopMirror,
+              );
+              await Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => screen),
+              );
+              if (context.mounted) {
+                ref.read(windowsProvider.notifier).refresh();
+              }
+            },
+            borderRadius: BorderRadius.circular(10),
+            child: Padding(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(tool.icon,
+                      size: 20, color: Colors.white.withValues(alpha: 0.75)),
+                  const SizedBox(height: 3),
+                  Text(tool.label,
+                      style: TextStyle(
+                          fontSize: 9.5,
+                          color: Colors.white.withValues(alpha: 0.4))),
+                ],
+              ),
+            ),
+          );
+        }).toList(),
       ),
     );
-  }
-
-  Future<void> _openDesktop(BuildContext context) async {
-    await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => const MirrorScreen(target: MirrorTarget()),
-    ));
-    if (mounted) ref.read(windowsProvider.notifier).refresh();
   }
 }

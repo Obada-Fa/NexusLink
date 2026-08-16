@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useConnectionStore } from '@/store/connection';
 import ConnectionProvider, { STORAGE_KEY } from '@/components/ConnectionProvider';
 import { deriveHostWsUrl, describeHost } from '@/lib/host-url';
+import { NATIVE_TOOLS } from '@/lib/native-registry';
 
 interface WindowInfo {
   windowId: string;
@@ -103,13 +104,7 @@ function ConnectForm() {
   );
 }
 
-const TOOL_ITEMS = [
-  { id: 'mirror', label: 'Desktop', icon: '\u{1F5A5}' },
-  { id: 'terminal', label: 'Terminal', icon: '>_' },
-  { id: 'files', label: 'Files', icon: '\u{1F4C1}' },
-  { id: 'processes', label: 'Tasks', icon: '⚙' },
-  { id: 'system', label: 'System', icon: '\u{1F4CA}' },
-] as const;
+const TOOL_ITEMS = NATIVE_TOOLS;
 
 function AppIcon({ icon, name, size = 52 }: { icon?: string; name: string; size?: number }) {
   if (icon) {
@@ -260,7 +255,7 @@ function HomeScreen() {
           <button
             key={item.id}
             style={styles.dockBtn}
-            onClick={() => router.push(item.id === 'mirror' ? '/mirror' : `/${item.id}`)}
+            onClick={() => router.push(item.href)}
           >
             <span style={styles.dockIcon}>{item.icon}</span>
             <span style={styles.dockLabel}>{item.label}</span>

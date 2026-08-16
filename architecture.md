@@ -126,6 +126,7 @@ portrait and stream at 15 fps, and injected taps land within ~15 px of the touch
 - **Mirror** — adopt → capture → binary-frame render + full gesture input via the ported gesture engine (lib/src/gestures/: 4 Dart files, 39 unit tests, complete port of the TS FSM/inertia/scaleToHost logic). Persistent Ticker drives inertia; raw Listener + multi-touch for the FSM; live region sync. Keyboard bar + special-key buttons.
 - **Files screen** — browse via `fs.list` (path bar, up button, folder entry), download (stream to temp + share_plus sheet), upload deferred (file_picker 11 fails on AGP-9/Kotlin-2.3.20 toolchain; server endpoint done & tested).
 - **System screen** — static `system.getInfo` + live CPU/mem meters (perf-update push + 2s poll fallback).
+- **Native vs stream registry** — dock tools are registered (`files` / `system` = native RPC UI, no capture; installed apps + open windows = adopt + stream). See §2.4.
 - **Build verified** — `flutter analyze` clean, APK builds (assembleDebug ok, ~150MB debug), 41 tests pass (gesture unit + widget + live-host protocol), 24fps sustained on `:45678` host.
 
 **Resume on another PC:**
@@ -133,6 +134,20 @@ portrait and stream at 15 fps, and injected taps land within ~15 px of the touch
 - Install Flutter 3.44.6 from ~/development/flutter (not on PATH: `export PATH="$HOME/development/flutter/bin:$PATH"`), then `flutter build apk --debug` or `flutter install` if a phone is plugged in.
 - Tests: `flutter test` (41 pass), live-host test needs the server running.
 - Next: git log shows commits; `plan.md` and this file document the architecture; M2 requires Rust (not yet installed — `rustup` is step one).
+
+### 2.4 Native vs stream routing
+
+**Rule:** registered native tool ids open RPC-backed mobile screens and must never
+start screen capture. Everything else (`.desktop` apps and open windows) goes through
+`window.adopt` + per-window pixel stream.
+
+| Path | Examples | Client entry |
+|---|---|---|
+| Native RPC | Files, System (Flutter); Terminal / Files / Tasks / System (PWA) | `apps/flutter_client/lib/src/shell/native_registry.dart`, `apps/mobile-client/src/lib/native-registry.ts` |
+| Stream | Brave, Calculator, any open window, full Desktop | `MirrorScreen` / `/mirror` after adopt |
+
+Per-app remappers (e.g. browser chrome as a native UI) are a later product track —
+add them to the registry when they ship; do not special-case in the launcher.
 
 ## 3. System Topology — The Unified Connection Engine
 
