@@ -32,7 +32,7 @@ TouchPoint tp(double x, double y, [int id = 0]) => TouchPoint(id, x, y);
 }
 
 void main() {
-  group('scaleToHost', () => {
+  group('scaleToHost', () {
     test('scales with matching aspect ratio (no letterbox)', () {
       // 16:9 view and host → no bars
       final result = scaleToHost(960, 540, 1920, 1080, 1920, 1080);
