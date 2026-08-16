@@ -227,10 +227,6 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
             onTap: () async {
               final screen = screenForNativeTool(tool.id);
               if (screen == null) return;
-              // Native RPC tools never start capture; desktopMirror streams.
-              assert(
-                tool.isNativeRpc || tool.kind == NativeRouteKind.desktopMirror,
-              );
               await Navigator.of(context).push(
                 MaterialPageRoute(builder: (_) => screen),
               );
