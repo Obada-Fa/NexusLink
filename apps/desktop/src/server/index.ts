@@ -359,8 +359,7 @@ export async function startRpcServer(port = 45678) {
         break;
       }
       default:
-        result = undefined;
-        break;
+        throw new Error(`unknown method: ${method}`);
     }
     const response: RpcResponse = { id: req.id, result };
     send(ws, { type: 'rpc-response', response });
