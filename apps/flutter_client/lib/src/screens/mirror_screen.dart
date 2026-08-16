@@ -132,8 +132,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       // Launch flow: start the app, poll window.list until its window appears.
       if (windowId == null && widget.target.appId != null) {
         setState(() => _phase = MirrorPhase.launching);
-        final launched = await client.request(
-            'apps.launch', {'appId': widget.target.appId}) as Map<String, dynamic>;
+        final launched = await client.requestMap(
+            'apps.launch', {'appId': widget.target.appId});
         if (launched['ok'] != true) {
           throw 'The host could not launch this app.';
         }
@@ -143,7 +143,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         final deadline = DateTime.now().add(const Duration(seconds: 25));
         while (DateTime.now().isBefore(deadline) && mounted) {
           await Future.delayed(const Duration(milliseconds: 800));
-          final wins = await client.request('window.list') as List<dynamic>;
+          final wins = await client.requestList('window.list');
           for (final raw in wins) {
             final w = WindowInfo.fromJson(raw as Map<String, dynamic>);
             final nWin = normClass(w.wmClass.split('.').last);
@@ -176,8 +176,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         params['windowId'] = windowId;
       }
 
-      final cap = await client.request('screen.startCapture', params)
-          as Map<String, dynamic>;
+      final cap = await client.requestMap('screen.startCapture', params);
       _streamId = cap['streamId'] as String?;
       _streamKey = (cap['streamKey'] as num?)?.toInt() ?? -1;
       if (cap['region'] != null) {
@@ -207,7 +206,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       if (mounted) {
         setState(() {
           _phase = MirrorPhase.error;
-          _errorMsg = e.toString();
+          _errorMsg = friendlyLaunchError(e);
         });
       }
     }
@@ -217,7 +216,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     setState(() => _phase = MirrorPhase.launching);
     AppSessionInfo session;
     if (widget.target.sessionId != null) {
-      final raw = await client.request('appSession.list') as List<dynamic>;
+      final raw = await client.requestList('appSession.list');
       final hit = raw
           .map((e) => AppSessionInfo.fromJson(e as Map<String, dynamic>))
           .where((s) =>
@@ -229,7 +228,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       session = hit.first;
     } else {
       final media = MediaQuery.of(context);
-      final created = await client.request(
+      final created = await client.requestMap(
         'appSession.create',
         {
           'appId': widget.target.sessionAppId,
@@ -238,7 +237,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           'dpr': media.devicePixelRatio,
         },
         const Duration(seconds: 20),
-      ) as Map<String, dynamic>;
+      );
       session = AppSessionInfo.fromJson(created);
       // Give the app a beat to draw its first window before streaming.
       await Future.delayed(const Duration(milliseconds: 1200));
@@ -269,8 +268,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
 
   Future<void> _beginCapture(
       RpcClient client, Map<String, dynamic> params) async {
-    final cap =
-        await client.request('screen.startCapture', params) as Map<String, dynamic>;
+    final cap = await client.requestMap('screen.startCapture', params);
     _streamId = cap['streamId'] as String?;
     _streamKey = (cap['streamKey'] as num?)?.toInt() ?? -1;
     if (cap['region'] != null) {
@@ -297,10 +295,10 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   /// Best-effort WebRTC upgrade. Failures leave MJPEG running.
   Future<void> _tryWebrtc(RpcClient client, String sessionId) async {
     try {
-      final res = await client.request('webrtc.start', {
+      final res = await client.requestMap('webrtc.start', {
         'sessionId': sessionId,
         'fps': 24,
-      }) as Map<String, dynamic>;
+      });
       if (res['available'] != true || res['webrtcId'] is! String) return;
       _webrtcId = res['webrtcId'] as String;
 

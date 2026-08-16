@@ -13,8 +13,8 @@ import 'connection.dart';
 final appsProvider = FutureProvider<List<AppInfo>>((ref) async {
   final client = ref.watch(activeClientProvider);
   if (client == null) return [];
-  final raw = await client.request(
-      'apps.list', const {}, const Duration(seconds: 30)) as List<dynamic>;
+  final raw = await client.requestList(
+      'apps.list', const {}, const Duration(seconds: 30));
   return raw.map((e) => AppInfo.fromJson(e as Map<String, dynamic>)).toList();
 });
 
@@ -49,7 +49,7 @@ class AppSessionsNotifier extends Notifier<AsyncValue<List<AppSessionInfo>>> {
     final client = ref.read(activeClientProvider);
     if (client == null) return;
     try {
-      final raw = await client.request('appSession.list') as List<dynamic>;
+      final raw = await client.requestList('appSession.list');
       final list = raw
           .map((e) => AppSessionInfo.fromJson(e as Map<String, dynamic>))
           .where((s) => s.status == 'running')
@@ -88,7 +88,7 @@ class WindowsNotifier extends Notifier<AsyncValue<List<WindowInfo>>> {
     final client = ref.read(activeClientProvider);
     if (client == null) return;
     try {
-      final raw = await client.request('window.list') as List<dynamic>;
+      final raw = await client.requestList('window.list');
       final list =
           raw.map((e) => WindowInfo.fromJson(e as Map<String, dynamic>)).toList();
       if (!_disposed) state = AsyncValue.data(list);
