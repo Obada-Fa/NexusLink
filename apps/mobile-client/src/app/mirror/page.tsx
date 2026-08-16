@@ -105,12 +105,22 @@ function MirrorView() {
             session = list.find((s) => s.sessionId === target.sessionId && s.status === 'running') ?? null;
             if (!session) throw new Error('That app session has ended. Launch the app again.');
           } else {
-            session = (await client.request('appSession.create', {
+            session = await client.request('appSession.create', {
               appId: target.virtualAppId,
               width: Math.round(window.innerWidth),
               height: Math.round(window.innerHeight),
               dpr: window.devicePixelRatio || 1,
-            }, 20000)) as { sessionId: string; width: number; height: number; status: string };
+            }, 20000) as {
+              sessionId: string;
+              width: number;
+              height: number;
+              status: string;
+            } | null;
+            if (!session?.sessionId) {
+              throw new Error(
+                'The PC host is out of date. On the PC, stop NexusLink, update the repo, and run bun run lan.',
+              );
+            }
           }
           if (cancelled) return;
           sessionIdRef.current = session.sessionId;
