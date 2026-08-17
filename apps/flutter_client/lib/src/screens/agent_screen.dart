@@ -28,6 +28,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   final _scroll = ScrollController();
   bool _loading = true;
   bool _busy = false;
+  bool _opening = false;
+  String? _openingId;
   String? _error;
   String? _sendError;
   void Function()? _unsub;
@@ -84,6 +86,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       if (parsed.kind == 'result' || parsed.kind == 'error') _busy = false;
       if (parsed.kind == 'text-delta') {
         _appendDelta(parsed.text ?? '');
+      } else if (parsed.kind == 'user' &&
+          _events.isNotEmpty &&
+          _events.last.kind == 'user' &&
+          _events.last.text == parsed.text) {
+        // Already shown optimistically when the user tapped send.
       } else if (parsed.kind == 'result' && (parsed.text ?? '').trim().isEmpty) {
         // Host uses an empty result as "turn finished".
       } else if (parsed.kind == 'status') {
@@ -220,15 +227,21 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     );
   }
 
-  Future<void> _newChat(AgentInfo agent) async {
+  Future<void> _newChat(AgentInfo agent, {String? cwd}) async {
     final client = _client;
-    if (client == null) return;
-    final cwd = await _pickProject();
+    if (client == null || _opening) return;
+    // Open the chat immediately. Waiting on the project picker made tapping
+    // Cursor look like a no-op (the sheet can take seconds, or never appear).
+    setState(() {
+      _opening = true;
+      _openingId = agent.id;
+      _error = null;
+    });
     try {
       final created = await client.request('agent.createSession', {
         'agent': agent.id,
         'title': agent.name,
-        ?'cwd': cwd,
+        if (cwd != null) 'cwd': cwd,
       }) as Map<String, dynamic>;
       final session = AgentSessionInfo.fromJson(created);
       if (!mounted) return;
@@ -243,7 +256,18 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       if (mounted) {
         setState(() => _error = e.toString());
       }
+    } finally {
+      if (mounted) setState(() {
+        _opening = false;
+        _openingId = null;
+      });
     }
+  }
+
+  Future<void> _newChatInProject(AgentInfo agent) async {
+    final cwd = await _pickProject();
+    if (!mounted) return;
+    await _newChat(agent, cwd: cwd);
   }
 
   Future<void> _openSession(AgentSessionInfo s) async {
@@ -273,7 +297,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     setState(() {
       _busy = true;
       _sendError = null;
+      _events.add(AgentEvent(
+        seq: 0,
+        ts: DateTime.now().millisecondsSinceEpoch,
+        kind: 'user',
+        text: text,
+      ));
     });
+    _scrollToEnd();
     try {
       final raw = await client.request('agent.prompt', {
         'agentSessionId': session.agentSessionId,
@@ -370,10 +401,21 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
             ),
             title: Text(a.name),
             subtitle: Text(a.available
-                ? 'Runs on the PC — chat here'
+                ? (_opening
+                    ? 'Starting…'
+                    : 'Tap to chat · long-press for a folder')
                 : 'CLI not installed on the PC'),
-            enabled: a.available,
-            onTap: a.available ? () => _newChat(a) : null,
+            enabled: a.available && !_opening,
+            trailing: _openingId == a.id
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : null,
+            onTap: a.available && !_opening ? () => _newChat(a) : null,
+            onLongPress:
+                a.available && !_opening ? () => _newChatInProject(a) : null,
           ),
         if (_sessions.isNotEmpty) ...[
           const SizedBox(height: 16),
