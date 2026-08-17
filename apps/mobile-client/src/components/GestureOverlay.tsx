@@ -16,11 +16,14 @@ export interface HostRegion {
 export default function GestureOverlay({
   viewportRef,
   region,
+  sessionId,
   showHud = true,
 }: {
   viewportRef: React.RefObject<HTMLDivElement | null>;
   /** Captured host region (adopted window). Touch coords map into this rect. */
   region?: HostRegion | null;
+  /** Virtual app session: inputs inject into that session's own display. */
+  sessionId?: string;
   showHud?: boolean;
 }) {
   const client = useConnectionStore((s) => s.client);
@@ -37,21 +40,23 @@ export default function GestureOverlay({
       if (!client || status !== 'connected') return;
 
       // Per-window capture: gesture x/y are in captured-region space; shift them
-      // to absolute host coordinates before injection.
+      // to absolute host coordinates before injection. Virtual sessions map 1:1
+      // (region origin is always 0,0) and carry their sessionId instead.
       const off = regionRef.current;
       const ox = off ? off.x : 0;
       const oy = off ? off.y : 0;
+      const sid = sessionId ? { sessionId } : {};
 
       // Fire-and-forget: input is latency-sensitive, so we never await the RPC.
       switch (event.type) {
         case 'mouse-move':
           setLastGesture(`move ${event.dx},${event.dy}`);
-          client.request('input.mouseMove', { dx: event.dx, dy: event.dy }).catch(() => {});
+          client.request('input.mouseMove', { dx: event.dx, dy: event.dy, ...sid }).catch(() => {});
           break;
         case 'mouse-click':
           setLastGesture(`${event.button} click`);
           client
-            .request('input.mouseClick', { button: event.button, x: event.x + ox, y: event.y + oy })
+            .request('input.mouseClick', { button: event.button, x: event.x + ox, y: event.y + oy, ...sid })
             .catch(() => {});
           break;
         case 'mouse-dbl-click': {
@@ -59,9 +64,9 @@ export default function GestureOverlay({
           const dx = event.x + ox;
           const dy = event.y + oy;
           // Two clicks 50ms apart so the host registers a native double-click.
-          client.request('input.mouseClick', { button: 'left', x: dx, y: dy }).catch(() => {});
+          client.request('input.mouseClick', { button: 'left', x: dx, y: dy, ...sid }).catch(() => {});
           setTimeout(() => {
-            client.request('input.mouseClick', { button: 'left', x: dx, y: dy }).catch(() => {});
+            client.request('input.mouseClick', { button: 'left', x: dx, y: dy, ...sid }).catch(() => {});
           }, 50);
           break;
         }
@@ -73,22 +78,23 @@ export default function GestureOverlay({
               deltaY: event.deltaY,
               x: event.x + ox,
               y: event.y + oy,
+              ...sid,
             })
             .catch(() => {});
           break;
         case 'drag-start':
           setLastGesture(`drag ${event.x},${event.y}`);
           client
-            .request('input.buttonDown', { button: 'left', x: event.x + ox, y: event.y + oy })
+            .request('input.buttonDown', { button: 'left', x: event.x + ox, y: event.y + oy, ...sid })
             .catch(() => {});
           break;
         case 'drag-move':
-          client.request('input.mouseMoveAbs', { x: event.x + ox, y: event.y + oy }).catch(() => {});
+          client.request('input.mouseMoveAbs', { x: event.x + ox, y: event.y + oy, ...sid }).catch(() => {});
           break;
         case 'drag-end':
           setLastGesture('drag end');
           client
-            .request('input.buttonUp', { button: 'left', x: event.x + ox, y: event.y + oy })
+            .request('input.buttonUp', { button: 'left', x: event.x + ox, y: event.y + oy, ...sid })
             .catch(() => {});
           break;
         case 'zoom':
@@ -98,16 +104,17 @@ export default function GestureOverlay({
           client
             .request('input.mouseScroll', {
               deltaX: 0,
-              deltaY: -event.scale * 400,
+              deltaY: -event.scale * 160,
               x: event.x + ox,
               y: event.y + oy,
               modifiers: ['ctrl'],
+              ...sid,
             })
             .catch(() => {});
           break;
       }
     },
-    [client, status],
+    [client, status, sessionId],
   );
 
   useEffect(() => {
@@ -115,9 +122,10 @@ export default function GestureOverlay({
     if (!el) return;
 
     const callbacks = { onGesture: handleGesture };
-    // Direct manipulation is the default paradigm: one-finger pan = momentum scroll.
+    // Native touch: tap/drag at the finger. Trackpad is the Precision toggle.
     const engine = new GestureEngine(el, callbacks, { mode: 'direct' });
     engine.attach();
+    if (sessionId) engine.setFit('fill');
     engineRef.current = engine;
 
     // Adopted-window mode: touch space IS the captured region. Otherwise fall
@@ -142,7 +150,7 @@ export default function GestureOverlay({
       engine.detach();
       engineRef.current = null;
     };
-  }, [viewportRef, handleGesture, client, status, region]);
+  }, [viewportRef, handleGesture, client, status, region, sessionId]);
 
   useEffect(() => {
     const engine = engineRef.current;
@@ -170,7 +178,7 @@ export default function GestureOverlay({
         }}
         aria-label={`Precision mode: ${precision}`}
       >
-        {precision === 'precision' ? 'Precision: ON' : 'Precision: OFF'}
+        {precision === 'precision' ? 'Mouse' : 'Touch'}
       </button>
 
       {lastGesture ? (

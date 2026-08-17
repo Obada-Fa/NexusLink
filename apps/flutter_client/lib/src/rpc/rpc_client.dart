@@ -43,7 +43,50 @@ class RpcException implements Exception {
   final String message;
   RpcException(this.message);
   @override
-  String toString() => 'RpcException: $message';
+  String toString() => message;
+}
+
+/// Decode an RPC result that must be a JSON object. Older hosts ack unknown
+/// methods with a null/missing result — that used to crash the Flutter client
+/// with `type 'Null' is not a subtype of type 'Map<String, dynamic>'`.
+Map<String, dynamic> expectMap(dynamic raw, String method) {
+  if (raw is Map<String, dynamic>) return raw;
+  if (raw is Map) return Map<String, dynamic>.from(raw);
+  if (raw == null) {
+    throw RpcException(
+      'The PC host is out of date (no result for $method). '
+      'On the PC, stop NexusLink, update the repo, and run `bun run lan`.',
+    );
+  }
+  throw RpcException('Unexpected $method result (${raw.runtimeType}).');
+}
+
+List<dynamic> expectList(dynamic raw, String method) {
+  if (raw is List) return raw;
+  if (raw == null) {
+    throw RpcException(
+      'The PC host is out of date (no result for $method). '
+      'On the PC, stop NexusLink, update the repo, and run `bun run lan`.',
+    );
+  }
+  throw RpcException('Unexpected $method result (${raw.runtimeType}).');
+}
+
+/// Phone-facing copy for launch/mirror failures (hides Dart type-cast noise).
+String friendlyLaunchError(Object error) {
+  final raw = error is RpcException ? error.message : error.toString();
+  if (raw.contains('Null') && raw.contains('Map<String')) {
+    return 'The PC host is out of date. On the PC, stop NexusLink, '
+        'update the repo, and run `bun run lan`. Then reopen this app.';
+  }
+  if (raw.contains('unknown method')) {
+    return 'The PC host is out of date. Restart NexusLink on the PC with `bun run lan`.';
+  }
+  if (raw.contains('unknown app session')) {
+    return 'The app quit before it could show a window. '
+        'If it is already open on the PC, close it there and try again.';
+  }
+  return raw.replaceFirst(RegExp(r'^RpcException:\s*'), '');
 }
 
 class RpcClient {
@@ -142,6 +185,22 @@ class RpcClient {
       throw RpcException('not connected');
     }
     return _requestRaw(method, params, timeout);
+  }
+
+  Future<Map<String, dynamic>> requestMap(
+    String method, [
+    Map<String, dynamic> params = const {},
+    Duration timeout = const Duration(seconds: 10),
+  ]) async {
+    return expectMap(await request(method, params, timeout), method);
+  }
+
+  Future<List<dynamic>> requestList(
+    String method, [
+    Map<String, dynamic> params = const {},
+    Duration timeout = const Duration(seconds: 10),
+  ]) async {
+    return expectList(await request(method, params, timeout), method);
   }
 
   /// Ungated request used by the pairing handshake, which must run while the
