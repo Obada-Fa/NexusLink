@@ -2,6 +2,8 @@
 // or the built-in demo agent). The phone never sees a terminal — tool calls
 // become cards, assistant text is markdown, and history survives reconnects.
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -74,8 +76,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     if (msg['agentSessionId'] != _active?.agentSessionId) return;
     final ev = msg['event'];
     if (ev is! Map<String, dynamic>) return;
-    setState(() => _events.add(AgentEvent.fromJson(ev)));
+    final parsed = AgentEvent.fromJson(ev);
+    setState(() => _events.add(parsed));
     _scrollToEnd();
+    if (parsed.kind == 'permission-request') {
+      unawaited(_askPermission(parsed));
+    }
   }
 
   void _scrollToEnd() {
@@ -89,12 +95,106 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     });
   }
 
+  Future<void> _askPermission(AgentEvent e) async {
+    final client = _client;
+    final session = _active;
+    final requestId = e.refId;
+    if (client == null || session == null || requestId == null || !mounted) {
+      return;
+    }
+    final allow = await showModalBottomSheet<bool>(
+      context: context,
+      backgroundColor: const Color(0xFF151522),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(e.text ?? 'Allow this tool?',
+                style: const TextStyle(
+                    fontSize: 16, fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            Text(e.toolName ?? 'tool',
+                style: const TextStyle(color: Color(0xFFF0C040))),
+            if ((e.toolInput ?? '').isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(e.toolInput!,
+                    maxLines: 8,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 12,
+                        color: Colors.white70)),
+              ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: const Text('Deny'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: FilledButton(
+                    onPressed: () => Navigator.pop(ctx, true),
+                    child: const Text('Allow'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+    await client.request('agent.permission', {
+      'agentSessionId': session.agentSessionId,
+      'requestId': requestId,
+      'allow': allow == true,
+    });
+  }
+
+  Future<String?> _pickProject() async {
+    final client = _client;
+    if (client == null) return null;
+    List<dynamic> raw = const [];
+    try {
+      raw = await client.requestList('fs.listProjects');
+    } catch (_) {
+      return null;
+    }
+    if (!mounted || raw.isEmpty) return null;
+    return showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFF151522),
+      builder: (ctx) => ListView(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        children: [
+          const ListTile(title: Text('Working directory')),
+          for (final e in raw)
+            if (e is Map)
+              ListTile(
+                title: Text('${e['name'] ?? ''}'),
+                subtitle: Text('${e['path'] ?? ''}',
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
+                onTap: () => Navigator.pop(ctx, e['path'] as String?),
+              ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _newChat(AgentInfo agent) async {
     final client = _client;
     if (client == null) return;
+    final cwd = await _pickProject();
     final created = await client.request('agent.createSession', {
       'agent': agent.id,
       'title': agent.name,
+      ?'cwd': cwd,
     }) as Map<String, dynamic>;
     final session = AgentSessionInfo.fromJson(created);
     setState(() {
@@ -295,6 +395,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         return _toolCard(e, running: true);
       case 'tool-end':
         return _toolCard(e, running: false);
+      case 'permission-request':
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+          child: Text(e.text ?? 'Waiting for permission…',
+              style: const TextStyle(color: Color(0xFFF0C040), fontSize: 12)),
+        );
       case 'error':
         return Padding(
           padding: const EdgeInsets.all(8),
@@ -346,17 +452,22 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
             Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Text(e.toolOutput!,
-                  maxLines: 8,
+                  maxLines: _looksLikeDiff(e.toolOutput!) ? 20 : 8,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
+                  style: TextStyle(
                       fontFamily: 'monospace',
                       fontSize: 11,
-                      color: Color(0xFF6EE7B7))),
+                      color: _looksLikeDiff(e.toolOutput!)
+                          ? const Color(0xFF93C5FD)
+                          : const Color(0xFF6EE7B7))),
             ),
         ],
       ),
     );
   }
+
+  bool _looksLikeDiff(String s) =>
+      s.contains('diff --git') || s.contains('\n@@ ') || s.startsWith('@@ ');
 
   Widget _align(Alignment a, Widget child) => Align(
         alignment: a,
