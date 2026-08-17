@@ -17,6 +17,7 @@ import { getClipboard, setClipboard } from './handlers/clipboard';
 import {
   listAgents, createAgentSession, listAgentSessions, promptAgent,
   cancelAgent, closeAgentSession, agentHistory, resolveAgentPermission, setAgentBroadcast,
+  listAgentModels,
 } from './handlers/agents';
 import { startIde, stopIde, ideStatus } from './handlers/ide';
 import type { WebRtcSignal, AgentImageAttachment } from '@nexuslink/rpc-types';
@@ -248,6 +249,9 @@ export async function startRpcServer(port = 45678) {
         break;
       case 'agent.listSessions':
         result = listAgentSessions();
+        break;
+      case 'agent.listModels':
+        result = listAgentModels(params.agent as string);
         break;
       case 'agent.prompt':
         result = promptAgent(

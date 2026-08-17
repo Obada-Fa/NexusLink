@@ -76,4 +76,24 @@ void main() {
       expect(user.images, ['shot.jpg']);
     });
   });
+
+  group('model families', () {
+    test('strips thinking suffixes and collapses catalogs', () {
+      expect(modelFamilyId('claude-opus-5-thinking-high'), 'claude-opus-5');
+      expect(modelFamilyId('gemini-3.7-flash-high'), 'gemini-3.7-flash');
+      expect(modelFamilyId('cursor-grok-4.6-xhigh-fast'), 'cursor-grok-4.6');
+      expect(modelFamilyId('opencode/mimo-v2.5-free'), 'opencode/mimo-v2.5-free');
+
+      final collapsed = collapseModelFamilies(const [
+        AgentModelOption(id: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)'),
+        AgentModelOption(id: 'gemini-3.7-flash-medium', name: 'Gemini 3.7 Flash (Medium)'),
+        AgentModelOption(id: 'claude-opus-5-thinking-high', name: 'Claude Opus 5'),
+      ]);
+      expect(collapsed.map((m) => m.id).toList(), [
+        'gemini-3.7-flash',
+        'claude-opus-5',
+      ]);
+      expect(collapsed.first.name, 'Gemini 3.7 Flash');
+    });
+  });
 }

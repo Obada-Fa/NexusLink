@@ -16,6 +16,7 @@ import type {
   AgentImageAttachment,
   AgentInfo,
   AgentMode,
+  AgentModelOption,
   AgentSessionInfo,
   WsMessage,
 } from '@nexuslink/rpc-types';
@@ -90,16 +91,35 @@ function which(bin: string): string | null {
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
-const CURSOR_MODELS = [
+const CURSOR_MODELS: AgentModelOption[] = [
   { id: 'auto', name: 'Auto' },
-  { id: 'composer-2', name: 'Composer' },
-  { id: 'gpt-5', name: 'GPT-5' },
-  { id: 'sonnet-4-thinking', name: 'Sonnet 4' },
-  { id: 'claude-opus-4-8', name: 'Opus 4.8' },
-  { id: 'grok-4.6', name: 'Grok 4.6' },
+  { id: 'composer-2.5', name: 'Composer 2.5' },
+  { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex' },
+  { id: 'cursor-grok-4.6', name: 'Grok 4.6' },
+  { id: 'claude-opus-5', name: 'Claude Opus 5' },
+  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5' },
+  { id: 'gpt-5.6-sol', name: 'GPT-5.6' },
 ];
 
-const CLAUDE_MODELS = [
+const OPENCODE_MODELS: AgentModelOption[] = [
+  { id: 'opencode/deepseek-v4-flash-free', name: 'DeepSeek V4 Flash' },
+  { id: 'opencode/mimo-v2.5-free', name: 'MiMo 2.5' },
+  { id: 'opencode/big-pickle', name: 'Big Pickle' },
+  { id: 'opencode/hy3-free', name: 'HY3' },
+  { id: 'opencode/laguna-s-2.1-free', name: 'Laguna S 2.1' },
+  { id: 'opencode/nemotron-3-ultra-free', name: 'Nemotron 3 Ultra' },
+  { id: 'opencode/nemotron-3.5-lightning-free', name: 'Nemotron 3.5 Lightning' },
+];
+
+const ANTIGRAVITY_MODELS: AgentModelOption[] = [
+  { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash' },
+  { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro' },
+  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
+  { id: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
+  { id: 'gpt-oss-120b', name: 'GPT-OSS 120B' },
+];
+
+const CLAUDE_MODELS: AgentModelOption[] = [
   { id: 'default', name: 'Default' },
   { id: 'sonnet', name: 'Sonnet' },
   { id: 'opus', name: 'Opus' },
@@ -125,7 +145,7 @@ const AGENT_DEFS: AgentDef[] = [
     bin: 'cursor-agent',
     capabilities: {
       modes: ['agent', 'plan', 'ask'],
-      thinkingLevels: ['low', 'medium', 'high', 'extra-high'],
+      thinkingLevels: ['low', 'medium', 'high', 'extra-high', 'max'],
       models: CURSOR_MODELS,
       images: true,
     },
@@ -138,7 +158,7 @@ const AGENT_DEFS: AgentDef[] = [
     capabilities: {
       modes: ['agent', 'plan'],
       thinkingLevels: ['minimal', 'low', 'medium', 'high', 'max'],
-      models: [{ id: 'default', name: 'Default' }],
+      models: OPENCODE_MODELS,
       images: true,
     },
     makeAdapter: (s) => new OpenCodeAdapter(s),
@@ -150,7 +170,7 @@ const AGENT_DEFS: AgentDef[] = [
     capabilities: {
       modes: ['agent', 'plan'],
       thinkingLevels: ['low', 'medium', 'high'],
-      models: [{ id: 'default', name: 'Default' }],
+      models: ANTIGRAVITY_MODELS,
       images: true,
     },
     makeAdapter: (s) => new AntigravityAdapter(s),
@@ -176,8 +196,191 @@ export function listAgents(): AgentInfo[] {
     id: d.id,
     name: d.name,
     available: d.bin ? which(d.bin) !== null : true,
-    capabilities: d.capabilities,
+    capabilities: {
+      ...d.capabilities,
+      models: modelCache.get(d.id) ?? d.capabilities.models,
+    },
   }));
+}
+
+const modelCache = new Map<string, AgentModelOption[]>();
+
+/** Parse `opencode models` / `cursor-agent models` stdout into picker rows. */
+export function parseAgentModelList(text: string): AgentModelOption[] {
+  const out: AgentModelOption[] = [];
+  const seen = new Set<string>();
+  for (const raw of text.split(/\r?\n/)) {
+    const t = raw.replace(/\x1b\[[0-9;]*m/g, '').trim();
+    if (!t) continue;
+    const lower = t.toLowerCase();
+    if (
+      lower.startsWith('available') ||
+      lower.startsWith('error') ||
+      lower.startsWith('usage:') ||
+      lower.startsWith('options:')
+    ) {
+      continue;
+    }
+    let id = '';
+    let name = '';
+    const tab = t.indexOf('\t');
+    const dash = t.indexOf(' - ');
+    if (tab > 0) {
+      id = t.slice(0, tab).trim();
+      name = t.slice(tab + 1).trim();
+    } else if (dash > 0) {
+      id = t.slice(0, dash).trim();
+      name = t.slice(dash + 3).trim().replace(/\s*\(current.*\)$/i, '').trim();
+    } else {
+      id = t.split(/\s+/)[0] ?? '';
+      name = id.includes('/') ? (id.split('/').pop() ?? id) : id;
+    }
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ id, name });
+  }
+  return out;
+}
+
+export function matchAgentModel(
+  query: string,
+  models: AgentModelOption[],
+): AgentModelOption | undefined {
+  const tokens = query.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const q = tokens.join('');
+  if (!q) return undefined;
+  let best: AgentModelOption | undefined;
+  let bestScore = 0;
+  for (const m of models) {
+    const id = m.id.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const name = m.name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    let score = 0;
+    if (id === q || name === q) score = 100;
+    else if (id.endsWith(q) || name.endsWith(q)) score = 90;
+    else if (id.includes(q) || name.includes(q)) score = 80;
+    else if (tokens.every((t) => id.includes(t) || name.includes(t))) score = 70;
+    if (score > bestScore) {
+      bestScore = score;
+      best = m;
+    }
+  }
+  return best;
+}
+
+/** Strip thinking / effort suffixes so the phone can pick a family, not 40 variants. */
+export function modelFamilyId(id: string): string {
+  return id
+    .replace(/-thinking(?=-|$)/gi, '')
+    .replace(/-(low|medium|high|xhigh|max)(-fast)?$/i, '')
+    .replace(/-fast$/i, '')
+    .replace(/-+$/g, '');
+}
+
+export function collapseModelFamilies(models: AgentModelOption[]): AgentModelOption[] {
+  const seen = new Set<string>();
+  const out: AgentModelOption[] = [];
+  for (const m of models) {
+    const fam = modelFamilyId(m.id);
+    if (!fam || seen.has(fam)) continue;
+    seen.add(fam);
+    const name = m.name
+      .replace(/\s*\((High|Medium|Low|Extra High|Max|Thinking).*?\)/gi, '')
+      .replace(/\s+Thinking\s*$/i, '')
+      .replace(/\s*\(current.*\)$/i, '')
+      .trim();
+    out.push({ id: fam, name: name || fam });
+  }
+  return out;
+}
+
+function thinkingSuffixes(thinking?: string): string[] {
+  const t = (thinking || 'medium').toLowerCase();
+  if (t === 'minimal' || t === 'low') return ['low'];
+  if (t === 'extra-high' || t === 'xhigh') return ['xhigh', 'extra-high', 'max', 'high'];
+  if (t === 'max') return ['max', 'xhigh', 'high'];
+  if (t === 'high') return ['high', 'thinking'];
+  return ['medium'];
+}
+
+function variantScore(id: string, thinking?: string): number {
+  const lower = id.toLowerCase();
+  const t = (thinking || 'medium').toLowerCase();
+  const isDefault = t === 'medium' || t === '' || t === 'none' || t === 'off';
+  if (isDefault) {
+    let s = 0;
+    if (/-thinking(?=-|$)/.test(lower) || /-(low|high|xhigh|max)(-fast)?$/.test(lower)) s -= 10;
+    if (lower.endsWith('-medium')) s += 15;
+    if (lower.includes('-fast')) s -= 5;
+    return s;
+  }
+  let s = 0;
+  const suffixes = thinkingSuffixes(thinking);
+  for (let i = 0; i < suffixes.length; i++) {
+    const suf = suffixes[i]!;
+    if (lower.includes(`thinking-${suf}`)) s += 40 - i * 5;
+    else if (lower.endsWith(`-${suf}`) || lower.includes(`-${suf}-`)) s += 30 - i * 5;
+    else if (suf === 'thinking' && /-thinking(?=-|$)/.test(lower)) s += 20;
+  }
+  if (lower.includes('-fast')) s -= 5;
+  return s;
+}
+
+/** Resolve a family id + thinking chip to a concrete CLI model id. */
+export function pickModelVariant(
+  model: string | undefined,
+  thinking: string | undefined,
+  catalog: AgentModelOption[],
+): string | undefined {
+  const m = (model || '').trim();
+  if (!m || m === 'auto' || m === 'default') return m || undefined;
+  if (!catalog.length) return m;
+  const fam = modelFamilyId(m);
+  const family = catalog.filter((x) => modelFamilyId(x.id) === fam || x.id === m);
+  if (!family.length) return m;
+  let best = family[0]!;
+  let bestScore = variantScore(best.id, thinking);
+  for (const c of family.slice(1)) {
+    const score = variantScore(c.id, thinking);
+    if (score > bestScore) {
+      bestScore = score;
+      best = c;
+    }
+  }
+  return best.id;
+}
+
+function fetchLiveModels(agentId: string, bin: string): AgentModelOption[] {
+  const argv = agentId === 'cursor' ? [bin, 'models'] : [bin, 'models'];
+  if (agentId === 'claude' || agentId === 'mock') return [];
+  try {
+    const proc = Bun.spawnSync(argv, {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      timeout: 8000,
+      env: process.env as Record<string, string>,
+    });
+    const text = new TextDecoder().decode(proc.stdout ?? new Uint8Array());
+    return parseAgentModelList(text);
+  } catch {
+    return [];
+  }
+}
+
+export function listAgentModels(agentId: string): AgentModelOption[] {
+  const def = AGENT_DEFS.find((d) => d.id === agentId);
+  if (!def) return [];
+  const cached = modelCache.get(agentId);
+  if (cached?.length) return cached;
+  let models = def.capabilities.models;
+  if (def.bin) {
+    const bin = which(def.bin);
+    if (bin) {
+      const live = fetchLiveModels(agentId, bin);
+      if (live.length) models = live;
+    }
+  }
+  modelCache.set(agentId, models);
+  return models;
 }
 
 export function thinkingToEffort(thinking?: string): 'low' | 'medium' | 'high' | undefined {
@@ -194,6 +397,8 @@ export function cursorModelFlag(model?: string, thinking?: string): string | und
   const m = (model || '').trim();
   if (!m || m === 'auto' || m === 'default') return undefined;
   if (m.includes('[')) return m;
+  // Cursor model ids already encode thinking (…-thinking-high, …-xhigh).
+  if (/thinking|xhigh|-high|-low|-medium|-max|-fast/i.test(m)) return m;
   const effort = thinkingToEffort(thinking);
   const extraHigh = ['extra-high', 'max', 'xhigh'].includes((thinking || '').toLowerCase());
   if (!effort || (effort === 'medium' && !extraHigh)) return m;
@@ -245,6 +450,7 @@ export function buildCursorArgv(opts: {
   mode?: AgentMode;
   thinking?: string;
   imagePaths?: string[];
+  catalog?: AgentModelOption[];
 }): string[] {
   const argv = [
     opts.bin, '--print', '--output-format', 'stream-json',
@@ -252,7 +458,8 @@ export function buildCursorArgv(opts: {
     '--workspace', opts.cwd,
   ];
   if (opts.mode === 'plan' || opts.mode === 'ask') argv.push('--mode', opts.mode);
-  const model = cursorModelFlag(opts.model, opts.thinking);
+  const resolved = pickModelVariant(opts.model, opts.thinking, opts.catalog ?? []);
+  const model = cursorModelFlag(resolved, opts.thinking);
   if (model) argv.push('--model', model);
   if (opts.chatId) argv.push('--resume', opts.chatId);
   argv.push(withImageMentions(opts.text, opts.imagePaths));
@@ -288,6 +495,7 @@ export function buildAgyArgv(opts: {
   mode?: AgentMode;
   thinking?: string;
   imagePaths?: string[];
+  catalog?: AgentModelOption[];
 }): string[] {
   const argv = [
     opts.bin,
@@ -296,7 +504,8 @@ export function buildAgyArgv(opts: {
     '--print-timeout', '15m',
   ];
   if (opts.mode === 'plan') argv.push('--mode', 'plan');
-  if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
+  const resolved = pickModelVariant(opts.model, opts.thinking, opts.catalog ?? []);
+  if (resolved && resolved !== 'default') argv.push('--model', resolved);
   const effort = thinkingToEffort(opts.thinking);
   if (effort) argv.push('--effort', effort);
   if (opts.conversationId) argv.push('--conversation', opts.conversationId);
@@ -1034,6 +1243,7 @@ class CursorAdapter implements AgentAdapter {
       mode: opts?.mode,
       thinking: opts?.thinking,
       imagePaths: opts?.imagePaths,
+      catalog: listAgentModels('cursor'),
     });
     const { proc, stderr } = spawnJsonCli(
       argv,
@@ -1310,6 +1520,7 @@ class AntigravityAdapter implements AgentAdapter {
       mode: opts?.mode,
       thinking: opts?.thinking,
       imagePaths: opts?.imagePaths,
+      catalog: listAgentModels('antigravity'),
     });
     const { proc, stderr } = spawnJsonCli(
       argv,
