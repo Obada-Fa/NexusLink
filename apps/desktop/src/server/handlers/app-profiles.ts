@@ -5,7 +5,15 @@
 // profile fall back to their .desktop Exec line, launched with DISPLAY set to
 // the session's virtual X server.
 
-import { existsSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  statSync,
+} from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 export interface LaunchContext {
   /** Physical pixel size of the virtual display. */
@@ -13,8 +21,23 @@ export interface LaunchContext {
   height: number;
   /** Effective device pixel ratio the session renders at. */
   dpr: number;
-  /** Scratch dir for per-session state (browser profile, config, ...). */
+  /** Scratch dir for per-session state (openbox config, Xresources, ...). */
   sessionDir: string;
+  /**
+   * Persistent Chromium user-data-dir for phone sessions. Seeded from the
+   * host's real Brave/Chrome profile so cookies and logins survive. Falls
+   * back to `sessionDir/chrome-profile` when omitted (tests / unknown bins).
+   */
+  profileDir?: string;
+}
+
+export type BrowserKind = 'brave' | 'chrome' | 'chromium' | 'edge';
+
+export interface SeedResult {
+  destDir: string;
+  sourceDir: string | null;
+  copied: number;
+  skipped: number;
 }
 
 export interface AppProfile {
@@ -71,6 +94,57 @@ export function findChromeBin(): string | null {
   return firstExisting(CHROME_BINS) ?? firstExisting(BRAVE_BINS) ?? firstExisting(EDGE_BINS);
 }
 
+/**
+ * Among candidate binaries, pick the one whose host user-data-dir looks
+ * like the daily driver (most recently written Local State / cookies).
+ */
+export function pickBinForHostProfiles(bins: string[], home: string): string | null {
+  let best: { bin: string; mtime: number } | null = null;
+  for (const bin of bins) {
+    const kind = browserKindFromBin(bin);
+    let dir: string | null = null;
+    for (const p of hostUserDataCandidates(kind, home)) {
+      if (existsSync(join(p, 'Local State')) || existsSync(join(p, 'Default'))) {
+        dir = p;
+        break;
+      }
+    }
+    if (!dir) continue;
+    const cookies =
+      existsSync(join(dir, 'Default', 'Network', 'Cookies')) ||
+      existsSync(join(dir, 'Default', 'Cookies'));
+    const localState = join(dir, 'Local State');
+    if (!cookies && !existsSync(localState)) continue;
+    let mtime = 0;
+    try {
+      mtime = statSync(existsSync(localState) ? localState : dir).mtimeMs;
+    } catch {
+      mtime = 0;
+    }
+    if (!best || mtime > best.mtime) best = { bin, mtime };
+  }
+  return best?.bin ?? null;
+}
+
+/**
+ * Prefer the Chromium-family browser the user actually uses on the PC
+ * so the generic "Browser" tile clones logins from Brave if that's their
+ * daily driver — not an unused Chrome install.
+ */
+export function findPreferredBrowserBin(home = homedir()): string | null {
+  const bins = [
+    firstExisting(BRAVE_BINS),
+    firstExisting(CHROME_BINS),
+    firstExisting([
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+      '/snap/bin/chromium',
+    ]),
+    firstExisting(EDGE_BINS),
+  ].filter((b): b is string => !!b);
+  return pickBinForHostProfiles(bins, home) ?? findChromeBin();
+}
+
 export function isChromiumFamily(appId: string, exec?: string): boolean {
   return BROWSER_RE.test(appId) || BROWSER_RE.test(exec ?? '');
 }
@@ -89,7 +163,7 @@ export function findBrowserBinForAppId(appId: string): string | null {
       '/snap/bin/chromium',
     ]) ?? findChromeBin();
   }
-  if (id.includes('chrome') || id.includes('nexus.chrome')) return findChromeBin();
+  if (id.includes('chrome') || id.includes('nexus.chrome')) return findPreferredBrowserBin();
   return null;
 }
 
@@ -106,6 +180,190 @@ function browserPathFromExec(exec?: string): string | null {
 export function resolveChromiumBin(appId: string, exec?: string): string | null {
   if (!isChromiumFamily(appId, exec)) return null;
   return browserPathFromExec(exec) ?? findBrowserBinForAppId(appId) ?? findChromeBin();
+}
+
+/** Map a browser binary path to the on-disk profile family. */
+export function browserKindFromBin(bin: string): BrowserKind {
+  const n = bin.toLowerCase();
+  if (n.includes('brave')) return 'brave';
+  if (n.includes('msedge') || n.includes('microsoft-edge')) return 'edge';
+  if (n.includes('chromium')) return 'chromium';
+  return 'chrome';
+}
+
+/** Standard Linux user-data-dir locations, including Flatpak and Snap. */
+export function hostUserDataCandidates(kind: BrowserKind, home: string): string[] {
+  switch (kind) {
+    case 'brave':
+      return [
+        join(home, '.config/BraveSoftware/Brave-Browser'),
+        join(home, '.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser'),
+        join(home, 'snap/brave/current/.config/BraveSoftware/Brave-Browser'),
+      ];
+    case 'chrome':
+      return [
+        join(home, '.config/google-chrome'),
+        join(home, '.var/app/com.google.Chrome/config/google-chrome'),
+        join(home, 'snap/google-chrome/current/.config/google-chrome'),
+      ];
+    case 'chromium':
+      return [
+        join(home, '.config/chromium'),
+        join(home, '.var/app/org.chromium.Chromium/config/chromium'),
+        join(home, 'snap/chromium/current/.config/chromium'),
+      ];
+    case 'edge':
+      return [
+        join(home, '.config/microsoft-edge'),
+        join(home, '.var/app/com.microsoft.Edge/config/microsoft-edge'),
+      ];
+  }
+}
+
+export function findHostUserDataDir(kind: BrowserKind, home = homedir()): string | null {
+  const override = process.env.NEXUSLINK_HOST_USER_DATA_DIR;
+  if (override && existsSync(override)) return override;
+  for (const p of hostUserDataCandidates(kind, home)) {
+    if (existsSync(join(p, 'Local State')) || existsSync(join(p, 'Default'))) return p;
+  }
+  return null;
+}
+
+export function persistentProfileDir(kind: BrowserKind, home = homedir()): string {
+  const root =
+    process.env.NEXUSLINK_BROWSER_PROFILES ||
+    join(home, '.config', 'nexuslink', 'browser-profiles');
+  return join(root, kind);
+}
+
+/**
+ * Names that must not be copied into the phone profile.
+ * Singleton* would collide with a running desktop browser; caches are huge
+ * and regenerable; session-restore files would reopen desktop window layouts
+ * inside the kiosk virtual display.
+ */
+export const PROFILE_SKIP_NAMES = new Set([
+  'SingletonLock',
+  'SingletonSocket',
+  'SingletonCookie',
+  'lockfile',
+  'RunningChromeVersion',
+  'DevToolsActivePort',
+  'Cache',
+  'Code Cache',
+  'GPUCache',
+  'GrShaderCache',
+  'ShaderCache',
+  'GraphiteDawnCache',
+  'DawnGraphiteCache',
+  'DawnCache',
+  'Media Cache',
+  'Crash Reports',
+  'BrowserMetrics',
+  'Safe Browsing',
+  'Safe Browsing Cookies',
+  'component_crx_cache',
+  'extensions_crx_cache',
+  'optimization_guide_model_store',
+  'optimization_guide_hint_cache',
+  'ScreenShotCache',
+  'CacheStorage',
+  'Sessions',
+  'Current Session',
+  'Current Tabs',
+  'Last Session',
+  'Last Tabs',
+]);
+
+export function shouldSkipProfileEntry(name: string): boolean {
+  return PROFILE_SKIP_NAMES.has(name);
+}
+
+/**
+ * Overlay-copy a Chromium user-data-dir into `destDir`.
+ * Newer dest files win (phone logins are not clobbered by an older desktop
+ * copy). Locked/unreadable source files are skipped so a running desktop
+ * browser does not block the phone session.
+ */
+export function seedChromiumProfile(
+  sourceDir: string,
+  destDir: string,
+): { copied: number; skipped: number } {
+  const acc = { copied: 0, skipped: 0 };
+  if (!existsSync(sourceDir)) return acc;
+  mkdirSync(destDir, { recursive: true });
+  copyProfileTree(sourceDir, destDir, acc);
+  return acc;
+}
+
+function copyProfileTree(
+  src: string,
+  dest: string,
+  acc: { copied: number; skipped: number },
+): void {
+  mkdirSync(dest, { recursive: true });
+  let entries: ReturnType<typeof readdirSync>;
+  try {
+    entries = readdirSync(src, { withFileTypes: true });
+  } catch {
+    acc.skipped++;
+    return;
+  }
+  for (const entry of entries) {
+    if (shouldSkipProfileEntry(entry.name)) {
+      acc.skipped++;
+      continue;
+    }
+    const from = join(src, entry.name);
+    const to = join(dest, entry.name);
+    try {
+      if (entry.isSymbolicLink() || entry.isSocket() || entry.isFIFO()) {
+        acc.skipped++;
+        continue;
+      }
+      if (entry.isDirectory()) {
+        copyProfileTree(from, to, acc);
+        continue;
+      }
+      if (!entry.isFile()) {
+        acc.skipped++;
+        continue;
+      }
+      const srcStat = statSync(from);
+      try {
+        const dstStat = statSync(to);
+        // Phone-side edits win when they are newer, even if the size differs
+        // (a cookie DB rewrite is not the same byte length as the desktop copy).
+        if (dstStat.mtimeMs > srcStat.mtimeMs) continue;
+        if (dstStat.mtimeMs === srcStat.mtimeMs && dstStat.size === srcStat.size) continue;
+      } catch {
+        // dest missing — copy
+      }
+      copyFileSync(from, to);
+      acc.copied++;
+    } catch {
+      acc.skipped++;
+    }
+  }
+}
+
+/**
+ * Persistent phone profile for `bin`, seeded from the matching desktop
+ * user-data-dir when one exists. Safe to call on every launch (incremental).
+ */
+export function prepareChromiumProfile(bin: string, home = homedir()): SeedResult {
+  const kind = browserKindFromBin(bin);
+  const destDir = persistentProfileDir(kind, home);
+  mkdirSync(destDir, { recursive: true });
+  const sourceDir = findHostUserDataDir(kind, home);
+  if (!sourceDir) return { destDir, sourceDir: null, copied: 0, skipped: 0 };
+  const { copied, skipped } = seedChromiumProfile(sourceDir, destDir);
+  if (copied > 0) {
+    console.log(
+      `[nexuslink] seeded ${kind} phone profile from ${sourceDir} (${copied} files)`,
+    );
+  }
+  return { destDir, sourceDir, copied, skipped };
 }
 
 /**
@@ -133,16 +391,18 @@ export function chromiumLayout(ctx: LaunchContext): { dsf: number; dipW: number;
 }
 
 /**
- * Chromium in "phone browser" trim: isolated profile (so an already-running
- * desktop Brave/Chrome is not reused), mobile UA, window sized to the
- * portrait framebuffer, fullscreen so the desktop min-width cannot letterbox
- * a landscape strip at the top of the virtual monitor.
+ * Chromium in "phone browser" trim: its own user-data-dir (so an already-
+ * running desktop Brave/Chrome is not reused — Chromium forbids two
+ * processes on one profile), but that dir is a persistent clone of the
+ * host profile (cookies, logins, bookmarks). Mobile UA + fullscreen so
+ * the desktop min-width cannot letterbox a landscape strip.
  */
 export function buildChromiumArgv(bin: string, ctx: LaunchContext): string[] {
   const { dsf, dipW, dipH } = chromiumLayout(ctx);
+  const dataDir = ctx.profileDir ?? join(ctx.sessionDir, 'chrome-profile');
   return [
     bin,
-    `--user-data-dir=${ctx.sessionDir}/chrome-profile`,
+    `--user-data-dir=${dataDir}`,
     `--user-agent=${MOBILE_UA}`,
     `--force-device-scale-factor=${dsf.toFixed(2)}`,
     `--window-size=${dipW},${dipH}`,
@@ -166,11 +426,12 @@ const chromeMobile: AppProfile = {
   appId: 'nexus.chrome-mobile',
   name: 'Browser',
   iconName: 'google-chrome',
-  available: () => findChromeBin() !== null,
+  available: () => findPreferredBrowserBin() !== null,
   buildArgv(ctx) {
-    const bin = findChromeBin();
+    const bin = findPreferredBrowserBin();
     if (!bin) throw new Error('no chromium/chrome binary found');
-    return buildChromiumArgv(bin, ctx);
+    const profileDir = ctx.profileDir ?? prepareChromiumProfile(bin).destDir;
+    return buildChromiumArgv(bin, { ...ctx, profileDir });
   },
   // Chrome scales itself via --force-device-scale-factor; do not stack
   // GDK/Qt scaling on top of it.
