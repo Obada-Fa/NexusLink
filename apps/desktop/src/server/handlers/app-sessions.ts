@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import type { AppSessionInfo, WsMessage } from '@nexuslink/rpc-types';
 import {
   getProfile, listProfiles, resolveChromiumBin, buildChromiumArgv,
+  findPreferredBrowserBin, isChromiumFamily, prepareChromiumProfile,
   type LaunchContext,
 } from './app-profiles';
 import { getDesktopEntry, resolveIconPublic } from './windows';
@@ -252,6 +253,13 @@ export async function createAppSession(
   const name = profile?.name ?? desktopEntry?.name ?? appId;
   const icon = await resolveIconPublic(profile?.iconName ?? desktopEntry?.iconName);
 
+  // Clone the host Brave/Chrome profile *before* paying for Xvfb so the
+  // phone session already has cookies/logins when the window appears.
+  const chromiumBin = profile
+    ? (isChromiumFamily(profile.appId) ? findPreferredBrowserBin() : null)
+    : resolveChromiumBin(appId, desktopEntry?.exec);
+  const profileDir = chromiumBin ? prepareChromiumProfile(chromiumBin).destDir : undefined;
+
   const xvfb = Bun.spawn(
     [
       'Xvfb', display,
@@ -299,17 +307,17 @@ export async function createAppSession(
 
     setupAudio(session);
 
-    const ctx: LaunchContext = { width: geo.width, height: geo.height, dpr: geo.dpr, sessionDir };
+    const ctx: LaunchContext = {
+      width: geo.width, height: geo.height, dpr: geo.dpr, sessionDir, profileDir,
+    };
     let argv: string[];
     let extraEnv: Record<string, string> | undefined;
-    const chromiumBin = profile ? null : resolveChromiumBin(appId, desktopEntry?.exec);
     if (profile) {
       argv = profile.buildArgv(ctx);
       extraEnv = profile.buildEnv?.(ctx);
     } else if (chromiumBin) {
-      // Brave/Chrome/Chromium .desktop Exec reuses the desktop profile and
-      // exits if that browser is already open. Give the virtual session its
-      // own user-data-dir plus mobile UA/scale so it actually appears.
+      // Own user-data-dir so a running desktop browser is not reused, but
+      // that dir is a persistent clone of the host profile (see prepare).
       argv = buildChromiumArgv(chromiumBin, ctx);
       extraEnv = { GDK_SCALE: '1', QT_SCALE_FACTOR: '1' };
     } else {
