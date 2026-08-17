@@ -7,7 +7,7 @@
 // phone can replay history via agent.history) and pushed live as
 // `agent-event` WebSocket messages.
 
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -589,6 +589,16 @@ function setBusy(session: AgentSession, busy: boolean): void {
   session.info.busy = busy;
 }
 
+/** Expand ~ and require an existing directory. Any path is allowed for now. */
+export function resolveAgentCwd(cwd?: string, opts?: { fallbackHome?: boolean }): string {
+  const home = homedir();
+  const raw = (cwd ?? '').trim();
+  const path = !raw || raw === '~' ? home : raw.startsWith('~/') ? join(home, raw.slice(2)) : raw;
+  if (existsSync(path) && statSync(path).isDirectory()) return path;
+  if (opts?.fallbackHome) return home;
+  throw new Error(existsSync(path) ? `not a directory: ${path}` : `directory not found: ${path}`);
+}
+
 export function createAgentSession(
   agentId: string,
   cwd?: string,
@@ -602,7 +612,7 @@ export function createAgentSession(
   const info: AgentSessionInfo = {
     agentSessionId: crypto.randomUUID(),
     agent: agentId,
-    cwd: cwd || homedir(),
+    cwd: resolveAgentCwd(cwd),
     title: title || def.name,
     createdAt: Date.now(),
     busy: false,
@@ -664,7 +674,7 @@ export function openHostChat(params: {
   if (existing) return { ...existing.info };
 
   const viewOnly = hostChatId.startsWith('ide:');
-  const cwd = params.cwd || homedir();
+  const cwd = resolveAgentCwd(params.cwd, { fallbackHome: true });
   const title = params.title || 'Host chat';
   const info = createAgentSession(agent, cwd, title, { hostChatId });
   const session = agentSessions.get(info.agentSessionId);
