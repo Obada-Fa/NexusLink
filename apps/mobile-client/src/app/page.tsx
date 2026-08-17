@@ -105,6 +105,7 @@ function ConnectForm() {
 
 const TOOL_ITEMS = [
   { id: 'mirror', label: 'Desktop', icon: '\u{1F5A5}' },
+  { id: 'agent', label: 'Agents', icon: '\u{1F916}' },
   { id: 'terminal', label: 'Terminal', icon: '>_' },
   { id: 'files', label: 'Files', icon: '\u{1F4C1}' },
   { id: 'processes', label: 'Tasks', icon: '⚙' },
