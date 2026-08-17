@@ -45,6 +45,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   String _mode = 'agent';
   String _thinking = 'medium';
   String? _model;
+  List<AgentModelOption> _liveModels = [];
   bool _loading = true;
   bool _busy = false;
   String? _error;
@@ -231,8 +232,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         _events.clear();
         _busy = false;
         _photos.clear();
+        _liveModels = [];
       });
       await _loadComposerPrefs(agent.id);
+      await _refreshModels(agent.id);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -255,8 +258,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         ..clear()
         ..addAll(raw.map((e) => AgentEvent.fromJson(e as Map<String, dynamic>)));
       _photos.clear();
+      _liveModels = [];
     });
     await _loadComposerPrefs(s.agent);
+    await _refreshModels(s.agent);
     _scrollToEnd();
   }
 
@@ -269,8 +274,87 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     return null;
   }
 
-  AgentCapabilities get _caps =>
-      _activeAgent?.capabilities ?? AgentCapabilities.empty;
+  AgentCapabilities get _caps {
+    final id = _active?.agent ?? _activeAgent?.id ?? '';
+    final host = _activeAgent?.capabilities ?? AgentCapabilities.empty;
+    final fb = _fallbackCaps(id);
+    final models = _liveModels.isNotEmpty
+        ? _liveModels
+        : (host.models.length > 1 ? host.models : fb.models);
+    return AgentCapabilities(
+      modes: host.modes.length > 1 ? host.modes : fb.modes,
+      thinkingLevels: host.thinkingLevels.isNotEmpty
+          ? host.thinkingLevels
+          : fb.thinkingLevels,
+      models: models,
+      images: true,
+    );
+  }
+
+  bool get _hostAppliesComposer =>
+      _activeAgent?.capabilities.images == true ||
+      (_activeAgent?.capabilities.models.length ?? 0) > 1;
+
+  static AgentCapabilities _fallbackCaps(String id) {
+    switch (id) {
+      case 'cursor':
+        return const AgentCapabilities(
+          modes: ['agent', 'plan', 'ask'],
+          thinkingLevels: ['low', 'medium', 'high', 'extra-high', 'max'],
+          models: [
+            AgentModelOption(id: 'auto', name: 'Auto'),
+            AgentModelOption(id: 'composer-2.5', name: 'Composer 2.5'),
+            AgentModelOption(id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex'),
+            AgentModelOption(id: 'cursor-grok-4.6', name: 'Grok 4.6'),
+            AgentModelOption(id: 'claude-opus-5', name: 'Claude Opus 5'),
+            AgentModelOption(id: 'claude-sonnet-5', name: 'Claude Sonnet 5'),
+          ],
+          images: true,
+        );
+      case 'opencode':
+        return const AgentCapabilities(
+          modes: ['agent', 'plan'],
+          thinkingLevels: ['minimal', 'low', 'medium', 'high', 'max'],
+          models: [
+            AgentModelOption(id: 'opencode/deepseek-v4-flash-free', name: 'DeepSeek V4 Flash'),
+            AgentModelOption(id: 'opencode/mimo-v2.5-free', name: 'MiMo 2.5'),
+            AgentModelOption(id: 'opencode/big-pickle', name: 'Big Pickle'),
+          ],
+          images: true,
+        );
+      case 'claude':
+        return const AgentCapabilities(
+          modes: ['agent', 'plan'],
+          thinkingLevels: ['low', 'medium', 'high'],
+          models: [
+            AgentModelOption(id: 'sonnet', name: 'Sonnet'),
+            AgentModelOption(id: 'opus', name: 'Opus'),
+            AgentModelOption(id: 'haiku', name: 'Haiku'),
+          ],
+          images: true,
+        );
+      case 'antigravity':
+        return const AgentCapabilities(
+          modes: ['agent', 'plan'],
+          thinkingLevels: ['low', 'medium', 'high'],
+          models: [
+            AgentModelOption(id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash'),
+            AgentModelOption(id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro'),
+            AgentModelOption(id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6'),
+            AgentModelOption(id: 'claude-opus-4-6', name: 'Claude Opus 4.6'),
+            AgentModelOption(id: 'gpt-oss-120b', name: 'GPT-OSS 120B'),
+          ],
+          images: true,
+        );
+      default:
+        return const AgentCapabilities(
+          modes: ['agent', 'plan', 'ask'],
+          thinkingLevels: ['low', 'medium', 'high'],
+          models: [],
+          images: true,
+        );
+    }
+  }
 
   Future<void> _loadComposerPrefs(String agentId) async {
     final p = await SharedPreferences.getInstance();
@@ -286,18 +370,36 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
           : caps.thinkingLevels[caps.thinkingLevels.length ~/ 2];
     }
     var model = p.getString('agent-composer-$agentId-model');
-    if (model != null &&
-        caps.models.isNotEmpty &&
-        !caps.models.any((m) => m.id == model)) {
-      model = caps.models.first.id;
+    final families = collapseModelFamilies(caps.models);
+    if (model != null) {
+      model = modelFamilyId(model);
+      if (families.isNotEmpty && !families.any((m) => m.id == model)) {
+        model = families.first.id;
+      }
     }
-    model ??= caps.models.isNotEmpty ? caps.models.first.id : null;
+    model ??= families.isNotEmpty ? families.first.id : null;
     if (!mounted) return;
     setState(() {
       _mode = mode;
       _thinking = thinking;
       _model = model;
     });
+  }
+
+  Future<void> _refreshModels(String agentId) async {
+    final client = _client;
+    if (client == null) return;
+    try {
+      final raw = await client.requestList('agent.listModels', {'agent': agentId});
+      final models = raw
+          .whereType<Map>()
+          .map((e) => AgentModelOption.fromJson(Map<String, dynamic>.from(e)))
+          .toList();
+      if (!mounted || models.isEmpty) return;
+      setState(() => _liveModels = models);
+    } catch (_) {
+      // Old host has no agent.listModels — fallback catalog still shows.
+    }
   }
 
   Future<void> _saveComposerPrefs() async {
@@ -317,6 +419,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     final client = _client;
     if ((text.isEmpty && _photos.isEmpty) || session == null || client == null) {
       return;
+    }
+    if (text.startsWith('/') && _photos.isEmpty) {
+      if (await _handleSlash(text)) {
+        _input.clear();
+        return;
+      }
     }
     final photos = List<_PendingPhoto>.from(_photos);
     _input.clear();
@@ -374,6 +482,117 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     if (mounted) setState(() => _busy = false);
   }
 
+  void _localStatus(String text) {
+    setState(() {
+      _events.add(AgentEvent(
+        seq: _events.length + 1,
+        ts: DateTime.now().millisecondsSinceEpoch,
+        kind: 'status',
+        text: text,
+      ));
+    });
+    _scrollToEnd();
+  }
+
+  AgentModelOption? _matchModel(String query) {
+    final tokens = query
+        .toLowerCase()
+        .split(RegExp(r'[^a-z0-9]+'))
+        .where((t) => t.isNotEmpty)
+        .toList();
+    final q = tokens.join();
+    if (q.isEmpty) return null;
+    AgentModelOption? best;
+    var bestScore = 0;
+    final seen = <String>{};
+    for (final m in [..._pickerModels, ..._caps.models]) {
+      if (!seen.add(m.id)) continue;
+      final id = m.id.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+      final name = m.name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+      var score = 0;
+      if (id == q || name == q) {
+        score = 100;
+      } else if (id.contains(q) || name.contains(q)) {
+        score = 80;
+      } else if (tokens.every((t) => id.contains(t) || name.contains(t))) {
+        score = 70;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        best = m;
+      }
+    }
+    return best;
+  }
+
+  Future<bool> _handleSlash(String text) async {
+    final m = RegExp(r'^/([a-zA-Z]+)(?:\s+(.*))?$').firstMatch(text);
+    if (m == null) return false;
+    final cmd = m.group(1)!.toLowerCase();
+    final arg = (m.group(2) ?? '').trim();
+    if (cmd == 'model') {
+      if (arg.isEmpty) {
+        _localStatus(
+          'Current model: ${_model ?? 'CLI default'}. Pick one below, or /model <name>.',
+        );
+        await _pickModel();
+        return true;
+      }
+      await _refreshModels(_active?.agent ?? '');
+      final hit = _matchModel(arg);
+      if (hit == null) {
+        _localStatus('No model matching "$arg". Open the model picker to see the list.');
+        await _pickModel();
+        return true;
+      }
+      setState(() => _model = modelFamilyId(hit.id));
+      await _saveComposerPrefs();
+      _localStatus('Model set to ${hit.name} (`${modelFamilyId(hit.id)}`).');
+      return true;
+    }
+    if (cmd == 'thinking' || cmd == 'effort') {
+      final levels = _thinkingLevels;
+      if (arg.isEmpty) {
+        _localStatus(
+          'Thinking: ${_thinkingLabel(_thinking)}. /thinking ${_thinkingLevels.join('|')}',
+        );
+        await _pickThinking();
+        return true;
+      }
+      final q = arg.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+      String? hit;
+      for (final level in levels) {
+        final id = level.replaceAll(RegExp(r'[^a-z0-9]'), '');
+        final name =
+            _thinkingLabel(level).toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+        if (id == q || name == q || id.startsWith(q) || name.contains(q)) {
+          hit = level;
+          break;
+        }
+      }
+      if (hit == null) {
+        _localStatus(
+          'Thinking levels: ${levels.map(_thinkingLabel).join(', ')}',
+        );
+        return true;
+      }
+      final chosen = hit;
+      setState(() => _thinking = chosen);
+      await _saveComposerPrefs();
+      _localStatus('Thinking: ${_thinkingLabel(chosen)}');
+      return true;
+    }
+    if (cmd == 'plan' || cmd == 'ask' || cmd == 'agent') {
+      if (_caps.modes.contains(cmd)) {
+        setState(() => _mode = cmd);
+        await _saveComposerPrefs();
+        _localStatus('Mode: ${_modeLabel(cmd)}');
+        return true;
+      }
+    }
+    return false;
+  }
+
   bool get _needsSignIn {
     for (var i = _events.length - 1; i >= 0; i--) {
       final e = _events[i];
@@ -411,6 +630,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       _active = null;
       _events.clear();
       _busy = false;
+      _photos.clear();
+      _liveModels = [];
     });
   }
 
@@ -439,13 +660,26 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         _ => 'Medium',
       };
 
+  List<AgentModelOption> get _pickerModels =>
+      collapseModelFamilies(_caps.models);
+
+  List<String> get _thinkingLevels {
+    if (_caps.thinkingLevels.isNotEmpty) return _caps.thinkingLevels;
+    return const ['low', 'medium', 'high'];
+  }
+
   String get _modelLabel {
     final id = _model;
-    if (id == null) return 'Model';
-    for (final m in _caps.models) {
-      if (m.id == id) return m.name;
+    if (id == null || id == 'auto' || id == 'default') return 'Model';
+    final fam = modelFamilyId(id);
+    for (final m in _pickerModels) {
+      if (m.id == id || m.id == fam) return m.name;
     }
-    return id;
+    for (final m in _caps.models) {
+      if (m.id == id || modelFamilyId(m.id) == fam) return m.name;
+    }
+    if (fam.contains('/')) return fam.split('/').last;
+    return fam;
   }
 
   void _cycleMode() {
@@ -457,8 +691,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   }
 
   Future<void> _pickThinking() async {
-    final levels = _caps.thinkingLevels;
-    if (levels.isEmpty || !mounted) return;
+    final levels = _thinkingLevels;
+    if (!mounted) return;
     final chosen = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: const Color(0xFF151522),
@@ -470,6 +704,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
             const ListTile(
               title: Text('Thinking',
                   style: TextStyle(fontWeight: FontWeight.w600)),
+              subtitle: Text('How hard this model thinks on each turn'),
             ),
             for (final level in levels)
               ListTile(
@@ -489,41 +724,95 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   }
 
   Future<void> _pickModel() async {
-    final models = _caps.models;
-    if (models.length < 2 || !mounted) return;
+    if (_active != null) await _refreshModels(_active!.agent);
+    if (!mounted) return;
+    final models = _pickerModels;
+    if (models.isEmpty) {
+      _localStatus('This agent has no model list yet. Restart the PC host and try again.');
+      return;
+    }
     final chosen = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: const Color(0xFF151522),
-      builder: (ctx) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          padding: const EdgeInsets.fromLTRB(8, 8, 8, 24),
-          children: [
-            const ListTile(
-              title: Text('Model',
-                  style: TextStyle(fontWeight: FontWeight.w600)),
-            ),
-            for (final m in models)
-              ListTile(
-                title: Text(m.name),
-                subtitle: Text(m.id,
-                    style: const TextStyle(color: Colors.white38, fontSize: 12)),
-                trailing: m.id == _model
-                    ? const Icon(Icons.check, color: Color(0xFF2A6AFF))
-                    : null,
-                onTap: () => Navigator.pop(ctx, m.id),
+      isScrollControlled: true,
+      builder: (ctx) {
+        var query = '';
+        return StatefulBuilder(
+          builder: (ctx, setSheet) {
+            final q = query.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+            final filtered = q.isEmpty
+                ? models
+                : models.where((m) {
+                    final id = m.id.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+                    final name = m.name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+                    return id.contains(q) || name.contains(q);
+                  }).toList();
+            return SafeArea(
+              child: SizedBox(
+                height: MediaQuery.of(ctx).size.height * 0.65,
+                child: Column(
+                  children: [
+                    const ListTile(
+                      title: Text('Model',
+                          style: TextStyle(fontWeight: FontWeight.w600)),
+                      subtitle: Text(
+                          'Same agent — thinking is the chip next to this'),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                      child: TextField(
+                        autofocus: models.length > 8,
+                        decoration: const InputDecoration(
+                          hintText: 'Search models…',
+                          isDense: true,
+                          prefixIcon: Icon(Icons.search, size: 20),
+                        ),
+                        onChanged: (v) => setSheet(() => query = v),
+                      ),
+                    ),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: filtered.length,
+                        itemBuilder: (_, i) {
+                          final m = filtered[i];
+                          return ListTile(
+                            title: Text(m.name),
+                            subtitle: Text(m.id,
+                                style: const TextStyle(
+                                    color: Colors.white38, fontSize: 12)),
+                            trailing: modelFamilyId(m.id) ==
+                                    modelFamilyId(_model ?? '')
+                                ? const Icon(Icons.check, color: Color(0xFF2A6AFF))
+                                : null,
+                            onTap: () => Navigator.pop(ctx, m.id),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
               ),
-          ],
-        ),
-      ),
+            );
+          },
+        );
+      },
     );
     if (chosen == null || !mounted) return;
-    setState(() => _model = chosen);
+    setState(() => _model = modelFamilyId(chosen));
     await _saveComposerPrefs();
   }
 
   Future<void> _attachPhoto() async {
     if (!mounted || _photos.length >= 4) return;
+    if (!_hostAppliesComposer) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Restart the PC host (bun run lan) so photos actually reach the agent.',
+          ),
+        ),
+      );
+    }
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
       backgroundColor: const Color(0xFF151522),
@@ -1043,17 +1332,30 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                   ),
                   Row(
                     children: [
-                      if (_caps.images)
-                        IconButton(
-                          tooltip: 'Add photo',
-                          onPressed: _busy ? null : _attachPhoto,
-                          icon: const Icon(Icons.add_photo_alternate_outlined),
-                        ),
+                      IconButton(
+                        tooltip: 'Add photo',
+                        onPressed: _busy ? null : _attachPhoto,
+                        icon: const Icon(Icons.add_photo_alternate_outlined),
+                      ),
                       Expanded(
                         child: SingleChildScrollView(
                           scrollDirection: Axis.horizontal,
                           child: Row(
                             children: [
+                              _composerChip(
+                                _modelLabel,
+                                onTap: _busy ? null : _pickModel,
+                                icon: Icons.memory_outlined,
+                                active: _model != null &&
+                                    _model != 'auto' &&
+                                    _model != 'default',
+                              ),
+                              _composerChip(
+                                _thinkingLabel(_thinking),
+                                onTap: _busy ? null : _pickThinking,
+                                icon: Icons.psychology_outlined,
+                                active: _thinking != 'medium',
+                              ),
                               if (_caps.modes.length > 1)
                                 _composerChip(
                                   _modeLabel(_mode),
@@ -1065,23 +1367,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                                           : Icons.smart_toy_outlined,
                                   active: _mode != 'agent',
                                 ),
-                              if (_caps.thinkingLevels.isNotEmpty)
-                                _composerChip(
-                                  _thinkingLabel(_thinking),
-                                  onTap: _busy ? null : _pickThinking,
-                                  icon: Icons.psychology_outlined,
-                                ),
-                              if (_caps.models.length > 1)
-                                _composerChip(
-                                  _modelLabel,
-                                  onTap: _busy ? null : _pickModel,
-                                  icon: Icons.memory_outlined,
-                                ),
-                              _composerChip(
-                                _activeAgent?.name ?? 'Agent',
-                                onTap: _busy ? null : _selectAgent,
-                                icon: _iconFor(_activeAgent?.id ?? ''),
-                              ),
                             ],
                           ),
                         ),

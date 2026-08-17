@@ -41,6 +41,7 @@ export type RpcMethod =
   | 'agent.list'
   | 'agent.createSession'
   | 'agent.listSessions'
+  | 'agent.listModels'
   | 'agent.prompt'
   | 'agent.permission'
   | 'agent.cancel'
@@ -153,6 +154,8 @@ export type Params<M extends RpcMethod> =
     ? { agent: string; cwd?: string; title?: string }
     : M extends 'agent.listSessions'
     ? {}
+    : M extends 'agent.listModels'
+    ? { agent: string }
     : M extends 'agent.prompt'
     ? {
         agentSessionId: string
@@ -275,6 +278,8 @@ export type Result<M extends RpcMethod> =
     ? AgentSessionInfo
     : M extends 'agent.listSessions'
     ? AgentSessionInfo[]
+    : M extends 'agent.listModels'
+    ? AgentModelOption[]
     : M extends 'agent.prompt'
     ? { ok: boolean }
     : M extends 'agent.permission'

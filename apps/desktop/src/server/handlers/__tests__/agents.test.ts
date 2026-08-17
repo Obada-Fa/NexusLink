@@ -31,6 +31,12 @@ import {
   claudeSpawnArgs,
   claudeUserContent,
   thinkingToEffort,
+  parseAgentModelList,
+  matchAgentModel,
+  listAgentModels,
+  modelFamilyId,
+  collapseModelFamilies,
+  pickModelVariant,
 } from '../agents';
 
 describe('agent gateway', () => {
@@ -48,6 +54,10 @@ describe('agent gateway', () => {
     expect(cursor.capabilities.images).toBe(true);
     expect(cursor.capabilities.thinkingLevels).toContain('extra-high');
     expect(cursor.capabilities.models.some((m) => m.id === 'auto')).toBe(true);
+    const oc = agents.find((a) => a.id === 'opencode')!;
+    expect(oc.capabilities.images).toBe(true);
+    expect(oc.capabilities.models.some((m) => m.id.includes('mimo'))).toBe(true);
+    expect(listAgentModels('mock').some((m) => m.id === 'demo')).toBe(true);
   });
 
   test('mock conversation streams normalized events and keeps history', async () => {
@@ -108,6 +118,66 @@ describe('agent gateway', () => {
 });
 
 describe('composer flags and attachments', () => {
+  test('parses CLI model lists and fuzzy-matches /model queries', () => {
+    const oc = parseAgentModelList(
+      'opencode/deepseek-v4-flash-free\nopencode/mimo-v2.5-free\n',
+    );
+    expect(oc).toEqual([
+      { id: 'opencode/deepseek-v4-flash-free', name: 'deepseek-v4-flash-free' },
+      { id: 'opencode/mimo-v2.5-free', name: 'mimo-v2.5-free' },
+    ]);
+    expect(matchAgentModel('mimo 2.5', oc)?.id).toBe('opencode/mimo-v2.5-free');
+    expect(matchAgentModel('deepseek', oc)?.id).toContain('deepseek');
+
+    const cursor = parseAgentModelList(
+      'Available models\nauto - Auto (current, default)\ncomposer-2.5 - Composer 2.5\n',
+    );
+    expect(cursor.map((m) => m.id)).toEqual(['auto', 'composer-2.5']);
+    expect(cursor[0]!.name).toBe('Auto');
+
+    const agy = parseAgentModelList(
+      'gemini-3.7-flash-high\tGemini 3.7 Flash (High)\nclaude-sonnet-4-6\tClaude Sonnet 4.6\n',
+    );
+    expect(agy).toEqual([
+      { id: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
+      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
+    ]);
+  });
+
+  test('collapses thinking variants into a family and picks one at prompt time', () => {
+    expect(modelFamilyId('claude-opus-5-thinking-high')).toBe('claude-opus-5');
+    expect(modelFamilyId('gemini-3.7-flash-high')).toBe('gemini-3.7-flash');
+    expect(modelFamilyId('cursor-grok-4.6-xhigh-fast')).toBe('cursor-grok-4.6');
+    expect(modelFamilyId('opencode/mimo-v2.5-free')).toBe('opencode/mimo-v2.5-free');
+
+    const catalog = [
+      { id: 'claude-opus-5', name: 'Claude Opus 5' },
+      { id: 'claude-opus-5-thinking-high', name: 'Claude Opus 5 High' },
+      { id: 'gemini-3.7-flash-low', name: 'Gemini 3.7 Flash (Low)' },
+      { id: 'gemini-3.7-flash-medium', name: 'Gemini 3.7 Flash (Medium)' },
+      { id: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
+      { id: 'cursor-grok-4.6', name: 'Grok 4.6' },
+      { id: 'cursor-grok-4.6-xhigh', name: 'Grok 4.6 Extra High' },
+      { id: 'cursor-grok-4.6-xhigh-fast', name: 'Grok 4.6 Extra High Fast' },
+    ];
+    expect(collapseModelFamilies(catalog).map((m) => m.id)).toEqual([
+      'claude-opus-5',
+      'gemini-3.7-flash',
+      'cursor-grok-4.6',
+    ]);
+    expect(pickModelVariant('claude-opus-5', 'high', catalog)).toBe(
+      'claude-opus-5-thinking-high',
+    );
+    expect(pickModelVariant('gemini-3.7-flash', 'high', catalog)).toBe(
+      'gemini-3.7-flash-high',
+    );
+    expect(pickModelVariant('gemini-3.7-flash', 'medium', catalog)).toBe(
+      'gemini-3.7-flash-medium',
+    );
+    expect(pickModelVariant('cursor-grok-4.6', 'extra-high', catalog)).toBe(
+      'cursor-grok-4.6-xhigh',
+    );
+  });
   test('maps thinking levels onto Cursor --model effort brackets', () => {
     expect(thinkingToEffort('extra-high')).toBe('high');
     expect(cursorModelFlag('auto', 'high')).toBeUndefined();
@@ -157,6 +227,34 @@ describe('composer flags and attachments', () => {
     expect(agy).toContain('--mode');
     expect(agy).toContain('--effort');
     expect(agy).toContain('low');
+
+    const cursorResolved = buildCursorArgv({
+      bin: 'cursor-agent',
+      cwd: '/tmp/proj',
+      text: 'hi',
+      model: 'claude-opus-5',
+      thinking: 'high',
+      catalog: [
+        { id: 'claude-opus-5', name: 'Opus 5' },
+        { id: 'claude-opus-5-thinking-high', name: 'Opus 5 High' },
+      ],
+    });
+    expect(cursorResolved).toContain('claude-opus-5-thinking-high');
+    expect(cursorResolved.some((a) => a.includes('[effort='))).toBe(false);
+
+    const agyResolved = buildAgyArgv({
+      bin: 'agy',
+      text: 'hi',
+      model: 'gemini-3.7-flash',
+      thinking: 'high',
+      catalog: [
+        { id: 'gemini-3.7-flash-medium', name: 'Flash Medium' },
+        { id: 'gemini-3.7-flash-high', name: 'Flash High' },
+      ],
+    });
+    expect(agyResolved).toContain('gemini-3.7-flash-high');
+    expect(agyResolved).toContain('--effort');
+    expect(agyResolved).toContain('high');
 
     const claude = claudeSpawnArgs({ bin: 'claude', mode: 'plan', model: 'opus', thinking: 'high' });
     expect(claude).toContain('--permission-mode');

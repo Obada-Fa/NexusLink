@@ -112,11 +112,42 @@ class AppSessionInfo {
 class AgentModelOption {
   final String id;
   final String name;
-  AgentModelOption({required this.id, required this.name});
+  const AgentModelOption({required this.id, required this.name});
   factory AgentModelOption.fromJson(Map<String, dynamic> j) => AgentModelOption(
         id: j['id'] as String,
         name: (j['name'] as String?) ?? j['id'] as String,
       );
+}
+
+/// Strip thinking / effort suffixes (`-high`, `-thinking-high`, `-xhigh-fast`).
+String modelFamilyId(String id) {
+  return id
+      .replaceAll(RegExp(r'-thinking(?=-|$)', caseSensitive: false), '')
+      .replaceAll(RegExp(r'-(low|medium|high|xhigh|max)(-fast)?$', caseSensitive: false), '')
+      .replaceAll(RegExp(r'-fast$', caseSensitive: false), '')
+      .replaceAll(RegExp(r'-+$'), '');
+}
+
+/// Collapse CLI catalogs that encode thinking in the model id into one row
+/// per family. The thinking chip picks the variant at send time.
+List<AgentModelOption> collapseModelFamilies(List<AgentModelOption> models) {
+  final seen = <String>{};
+  final out = <AgentModelOption>[];
+  for (final m in models) {
+    final fam = modelFamilyId(m.id);
+    if (fam.isEmpty || seen.contains(fam)) continue;
+    seen.add(fam);
+    final name = m.name
+        .replaceAll(
+            RegExp(r'\s*\((High|Medium|Low|Extra High|Max|Thinking).*?\)',
+                caseSensitive: false),
+            '')
+        .replaceAll(RegExp(r'\s+Thinking\s*$', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\s*\(current.*\)$', caseSensitive: false), '')
+        .trim();
+    out.add(AgentModelOption(id: fam, name: name.isEmpty ? fam : name));
+  }
+  return out;
 }
 
 class AgentCapabilities {
