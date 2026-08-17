@@ -27,7 +27,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
   bool _loading = true;
+  bool _busy = false;
   String? _error;
+  String? _sendError;
   void Function()? _unsub;
 
   RpcClient? get _client => ref.read(activeClientProvider);
@@ -77,10 +79,41 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     final ev = msg['event'];
     if (ev is! Map<String, dynamic>) return;
     final parsed = AgentEvent.fromJson(ev);
-    setState(() => _events.add(parsed));
+    setState(() {
+      if (parsed.kind == 'user') _busy = true;
+      if (parsed.kind == 'result' || parsed.kind == 'error') _busy = false;
+      if (parsed.kind == 'text-delta') {
+        _appendDelta(parsed.text ?? '');
+      } else if (parsed.kind == 'result' && (parsed.text ?? '').trim().isEmpty) {
+        // Host uses an empty result as "turn finished".
+      } else if (parsed.kind == 'status') {
+        // Keep the composer spinner; don't add a chat bubble.
+      } else {
+        _events.add(parsed);
+      }
+    });
     _scrollToEnd();
     if (parsed.kind == 'permission-request') {
       unawaited(_askPermission(parsed));
+    }
+  }
+
+  void _appendDelta(String delta) {
+    if (delta.isEmpty) return;
+    if (_events.isNotEmpty && _events.last.kind == 'text') {
+      final last = _events.removeLast();
+      _events.add(AgentEvent(
+        seq: last.seq,
+        ts: last.ts,
+        kind: 'text',
+        text: '${last.text ?? ''}$delta',
+        toolName: last.toolName,
+        toolInput: last.toolInput,
+        toolOutput: last.toolOutput,
+        refId: last.refId,
+      ));
+    } else {
+      _events.add(AgentEvent(seq: 0, ts: DateTime.now().millisecondsSinceEpoch, kind: 'text', text: delta));
     }
   }
 
@@ -191,17 +224,26 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     final client = _client;
     if (client == null) return;
     final cwd = await _pickProject();
-    final created = await client.request('agent.createSession', {
-      'agent': agent.id,
-      'title': agent.name,
-      ?'cwd': cwd,
-    }) as Map<String, dynamic>;
-    final session = AgentSessionInfo.fromJson(created);
-    setState(() {
-      _sessions.insert(0, session);
-      _active = session;
-      _events.clear();
-    });
+    try {
+      final created = await client.request('agent.createSession', {
+        'agent': agent.id,
+        'title': agent.name,
+        ?'cwd': cwd,
+      }) as Map<String, dynamic>;
+      final session = AgentSessionInfo.fromJson(created);
+      if (!mounted) return;
+      setState(() {
+        _sessions.insert(0, session);
+        _active = session;
+        _events.clear();
+        _busy = false;
+        _sendError = null;
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() => _error = e.toString());
+      }
+    }
   }
 
   Future<void> _openSession(AgentSessionInfo s) async {
@@ -213,6 +255,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     if (!mounted) return;
     setState(() {
       _active = s;
+      _busy = s.busy;
+      _sendError = null;
       _events
         ..clear()
         ..addAll(raw.map((e) => AgentEvent.fromJson(e as Map<String, dynamic>)));
@@ -224,12 +268,38 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     final text = _input.text.trim();
     final session = _active;
     final client = _client;
-    if (text.isEmpty || session == null || client == null) return;
+    if (text.isEmpty || session == null || client == null || _busy) return;
     _input.clear();
-    await client.request('agent.prompt', {
-      'agentSessionId': session.agentSessionId,
-      'text': text,
+    setState(() {
+      _busy = true;
+      _sendError = null;
     });
+    try {
+      final raw = await client.request('agent.prompt', {
+        'agentSessionId': session.agentSessionId,
+        'text': text,
+      });
+      if (raw is Map && raw['ok'] == false) {
+        throw RpcException('The agent did not accept that message.');
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _sendError = e.toString();
+        });
+      }
+    }
+  }
+
+  Future<void> _cancel() async {
+    final session = _active;
+    final client = _client;
+    if (session == null || client == null) return;
+    try {
+      await client.request('agent.cancel', {'agentSessionId': session.agentSessionId});
+    } catch (_) {}
+    if (mounted) setState(() => _busy = false);
   }
 
   Future<void> _closeActive() async {
@@ -328,18 +398,47 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   }
 
   Widget _chat() {
+    final extra = _busy ? 1 : 0;
     return Column(
       children: [
         Expanded(
           child: ListView.builder(
             controller: _scroll,
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-            itemCount: _events.length,
-            itemBuilder: (_, i) => _bubble(_events[i]),
+            itemCount: _events.length + extra,
+            itemBuilder: (_, i) {
+              if (i >= _events.length) return _busyRow();
+              return _bubble(_events[i]);
+            },
           ),
         ),
+        if (_sendError != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+            child: Text(_sendError!,
+                style: const TextStyle(color: Color(0xFFEE5555), fontSize: 12)),
+          ),
         _composer(),
       ],
+    );
+  }
+
+  Widget _busyRow() {
+    return const Padding(
+      padding: EdgeInsets.fromLTRB(8, 8, 8, 4),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 12,
+            height: 12,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          SizedBox(width: 8),
+          Text('Working…',
+              style: TextStyle(
+                  color: Colors.white38, fontSize: 12, fontStyle: FontStyle.italic)),
+        ],
+      ),
     );
   }
 
@@ -488,7 +587,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                 controller: _input,
                 minLines: 1,
                 maxLines: 4,
-                onSubmitted: (_) => _send(),
+                onSubmitted: (_) {
+                  if (!_busy) _send();
+                },
                 decoration: InputDecoration(
                   hintText: 'Message the agent…',
                   isDense: true,
@@ -499,8 +600,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
             ),
             const SizedBox(width: 8),
             IconButton.filled(
-              onPressed: _send,
-              icon: const Icon(Icons.send),
+              tooltip: _busy ? 'Stop' : 'Send',
+              onPressed: _busy ? _cancel : _send,
+              icon: Icon(_busy ? Icons.stop : Icons.send),
             ),
           ],
         ),
