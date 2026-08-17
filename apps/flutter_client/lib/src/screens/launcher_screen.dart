@@ -11,6 +11,7 @@ import '../state/launcher.dart';
 import '../widgets/app_icon.dart';
 import 'agent_screen.dart';
 import 'files_screen.dart';
+import 'ide_screen.dart';
 import 'mirror_screen.dart';
 import 'system_screen.dart';
 import 'terminal_screen.dart';
@@ -326,6 +327,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
         .push(MaterialPageRoute(builder: (_) => screen));
     final items = <(IconData, String, VoidCallback?)>[
       (Icons.terminal, 'Terminal', () => push(const TerminalScreen())),
+      (Icons.code, 'Code', () => push(const IdeScreen())),
       (Icons.folder, 'Files', () => push(const FilesScreen())),
       (Icons.memory, 'System', () => push(const SystemScreen())),
       (Icons.desktop_windows, 'Desktop', () => _openDesktop(context)),

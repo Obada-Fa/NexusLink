@@ -115,6 +115,7 @@ function ConnectForm() {
 
 const TOOL_ITEMS = [
   { id: 'terminal', label: 'Terminal', icon: '>_' },
+  { id: 'ide', label: 'Code', icon: '</>' },
   { id: 'files', label: 'Files', icon: '\u{1F4C1}' },
   { id: 'system', label: 'System', icon: '\u{1F4CA}' },
   { id: 'mirror', label: 'Desktop', icon: '\u{1F5A5}' },

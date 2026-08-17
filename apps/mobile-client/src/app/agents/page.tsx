@@ -67,6 +67,14 @@ export default function AgentsPage() {
       const m = msg as { agentSessionId?: string; event?: AgentEvent };
       if (!m.event || m.agentSessionId !== activeIdRef.current) return;
       setEvents((prev) => [...prev, m.event!]);
+      if (m.event.kind === 'permission-request' && m.event.refId) {
+        const allow = window.confirm(m.event.text || `Allow ${m.event.toolName || 'this tool'}?`);
+        void client.request('agent.permission', {
+          agentSessionId: m.agentSessionId,
+          requestId: m.event.refId,
+          allow,
+        });
+      }
     });
     return () => {
       cancelled = true;
