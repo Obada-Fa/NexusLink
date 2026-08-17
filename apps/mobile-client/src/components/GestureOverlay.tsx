@@ -104,7 +104,7 @@ export default function GestureOverlay({
           client
             .request('input.mouseScroll', {
               deltaX: 0,
-              deltaY: -event.scale * 400,
+              deltaY: -event.scale * 160,
               x: event.x + ox,
               y: event.y + oy,
               modifiers: ['ctrl'],
