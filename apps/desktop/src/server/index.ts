@@ -1,5 +1,5 @@
 import type { WsMessage, RpcRequest, RpcResponse, RpcMethod } from '@nexuslink/rpc-types';
-import { handleFsList } from './handlers/fs';
+import { handleFsList, listProjects } from './handlers/fs';
 import { listProcesses } from './handlers/process';
 import { getSystemInfo, getPerfSnapshot } from './handlers/system';
 import { handleTerminalCreate, handleTerminalInput, handleTerminalResize, handleTerminalKill, setSend as setTerminalSend } from './handlers/terminal';
@@ -7,7 +7,19 @@ import { validateToken, generateToken, handleSessionPair, validateSessionTOTP, i
 import { setSend as setSignalingSend } from './handlers/signaling';
 import { mouseMove, mouseClick, mouseScroll, keyEvent, typeText, buttonDown, buttonUp, mouseMoveAbs } from './handlers/input';
 import { setSend as setCaptureSend, startCapture, stopCapture, stopCapturesForSocket, getScreenMetadata } from './handlers/capture';
-import { listWindows, listApps, launchApp, adoptWindow, releaseWindow, activateWindow, getWindowGeometry } from './handlers/windows';
+import { listWindows, listApps, launchApp, adoptWindow, releaseWindow, activateWindow, getWindowGeometry, getAdoptedCaptureRegion } from './handlers/windows';
+import {
+  createAppSession, listAppSessions, resizeAppSession, closeAppSession,
+  getAppSession, getSessionDisplay, setSessionBroadcast,
+} from './handlers/app-sessions';
+import { setSend as setWebrtcSend, startWebrtc, signalWebrtc, stopWebrtc, stopWebrtcForSocket } from './handlers/webrtc';
+import { getClipboard, setClipboard } from './handlers/clipboard';
+import {
+  listAgents, createAgentSession, listAgentSessions, promptAgent,
+  cancelAgent, closeAgentSession, agentHistory, resolveAgentPermission, setAgentBroadcast,
+} from './handlers/agents';
+import { startIde, stopIde, ideStatus } from './handlers/ide';
+import type { WebRtcSignal } from '@nexuslink/rpc-types';
 import { serveStatic, staticAvailable } from './static-server';
 import { printLaunchBanner } from './launch-banner';
 import { startSidecarReader } from './sidecar-reader';
@@ -59,6 +71,15 @@ export async function startRpcServer(port = 45678) {
   setTerminalSend(send);
   setSignalingSend(send);
   setCaptureSend(send);
+  setWebrtcSend(send);
+
+  // Session/agent lifecycle pushes go to every authenticated client so a
+  // reconnecting phone immediately sees current state.
+  const broadcastAll = (msg: WsMessage) => {
+    for (const ws of getAuthenticatedSessions()) send(ws, msg);
+  };
+  setSessionBroadcast(broadcastAll);
+  setAgentBroadcast(broadcastAll);
 
   async function dispatch(method: RpcMethod, params: Params, req: RpcRequest<RpcMethod>, ws: WebSocket) {
     const sessionId = findSession(ws);
@@ -71,10 +92,19 @@ export async function startRpcServer(port = 45678) {
       return;
     }
 
+    // Inputs (and typed text) bound to a virtual app session inject into that
+    // session's X display; without a sessionId they hit the real desktop.
+    const inputDisplay = typeof params.sessionId === 'string'
+      ? getSessionDisplay(params.sessionId) ?? undefined
+      : undefined;
+
     let result: unknown;
     switch (method) {
       case 'fs.list':
         result = await handleFsList(params.path as string, params.showHidden as boolean | undefined);
+        break;
+      case 'fs.listProjects':
+        result = await listProjects();
         break;
       case 'process.list':
         result = await listProcesses();
@@ -101,13 +131,14 @@ export async function startRpcServer(port = 45678) {
         result = await getPerfSnapshot();
         break;
       case 'input.mouseMove':
-        result = mouseMove(params.dx as number, params.dy as number);
+        result = mouseMove(params.dx as number, params.dy as number, inputDisplay);
         break;
       case 'input.mouseClick':
         result = mouseClick(
           params.button as 'left' | 'right' | 'middle',
           params.x as number | undefined,
           params.y as number | undefined,
+          inputDisplay,
         );
         break;
       case 'input.mouseScroll':
@@ -117,6 +148,7 @@ export async function startRpcServer(port = 45678) {
           params.x as number | undefined,
           params.y as number | undefined,
           params.modifiers as string[] | undefined,
+          inputDisplay,
         );
         break;
       case 'input.buttonDown':
@@ -124,6 +156,7 @@ export async function startRpcServer(port = 45678) {
           params.button as 'left' | 'right' | 'middle',
           params.x as number | undefined,
           params.y as number | undefined,
+          inputDisplay,
         );
         break;
       case 'input.buttonUp':
@@ -131,16 +164,17 @@ export async function startRpcServer(port = 45678) {
           params.button as 'left' | 'right' | 'middle',
           params.x as number | undefined,
           params.y as number | undefined,
+          inputDisplay,
         );
         break;
       case 'input.mouseMoveAbs':
-        result = mouseMoveAbs(params.x as number, params.y as number);
+        result = mouseMoveAbs(params.x as number, params.y as number, inputDisplay);
         break;
       case 'input.keyEvent':
-        result = keyEvent(params.key as string, params.modifiers as string[] | undefined);
+        result = keyEvent(params.key as string, params.modifiers as string[] | undefined, inputDisplay);
         break;
       case 'input.typeText':
-        result = typeText(params.text as string);
+        result = typeText(params.text as string, inputDisplay);
         break;
       case 'window.list':
         result = await listWindows();
@@ -164,17 +198,114 @@ export async function startRpcServer(port = 45678) {
       case 'apps.launch':
         result = await launchApp(params.appId as string);
         break;
+      case 'appSession.create':
+        result = await createAppSession(
+          params.appId as string,
+          params.width as number,
+          params.height as number,
+          (params.dpr as number | undefined) ?? 1,
+        );
+        break;
+      case 'appSession.list':
+        result = listAppSessions();
+        break;
+      case 'appSession.resize':
+        result = resizeAppSession(
+          params.sessionId as string,
+          params.width as number,
+          params.height as number,
+        );
+        break;
+      case 'appSession.close':
+        result = closeAppSession(params.sessionId as string);
+        break;
+      case 'webrtc.start':
+        result = startWebrtc(params.sessionId as string, (params.fps as number) ?? 24, ws);
+        break;
+      case 'webrtc.signal':
+        signalWebrtc(params.webrtcId as string, params.data as WebRtcSignal);
+        result = undefined;
+        break;
+      case 'webrtc.stop':
+        stopWebrtc(params.webrtcId as string);
+        result = undefined;
+        break;
+      case 'clipboard.get':
+        result = getClipboard(inputDisplay);
+        break;
+      case 'clipboard.set':
+        result = setClipboard(params.text as string, inputDisplay);
+        break;
+      case 'agent.list':
+        result = listAgents();
+        break;
+      case 'agent.createSession':
+        result = createAgentSession(
+          params.agent as string,
+          params.cwd as string | undefined,
+          params.title as string | undefined,
+        );
+        break;
+      case 'agent.listSessions':
+        result = listAgentSessions();
+        break;
+      case 'agent.prompt':
+        result = promptAgent(params.agentSessionId as string, params.text as string);
+        break;
+      case 'agent.permission':
+        result = resolveAgentPermission(
+          params.agentSessionId as string,
+          params.requestId as string,
+          params.allow as boolean,
+        );
+        break;
+      case 'agent.cancel':
+        result = cancelAgent(params.agentSessionId as string);
+        break;
+      case 'agent.close':
+        result = closeAgentSession(params.agentSessionId as string);
+        break;
+      case 'agent.history':
+        result = agentHistory(params.agentSessionId as string);
+        break;
+      case 'ide.start':
+        result = startIde(params.cwd as string | undefined);
+        break;
+      case 'ide.stop':
+        result = stopIde();
+        break;
+      case 'ide.status':
+        result = ideStatus();
+        break;
       case 'screen.startCapture': {
+        // Virtual app session: grab the session's whole phone-shaped screen,
+        // 1:1 with the phone — no window tracking, no cropping possible.
+        const sessionId = params.sessionId as string | undefined;
+        if (sessionId) {
+          const session = getAppSession(sessionId);
+          if (!session) throw new Error('unknown app session');
+          result = startCapture(
+            (params.quality as 'low' | 'medium' | 'high') ?? 'medium',
+            (params.fps as number) ?? 24,
+            ws,
+            { x: 0, y: 0, width: session.width, height: session.height },
+            undefined,
+            session.display,
+          );
+          break;
+        }
         // Per-window capture: resolve the window's current on-screen rect, grab
         // only that region, and keep tracking the window if it moves.
         const windowId = params.windowId as string | undefined;
-        const region = windowId ? getWindowGeometry(windowId) ?? undefined : undefined;
+        const region = windowId
+          ? (getAdoptedCaptureRegion(windowId) ?? getWindowGeometry(windowId) ?? undefined)
+          : undefined;
         result = startCapture(
           (params.quality as 'low' | 'medium' | 'high') ?? 'medium',
           (params.fps as number) ?? 12,
           ws,
           region,
-          windowId ? () => getWindowGeometry(windowId) : undefined,
+          windowId ? () => getAdoptedCaptureRegion(windowId) ?? getWindowGeometry(windowId) : undefined,
         );
         break;
       }
@@ -245,8 +376,7 @@ export async function startRpcServer(port = 45678) {
         break;
       }
       default:
-        result = undefined;
-        break;
+        throw new Error(`unknown method: ${method}`);
     }
     const response: RpcResponse = { id: req.id, result };
     send(ws, { type: 'rpc-response', response });
@@ -299,6 +429,7 @@ export async function startRpcServer(port = 45678) {
       },
       close(ws) {
         stopCapturesForSocket(ws as unknown as WebSocket);
+        stopWebrtcForSocket(ws as unknown as WebSocket);
         sessions.forEach((s, id) => {
           if (s.ws === ws) sessions.delete(id);
         });

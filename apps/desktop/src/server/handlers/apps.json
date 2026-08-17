@@ -1,0 +1,30 @@
+{
+  "apps": [
+    {
+      "appId": "nexus.chrome-mobile",
+      "name": "Browser",
+      "tier": 1,
+      "kind": "chromium-mobile",
+      "iconName": "google-chrome"
+    },
+    {
+      "appId": "nexus.vscode",
+      "name": "VS Code",
+      "tier": 3,
+      "kind": "code-server",
+      "iconName": "visual-studio-code"
+    },
+    {
+      "appId": "nexus.terminal",
+      "name": "Terminal",
+      "tier": 3,
+      "kind": "pty"
+    },
+    {
+      "appId": "nexus.agents",
+      "name": "Agents",
+      "tier": 4,
+      "kind": "agent"
+    }
+  ]
+}

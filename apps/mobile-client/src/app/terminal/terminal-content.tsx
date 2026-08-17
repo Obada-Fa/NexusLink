@@ -6,227 +6,276 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { useRouter } from 'next/navigation';
 import { useConnectionStore } from '@/store/connection';
+import {
+  EXTRA_KEYS_ROW1,
+  EXTRA_KEYS_ROW2,
+  EXTRA_KEYS_ROW3,
+  applyStickyModifiers,
+  type ExtraKey,
+} from '@/lib/extra-keys';
 
-function b64decode(str: string): string {
-  try {
-    return atob(str);
-  } catch {
-    return str;
-  }
-}
-
-const TOOLBAR_KEYS = [
-  { label: 'Tab', code: '\t' },
-  { label: 'Esc', code: '\x1b' },
-  { label: 'Ctrl', code: 'CTRL', modifier: true as const },
-  { label: 'Alt', code: 'ALT', modifier: true as const },
-  { label: '\u2190', code: '\x1b[D' },
-  { label: '\u2191', code: '\x1b[A' },
-  { label: '\u2193', code: '\x1b[B' },
-  { label: '\u2192', code: '\x1b[C' },
-];
+const FONT_MIN = 11;
+const FONT_MAX = 22;
+const FONT_KEY = 'nexuslink-term-font';
 
 export default function TerminalContent() {
   const client = useConnectionStore((s) => s.client);
   const status = useConnectionStore((s) => s.status);
   const router = useRouter();
+  const connect = useConnectionStore((s) => s.connect);
+  const hostUrl = useConnectionStore((s) => s.hostUrl);
 
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalIdRef = useRef<string | null>(null);
+  const unsubRef = useRef<(() => void) | null>(null);
+  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
 
   const [ctrlActive, setCtrlActive] = useState(false);
   const [altActive, setAltActive] = useState(false);
+  const [fontSize, setFontSize] = useState(14);
+  const [live, setLive] = useState(false);
 
   const ctrlRef = useRef(false);
   const altRef = useRef(false);
+  ctrlRef.current = ctrlActive;
+  altRef.current = altActive;
 
+  const haptic = () => {
+    try {
+      navigator.vibrate?.(8);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const sendData = useCallback(
+    (raw: string) => {
+      const tid = terminalIdRef.current;
+      if (!tid || !client) return;
+      const next = applyStickyModifiers(raw, ctrlRef.current, altRef.current);
+      if (next.ctrl !== ctrlRef.current) setCtrlActive(next.ctrl);
+      if (next.alt !== altRef.current) setAltActive(next.alt);
+      client.request('terminal.input', { terminalId: tid, data: next.data }).catch(() => {});
+    },
+    [client],
+  );
+
+  const fitAndResize = useCallback(() => {
+    const fit = fitAddonRef.current;
+    const term = termRef.current;
+    const tid = terminalIdRef.current;
+    if (!fit || !term || !client) return;
+    try {
+      fit.fit();
+    } catch {
+      return;
+    }
+    if (tid) {
+      client
+        .request('terminal.resize', {
+          terminalId: tid,
+          cols: term.cols,
+          rows: term.rows,
+        })
+        .catch(() => {});
+    }
+  }, [client]);
+
+  // ---- session bring-up ----------------------------------------------------
   useEffect(() => {
     if (status !== 'connected' || !client || !containerRef.current) return;
     const c = client;
-
     let disposed = false;
 
-    async function setup() {
-      const term = new Terminal({
-        cursorBlink: true,
-        fontSize: 14,
-        fontFamily: "'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace",
-        theme: {
-          background: '#0a0a0f',
-          foreground: '#e0e0e0',
-          cursor: '#4ade80',
-          selectionBackground: '#2a6aff44',
-          black: '#1a1a2e',
-          red: '#e55',
-          green: '#4ade80',
-          yellow: '#f0c040',
-          blue: '#2a6aff',
-          magenta: '#c084fc',
-          cyan: '#22d3ee',
-          white: '#e0e0e0',
-          brightBlack: '#444',
-          brightRed: '#f87171',
-          brightGreen: '#6ee7b7',
-          brightYellow: '#fbbf24',
-          brightBlue: '#60a5fa',
-          brightMagenta: '#d8b4fe',
-          brightCyan: '#67e8f9',
-          brightWhite: '#fff',
-        },
-      });
+    const stored = Number(localStorage.getItem(FONT_KEY) || '14');
+    const initialFont = Number.isFinite(stored)
+      ? Math.min(FONT_MAX, Math.max(FONT_MIN, stored))
+      : 14;
+    setFontSize(initialFont);
 
-      const fitAddon = new FitAddon();
-      term.loadAddon(fitAddon);
+    const term = new Terminal({
+      cursorBlink: true,
+      cursorStyle: 'bar',
+      fontSize: initialFont,
+      fontFamily: "'Cascadia Code', 'Fira Code', 'JetBrains Mono', ui-monospace, monospace",
+      theme: {
+        background: '#0d0d12',
+        foreground: '#e8e8ee',
+        cursor: '#4ade80',
+        cursorAccent: '#0d0d12',
+        selectionBackground: '#2a6aff66',
+        black: '#1a1a2e',
+        red: '#f87171',
+        green: '#4ade80',
+        yellow: '#fbbf24',
+        blue: '#60a5fa',
+        magenta: '#c084fc',
+        cyan: '#22d3ee',
+        white: '#e8e8ee',
+        brightBlack: '#555',
+        brightRed: '#fca5a5',
+        brightGreen: '#86efac',
+        brightYellow: '#fde68a',
+        brightBlue: '#93c5fd',
+        brightMagenta: '#e9d5ff',
+        brightCyan: '#a5f3fc',
+        brightWhite: '#fff',
+      },
+      scrollback: 4000,
+    });
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(containerRef.current);
+    try {
+      fitAddon.fit();
+    } catch {
+      /* first layout can race */
+    }
+    term.focus();
+    termRef.current = term;
+    fitAddonRef.current = fitAddon;
 
-      termRef.current = term;
-      fitAddonRef.current = fitAddon;
+    term.onData((data) => {
+      if (disposed) return;
+      sendData(data);
+    });
 
-      if (containerRef.current) {
-        term.open(containerRef.current);
-        fitAddon.fit();
-      }
-
-      term.onData((data) => {
-        const tid = terminalIdRef.current;
-        if (!tid || !c) return;
-        c.request('terminal.input', { terminalId: tid, data }).catch(() => {});
-      });
-
+    (async () => {
       try {
         const result = (await c.request('terminal.create', {
           cols: term.cols,
           rows: term.rows,
         })) as { terminalId: string };
+        if (disposed) {
+          void c.request('terminal.kill', { terminalId: result.terminalId }).catch(() => {});
+          return;
+        }
         terminalIdRef.current = result.terminalId;
-
-        const unsub = c.subscribe('terminal-output', (msg: unknown) => {
+        setLive(true);
+        unsubRef.current = c.subscribe('terminal-output', (msg: unknown) => {
           if (disposed) return;
           const m = msg as { terminalId?: string; data?: string };
-          if (m.terminalId !== result.terminalId || !m.data) return;
-          term.write(b64decode(m.data));
+          if (m.terminalId !== result.terminalId || typeof m.data !== 'string') return;
+          term.write(m.data);
         });
-
-        return () => {
-          unsub();
-        };
       } catch {
-        term.write('Failed to create terminal session.\r\n');
+        term.write('\r\nFailed to create a terminal session on the PC.\r\n');
       }
-    }
+    })();
 
-    setup().catch(() => {});
+    const nav = navigator as Navigator & {
+      wakeLock?: { request: (type: 'screen') => Promise<{ release: () => Promise<void> }> };
+    };
+    nav.wakeLock
+      ?.request('screen')
+      .then((lock) => {
+        if (disposed) void lock.release();
+        else wakeLockRef.current = lock;
+      })
+      .catch(() => {});
 
     return () => {
       disposed = true;
+      unsubRef.current?.();
+      unsubRef.current = null;
       const tid = terminalIdRef.current;
-      if (tid && c) {
-        c.request('terminal.kill', { terminalId: tid }).catch(() => {});
-      }
-      termRef.current?.dispose();
+      terminalIdRef.current = null;
+      if (tid) void c.request('terminal.kill', { terminalId: tid }).catch(() => {});
+      term.dispose();
       termRef.current = null;
       fitAddonRef.current = null;
+      void wakeLockRef.current?.release().catch(() => {});
+      wakeLockRef.current = null;
+      setLive(false);
     };
+    // sendData is stable enough for the session lifetime (client/status gated).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, status]);
 
   useEffect(() => {
-    if (!client) return;
-    const c = client;
-
-    function handleResize() {
-      setTimeout(() => {
-        if (!fitAddonRef.current || !c) return;
-        fitAddonRef.current.fit();
-        const tid = terminalIdRef.current;
-        if (tid && termRef.current) {
-          c
-            .request('terminal.resize', {
-              terminalId: tid,
-              cols: termRef.current.cols,
-              rows: termRef.current.rows,
-            })
-            .catch(() => {});
-        }
-      }, 50);
-    }
-
-    const observer = new ResizeObserver(handleResize);
+    const onResize = () => fitAndResize();
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
     const el = containerRef.current;
-    if (el) observer.observe(el);
-
-    window.addEventListener('orientationchange', handleResize);
-
+    const observer = el ? new ResizeObserver(onResize) : null;
+    if (el) observer?.observe(el);
     return () => {
-      observer.disconnect();
-      window.removeEventListener('orientationchange', handleResize);
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onResize);
+      observer?.disconnect();
     };
-  }, [client]);
+  }, [fitAndResize]);
 
-  const sendKey = useCallback(
-    (code: string, isModifier?: boolean) => {
-      const tid = terminalIdRef.current;
-      if (!tid || !client) return;
+  const bumpFont = (delta: number) => {
+    const next = Math.min(FONT_MAX, Math.max(FONT_MIN, fontSize + delta));
+    setFontSize(next);
+    localStorage.setItem(FONT_KEY, String(next));
+    const term = termRef.current;
+    if (term) {
+      term.options.fontSize = next;
+      requestAnimationFrame(fitAndResize);
+    }
+  };
 
-      if (isModifier && code === 'CTRL') {
-        const next = !ctrlRef.current;
-        ctrlRef.current = next;
-        setCtrlActive(next);
-        return;
-      }
-      if (isModifier && code === 'ALT') {
-        const next = !altRef.current;
-        altRef.current = next;
-        setAltActive(next);
-        return;
-      }
+  const onExtraKey = (k: ExtraKey) => {
+    haptic();
+    if (k.modifier === 'ctrl') {
+      setCtrlActive((v) => !v);
+      return;
+    }
+    if (k.modifier === 'alt') {
+      setAltActive((v) => !v);
+      return;
+    }
+    sendData(k.code);
+    termRef.current?.focus();
+  };
 
-      let data = code;
-      if (ctrlRef.current) {
-        data = String.fromCharCode(code.charCodeAt(0) & 0x1f);
-        ctrlRef.current = false;
-        setCtrlActive(false);
-      }
-      if (altRef.current) {
-        data = '\x1b' + data;
-        altRef.current = false;
-        setAltActive(false);
-      }
-
-      client!.request('terminal.input', { terminalId: tid, data }).catch(() => {});
-    },
-    [client]
-  );
-
-  const connect = useConnectionStore((s) => s.connect);
-  const disconnect = useConnectionStore((s) => s.disconnect);
-  const hostUrl = useConnectionStore((s) => s.hostUrl);
+  const paste = async () => {
+    haptic();
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) sendData(text);
+    } catch {
+      /* permission denied */
+    }
+    termRef.current?.focus();
+  };
 
   const handleReconnect = useCallback(async () => {
     if (!hostUrl) return;
     try {
       await connect(hostUrl);
     } catch {
-      // handled by store
+      /* store handles it */
     }
   }, [connect, hostUrl]);
 
-  const hasSession = status === 'connected' && client;
+  const hasSession = status === 'connected' && !!client;
 
   return (
     <div style={styles.wrapper}>
       <header style={styles.topBar}>
-        <button onClick={() => router.back()} style={styles.backBtn}>
-          \u2190 Back
+        <button onClick={() => router.push('/')} style={styles.iconBtn} aria-label="Home">
+          ⌂
         </button>
-        <span style={styles.title}>Terminal</span>
-        {hasSession && (
-          <span style={styles.sessionBadge}>
-            {terminalIdRef.current ? 'live' : 'connecting...'}
-          </span>
-        )}
+        <span style={styles.title}>
+          Terminal
+          {live ? <span style={styles.live}> · live</span> : null}
+        </span>
+        <button onClick={() => bumpFont(-1)} style={styles.iconBtn} aria-label="Smaller font">
+          A−
+        </button>
+        <button onClick={() => bumpFont(1)} style={styles.iconBtn} aria-label="Larger font">
+          A+
+        </button>
+        <button onClick={() => void paste()} style={styles.iconBtn} aria-label="Paste">
+          📋
+        </button>
         {status !== 'connected' && (
-          <button onClick={handleReconnect} style={styles.reconnectBtn}>
+          <button onClick={() => void handleReconnect()} style={styles.reconnectBtn}>
             Reconnect
           </button>
         )}
@@ -234,142 +283,159 @@ export default function TerminalContent() {
 
       {!hasSession ? (
         <div style={styles.disconnectedOverlay}>
-          <span style={styles.disconnectedIcon}>{'\u26A0'}</span>
-          <span style={styles.disconnectedText}>Not connected.</span>
-          <button onClick={handleReconnect} style={styles.reconnectBtnLarge}>
+          <span style={styles.disconnectedText}>Not connected to the PC.</span>
+          <button onClick={() => void handleReconnect()} style={styles.reconnectBtnLarge}>
             Reconnect
           </button>
         </div>
       ) : (
-        <div ref={containerRef} style={styles.termContainer} />
+        <div
+          ref={containerRef}
+          style={styles.termContainer}
+          onClick={() => termRef.current?.focus()}
+        />
       )}
 
-      <div style={styles.toolbar}>
-        {TOOLBAR_KEYS.map((k) => {
-          const isActive =
-            (k.modifier && k.code === 'CTRL' && ctrlActive) ||
-            (k.modifier && k.code === 'ALT' && altActive);
-          return (
-            <button
-              key={k.label}
-              style={{
-                ...styles.keyBtn,
-                background: isActive ? '#2a6aff' : '#1a1a28',
-                color: isActive ? '#fff' : '#aaa',
-                borderColor: isActive ? '#2a6aff' : '#2a2a3a',
-              }}
-              onClick={() => sendKey(k.code, k.modifier)}
-              disabled={!hasSession}
-            >
-              {k.label}
-            </button>
-          );
-        })}
+      <div style={styles.keyboardChrome}>
+        <KeyRow keys={EXTRA_KEYS_ROW1} ctrl={ctrlActive} alt={altActive} onKey={onExtraKey} disabled={!hasSession} />
+        <KeyRow keys={EXTRA_KEYS_ROW2} ctrl={ctrlActive} alt={altActive} onKey={onExtraKey} disabled={!hasSession} />
+        <KeyRow keys={EXTRA_KEYS_ROW3} ctrl={ctrlActive} alt={altActive} onKey={onExtraKey} disabled={!hasSession} />
       </div>
     </div>
   );
 }
 
+function KeyRow({
+  keys,
+  ctrl,
+  alt,
+  onKey,
+  disabled,
+}: {
+  keys: ExtraKey[];
+  ctrl: boolean;
+  alt: boolean;
+  onKey: (k: ExtraKey) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div style={styles.keyRow}>
+      {keys.map((k) => {
+        const active =
+          (k.modifier === 'ctrl' && ctrl) || (k.modifier === 'alt' && alt);
+        return (
+          <button
+            key={k.label}
+            disabled={disabled}
+            onClick={() => onKey(k)}
+            style={{
+              ...styles.keyBtn,
+              background: active ? '#2a6aff' : '#1a1a28',
+              color: active ? '#fff' : '#c8c8d8',
+              borderColor: active ? '#2a6aff' : '#2a2a3a',
+            }}
+          >
+            {k.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 const styles: Record<string, React.CSSProperties> = {
-  disconnectedOverlay: {
-    flex: 1,
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: '12px',
-  },
-  disconnectedIcon: {
-    fontSize: '36px',
-  },
-  disconnectedText: {
-    fontSize: '14px',
-    color: '#555',
-  },
-  reconnectBtn: {
-    padding: '4px 10px',
-    borderRadius: '6px',
-    border: '1px solid #2a3a6a',
-    background: '#141420',
-    color: '#2a6aff',
-    fontSize: '11px',
-    fontWeight: 600,
-    cursor: 'pointer',
-  },
-  reconnectBtnLarge: {
-    padding: '10px 24px',
-    borderRadius: '8px',
-    border: 'none',
-    background: '#2a6aff',
-    color: '#fff',
-    fontSize: '13px',
-    fontWeight: 600,
-    cursor: 'pointer',
-  },
   wrapper: {
     display: 'flex',
     flexDirection: 'column',
     height: '100dvh',
-    background: '#0a0a0f',
-    color: '#e0e0e0',
+    background: '#0d0d12',
+    color: '#e8e8ee',
     fontFamily: 'system-ui, sans-serif',
     overflow: 'hidden',
   },
   topBar: {
     display: 'flex',
     alignItems: 'center',
-    gap: '10px',
-    padding: '10px 12px',
+    gap: 6,
+    padding: '8px 8px 8px 10px',
     borderBottom: '1px solid #1e1e30',
     flexShrink: 0,
   },
-  backBtn: {
-    padding: '6px 12px',
-    borderRadius: '6px',
-    border: '1px solid #333',
-    background: 'transparent',
-    color: '#888',
-    fontSize: '12px',
-    cursor: 'pointer',
-    fontWeight: 500,
-  },
-  title: {
-    fontSize: '14px',
+  title: { fontSize: 14, fontWeight: 600, color: '#ccc', flex: 1 },
+  live: { color: '#4ade80', fontWeight: 500, fontSize: 12 },
+  iconBtn: {
+    minWidth: 36,
+    height: 32,
+    padding: '0 8px',
+    borderRadius: 8,
+    border: '1px solid #2a2a3a',
+    background: '#141420',
+    color: '#bbb',
+    fontSize: 13,
     fontWeight: 600,
-    color: '#ccc',
+    cursor: 'pointer',
+  },
+  reconnectBtn: {
+    padding: '4px 10px',
+    borderRadius: 6,
+    border: '1px solid #2a3a6a',
+    background: '#141420',
+    color: '#2a6aff',
+    fontSize: 11,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  reconnectBtnLarge: {
+    padding: '10px 24px',
+    borderRadius: 8,
+    border: 'none',
+    background: '#2a6aff',
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  disconnectedOverlay: {
     flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
   },
-  sessionBadge: {
-    fontSize: '11px',
-    color: '#4ade80',
-    fontWeight: 500,
-  },
+  disconnectedText: { fontSize: 14, color: '#667' },
   termContainer: {
     flex: 1,
     overflow: 'hidden',
-    padding: '4px',
+    padding: '6px 8px 0',
+    minHeight: 0,
   },
-  toolbar: {
-    display: 'flex',
-    gap: '6px',
-    padding: '8px 10px',
-    paddingBottom: 'max(8px, env(safe-area-inset-bottom))',
-    borderTop: '1px solid #1e1e30',
+  keyboardChrome: {
     flexShrink: 0,
+    borderTop: '1px solid #1e1e30',
+    background: '#0a0a10',
+    padding: '6px 6px max(8px, env(safe-area-inset-bottom))',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  },
+  keyRow: {
+    display: 'flex',
+    gap: 4,
     overflowX: 'auto',
-    justifyContent: 'center',
+    WebkitOverflowScrolling: 'touch',
   },
   keyBtn: {
-    padding: '10px 14px',
-    borderRadius: '6px',
+    flex: '1 0 auto',
+    minWidth: 36,
+    padding: '10px 8px',
+    borderRadius: 8,
     border: '1px solid #2a2a3a',
     background: '#1a1a28',
-    color: '#aaa',
-    fontSize: '13px',
-    fontWeight: 500,
+    color: '#c8c8d8',
+    fontSize: 12,
+    fontWeight: 600,
     cursor: 'pointer',
-    whiteSpace: 'nowrap',
-    minWidth: '38px',
-    textAlign: 'center',
+    fontFamily: 'ui-monospace, monospace',
   },
 };

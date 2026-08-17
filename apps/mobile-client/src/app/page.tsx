@@ -21,6 +21,16 @@ interface AppInfo {
   wmClass?: string;
 }
 
+interface AppSessionInfo {
+  sessionId: string;
+  appId: string;
+  name: string;
+  icon?: string;
+  width: number;
+  height: number;
+  status: 'starting' | 'running' | 'exited';
+}
+
 /** Shown while the auto-connect to the serving host is in flight. */
 function ConnectingScreen() {
   return (
@@ -104,11 +114,12 @@ function ConnectForm() {
 }
 
 const TOOL_ITEMS = [
-  { id: 'mirror', label: 'Desktop', icon: '\u{1F5A5}' },
   { id: 'terminal', label: 'Terminal', icon: '>_' },
+  { id: 'ide', label: 'Code', icon: '</>' },
   { id: 'files', label: 'Files', icon: '\u{1F4C1}' },
-  { id: 'processes', label: 'Tasks', icon: '⚙' },
   { id: 'system', label: 'System', icon: '\u{1F4CA}' },
+  { id: 'mirror', label: 'Desktop', icon: '\u{1F5A5}' },
+  { id: 'agents', label: 'Agents', icon: '\u2728' },
 ] as const;
 
 function AppIcon({ icon, name, size = 52 }: { icon?: string; name: string; size?: number }) {
@@ -146,6 +157,7 @@ function HomeScreen() {
 
   const [windows, setWindows] = useState<WindowInfo[]>([]);
   const [apps, setApps] = useState<AppInfo[]>([]);
+  const [phoneSessions, setPhoneSessions] = useState<AppSessionInfo[]>([]);
   const [appsLoading, setAppsLoading] = useState(true);
   const [search, setSearch] = useState('');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -157,6 +169,12 @@ function HomeScreen() {
       setWindows(list);
     } catch {
       /* host may not support window.list yet */
+    }
+    try {
+      const sessions = (await client.request('appSession.list')) as AppSessionInfo[];
+      setPhoneSessions(sessions.filter((s) => s.status === 'running'));
+    } catch {
+      /* host may not support virtual sessions yet */
     }
   }, [client]);
 
@@ -182,16 +200,26 @@ function HomeScreen() {
     router.push(`/mirror?w=${encodeURIComponent(w.windowId)}&title=${encodeURIComponent(bestName(w, apps))}`);
   };
 
+  const attachSession = (s: AppSessionInfo) => {
+    router.push(`/mirror?s=${encodeURIComponent(s.sessionId)}&title=${encodeURIComponent(s.name)}`);
+  };
+
+  const closePhoneSession = (s: AppSessionInfo, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setPhoneSessions((list) => list.filter((x) => x.sessionId !== s.sessionId));
+    client?.request('appSession.close', { sessionId: s.sessionId }).catch(() => {});
+  };
+
+  // Tapping an app launches it into a phone-shaped VIRTUAL display on the PC
+  // (nothing moves on the real desktop). Re-tap re-attaches to the running
+  // session, exactly like switching back to an app on a phone.
   const launchApp = (a: AppInfo) => {
-    // If the app already has a window open, jump straight into it.
-    const running = windows.find((w) => matchesApp(w, a));
-    if (running) {
-      openApp(running);
+    const session = phoneSessions.find((s) => s.appId === a.appId);
+    if (session) {
+      attachSession(session);
       return;
     }
-    router.push(
-      `/mirror?app=${encodeURIComponent(a.appId)}&cls=${encodeURIComponent(a.wmClass ?? '')}&title=${encodeURIComponent(a.name)}`,
-    );
+    router.push(`/mirror?vapp=${encodeURIComponent(a.appId)}&title=${encodeURIComponent(a.name)}`);
   };
 
   const q = search.trim().toLowerCase();
@@ -206,6 +234,31 @@ function HomeScreen() {
           {'⏻'}
         </button>
       </header>
+
+      {phoneSessions.length > 0 && !q && (
+        <section style={styles.section}>
+          <h2 style={styles.sectionTitle}>Running on your phone</h2>
+          <div style={styles.runningRow}>
+            {phoneSessions.map((s) => (
+              <button key={s.sessionId} style={styles.runningCard} onClick={() => attachSession(s)}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
+                  <AppIcon icon={s.icon} name={s.name} size={44} />
+                  <span
+                    role="button"
+                    aria-label={`Close ${s.name}`}
+                    onClick={(e) => closePhoneSession(s, e)}
+                    style={styles.sessionClose}
+                  >
+                    {'✕'}
+                  </span>
+                </div>
+                <span style={styles.runningLabel}>{s.name}</span>
+                <span style={styles.runningTitle}>Tap to resume</span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
       {windows.length > 0 && !q && (
         <section style={styles.section}>
@@ -239,7 +292,9 @@ function HomeScreen() {
           ) : (
             <div style={styles.appGrid}>
               {filteredApps.map((a) => {
-                const running = windows.some((w) => matchesApp(w, a));
+                const running =
+                  phoneSessions.some((s) => s.appId === a.appId) ||
+                  windows.some((w) => matchesApp(w, a));
                 return (
                   <button key={a.appId} style={styles.appCell} onClick={() => launchApp(a)}>
                     <div style={{ position: 'relative' }}>
@@ -364,6 +419,19 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: 'left',
   },
   runningLabel: { fontSize: 12, fontWeight: 600, color: '#eee', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%' },
+  sessionClose: {
+    marginLeft: 'auto',
+    width: 22,
+    height: 22,
+    borderRadius: 6,
+    border: '1px solid #2a2a3a',
+    color: '#889',
+    fontSize: 11,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    cursor: 'pointer',
+  },
   runningTitle: { fontSize: 10, color: '#667', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%' },
   appsHeader: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 },
   search: {
