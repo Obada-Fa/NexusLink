@@ -48,6 +48,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   List<AgentModelOption> _liveModels = [];
   bool _loading = true;
   bool _busy = false;
+  bool _sending = false;
   String? _error;
   void Function()? _unsub;
 
@@ -414,60 +415,66 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   }
 
   Future<void> _send() async {
+    if (_busy || _sending) return;
     final text = _input.text.trim();
     final session = _active;
     final client = _client;
     if ((text.isEmpty && _photos.isEmpty) || session == null || client == null) {
       return;
     }
-    if (text.startsWith('/') && _photos.isEmpty) {
-      if (await _handleSlash(text)) {
-        _input.clear();
-        return;
-      }
-    }
-    final photos = List<_PendingPhoto>.from(_photos);
-    _input.clear();
-    setState(() {
-      _busy = true;
-      _pendingThumbs = photos.map((p) => p.bytes).toList();
-      _photos.clear();
-    });
-    _scrollToEnd();
+    _sending = true;
     try {
-      await client.request(
-        'agent.prompt',
-        {
-          'agentSessionId': session.agentSessionId,
-          'text': text,
-          if (_model != null && _model != 'auto' && _model != 'default')
-            'model': _model,
-          if (_mode != 'agent') 'mode': _mode,
-          if (_thinking.isNotEmpty) 'thinking': _thinking,
-          if (photos.isNotEmpty)
-            'images': [
-              for (final p in photos)
-                {
-                  'name': p.name,
-                  'mime': p.mime,
-                  'data': base64Encode(p.bytes),
-                },
-            ],
-        },
-        const Duration(seconds: 60),
-      );
-    } catch (e) {
-      if (!mounted) return;
+      if (text.startsWith('/') && _photos.isEmpty) {
+        if (await _handleSlash(text)) {
+          _input.clear();
+          return;
+        }
+      }
+      final photos = List<_PendingPhoto>.from(_photos);
+      _input.clear();
       setState(() {
-        _busy = false;
-        _pendingThumbs = null;
-        _events.add(AgentEvent(
-          seq: _events.length + 1,
-          ts: DateTime.now().millisecondsSinceEpoch,
-          kind: 'error',
-          text: e.toString(),
-        ));
+        _busy = true;
+        _pendingThumbs = photos.map((p) => p.bytes).toList();
+        _photos.clear();
       });
+      _scrollToEnd();
+      try {
+        await client.request(
+          'agent.prompt',
+          {
+            'agentSessionId': session.agentSessionId,
+            'text': text,
+            if (_model != null && _model != 'auto' && _model != 'default')
+              'model': _model,
+            if (_mode != 'agent') 'mode': _mode,
+            if (_thinking.isNotEmpty) 'thinking': _thinking,
+            if (photos.isNotEmpty)
+              'images': [
+                for (final p in photos)
+                  {
+                    'name': p.name,
+                    'mime': p.mime,
+                    'data': base64Encode(p.bytes),
+                  },
+              ],
+          },
+          const Duration(seconds: 60),
+        );
+      } catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _busy = false;
+          _pendingThumbs = null;
+          _events.add(AgentEvent(
+            seq: _events.length + 1,
+            ts: DateTime.now().millisecondsSinceEpoch,
+            kind: 'error',
+            text: e.toString(),
+          ));
+        });
+      }
+    } finally {
+      _sending = false;
     }
   }
 
