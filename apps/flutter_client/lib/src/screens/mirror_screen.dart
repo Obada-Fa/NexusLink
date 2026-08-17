@@ -404,6 +404,9 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   void _setRegion(CaptureRegion r) {
     _region = r;
     _engine.setHostDimensions(r.width.toDouble(), r.height.toDouble());
+    // Virtual sessions are sized to this phone stage — stretch, don't letterbox,
+    // so a tap lands on the pixel under the finger.
+    _engine.setFit(widget.target.isVirtual ? ScaleFit.fill : ScaleFit.contain);
   }
 
   @override
@@ -557,8 +560,10 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         ),
         actions: [
           IconButton(
-            tooltip: 'Trackpad mode: 1 finger moves the cursor, 2 fingers scroll',
-            icon: Icon(Icons.mouse,
+            tooltip: _precision
+                ? 'Mouse mode on: 1 finger moves a cursor'
+                : 'Touch mode: tap where you press. Toggle for a trackpad cursor',
+            icon: Icon(_precision ? Icons.mouse : Icons.touch_app,
                 color: _precision ? const Color(0xFF2A6AFF) : null),
             onPressed: () {
               setState(() => _precision = !_precision);
@@ -607,12 +612,17 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
               alignment: Alignment.center,
               child: _rtcLive && _renderer != null
                   ? RTCVideoView(_renderer!,
-                      objectFit: RTCVideoViewObjectFit
-                          .RTCVideoViewObjectFitContain)
+                      objectFit: widget.target.isVirtual
+                          ? RTCVideoViewObjectFit.RTCVideoViewObjectFitCover
+                          : RTCVideoViewObjectFit
+                              .RTCVideoViewObjectFitContain)
                   : _frame == null
                       ? const CircularProgressIndicator()
                       : Image.memory(_frame!,
-                          gaplessPlayback: true, fit: BoxFit.contain),
+                          gaplessPlayback: true,
+                          fit: widget.target.isVirtual
+                              ? BoxFit.fill
+                              : BoxFit.contain),
             ),
           );
         });

@@ -61,9 +61,9 @@ const double pinchMinDeltaPx = 6;
 /// Screen-px -> zoom-scale factor per pinch step.
 const double pinchZoomScale = 0.005;
 
-/// 'direct' (default): one-finger pan = momentum scroll at the absolute host
-/// coordinate under the finger. 'trackpad': legacy relative-cursor movement
-/// (a.k.a. Precision mode behaviour).
+/// 'direct' (default, RustDesk-style): the finger *is* the pointer. Tap =
+/// click, one-finger pan = left drag, long-press = right click, two-finger
+/// pan = scroll. 'trackpad': relative-cursor (Precision / mouse mode).
 enum GestureMode { direct, trackpad }
 
 enum Axis { none, vertical, horizontal, free }
@@ -254,7 +254,6 @@ class TouchClassifier {
   double _lastTapTime = 0;
   ({double x, double y})? _lastTapPos;
 
-  Axis _axis = Axis.none;
   bool _dragStarted = false;
   int _maxTouches = 0;
 
@@ -293,7 +292,6 @@ class TouchClassifier {
     _longPressFired = false;
     _longPressArmed = false;
     _dragStarted = false;
-    _axis = Axis.none;
     _maxTouches = 0;
     _state = GestureState.idle;
   }
@@ -321,7 +319,6 @@ class TouchClassifier {
     _startPos = host;
     _startTime = timestampMs;
     _lastPos = host;
-    _axis = Axis.none;
     _scrollCarryX = 0;
     _scrollCarryY = 0;
     _moveAccumDx = 0;
@@ -401,24 +398,15 @@ class TouchClassifier {
     final rawDy = host.y - last.y;
 
     if (_effectiveMode == GestureMode.direct) {
-      _state = GestureState.scrolling;
-      // Lock axis once travel is decisive.
-      if (_axis == Axis.none) {
-        _axis = resolveAxis(host.x - start.x, host.y - start.y);
-      }
-      final proj = projectToAxis(rawDx, rawDy, _axis);
-      // Content tracks the finger: scroll delta is opposite to finger travel.
-      final sdx = -proj.dx;
-      final sdy = -proj.dy;
-      _velocity.addSample(sdx, sdy, timestampMs);
-      _scrollCarryX += sdx;
-      _scrollCarryY += sdy;
-      final ix = _scrollCarryX.truncate();
-      final iy = _scrollCarryY.truncate();
-      if (ix != 0 || iy != 0) {
-        _scrollCarryX -= ix;
-        _scrollCarryY -= iy;
-        _emit(ScrollEvent(ix, iy, host.x, host.y));
+      // Native touch: one-finger pan = left-button drag at the finger.
+      // Button-down at the original aim point so a tap-then-slide still hits.
+      if (_dist(host, start) > tapMaxMovePx) {
+        if (!_dragStarted) {
+          _dragStarted = true;
+          _state = GestureState.dragging;
+          _emit(DragStartEvent(start.x, start.y));
+        }
+        _emit(DragMoveEvent(host.x, host.y));
       }
     } else {
       // Trackpad: relative cursor movement.
@@ -443,7 +431,6 @@ class TouchClassifier {
 
   void _handleMultiMove(TouchPoint t0, TouchPoint t1, double timestampMs) {
     _longPressArmed = false;
-    _state = GestureState.pinching;
 
     final midX = (t0.x + t1.x) / 2;
     final midY = (t0.y + t1.y) / 2;
@@ -464,11 +451,15 @@ class TouchClassifier {
     if (_effectiveMode != GestureMode.trackpad &&
         pinchDelta.abs() >= pinchMinDeltaPx &&
         pinchDelta.abs() > math.sqrt(panDx * panDx + panDy * panDy)) {
+      _state = GestureState.pinching;
       _emit(ZoomEvent(pinchDelta * pinchZoomScale, host.x, host.y));
     } else {
-      // Content tracks the fingers.
-      _scrollCarryX += -panDx;
-      _scrollCarryY += -panDy;
+      _state = GestureState.scrolling;
+      final sdx = -panDx;
+      final sdy = -panDy;
+      _velocity.addSample(sdx, sdy, timestampMs);
+      _scrollCarryX += sdx;
+      _scrollCarryY += sdy;
       final ix = _scrollCarryX.truncate();
       final iy = _scrollCarryY.truncate();
       if (ix != 0 || iy != 0) {
@@ -552,11 +543,9 @@ class TouchClassifier {
         return;
       }
 
-      // A one-finger direct scroll that ended with velocity -> momentum
-      // fling (the engine checks the start threshold). A finger that paused
-      // before lifting has stale velocity — flinging then feels haunted.
-      if (_effectiveMode == GestureMode.direct &&
-          _state == GestureState.scrolling &&
+      // Two-finger scroll released with velocity -> momentum fling.
+      if (_state == GestureState.scrolling &&
+          _maxTouches >= 2 &&
           timestampMs - _velocity.lastSampleTimeMs <= flingMaxSampleAgeMs) {
         _onFlingStart?.call(
           _velocity.vx,
