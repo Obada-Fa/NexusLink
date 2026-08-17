@@ -1,6 +1,7 @@
 // Native chat UI for AI agents that run on the PC (Claude Code, Cursor CLI,
-// OpenCode, or the built-in demo agent). The phone never sees a terminal — tool calls
-// become cards, assistant text is markdown, and history survives reconnects.
+// OpenCode, Antigravity, or the built-in demo agent). The phone never sees a
+// terminal — tool calls become cards, assistant text is markdown, and history
+// survives reconnects.
 
 import 'dart:async';
 
@@ -260,6 +261,24 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     }
   }
 
+  bool get _needsSignIn {
+    for (var i = _events.length - 1; i >= 0; i--) {
+      final e = _events[i];
+      final t = (e.text ?? '').toLowerCase();
+      if (e.kind == 'result' && t.contains('signed in')) return false;
+      if (e.kind == 'error' || e.kind == 'status' || e.kind == 'text') {
+        if (t.contains("isn't signed in") ||
+            t.contains('authentication required') ||
+            t.contains('starting cursor sign-in') ||
+            t.contains('sign-in is already') ||
+            t.contains('no headless login')) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   Future<void> _closeActive() async {
     final session = _active;
     final client = _client;
@@ -328,7 +347,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                       ? Icons.code
                       : a.id == 'opencode'
                           ? Icons.terminal
-                          : Icons.smart_toy_outlined,
+                          : a.id == 'antigravity'
+                              ? Icons.rocket_launch_outlined
+                              : Icons.smart_toy_outlined,
               color: a.available
                   ? const Color(0xFF2A6AFF)
                   : Colors.white24,
@@ -449,8 +470,17 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       case 'error':
         return Padding(
           padding: const EdgeInsets.all(8),
-          child: Text(e.text ?? 'error',
-              style: const TextStyle(color: Color(0xFFEE5555))),
+          child: MarkdownBody(
+            data: e.text ?? 'error',
+            styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
+              p: const TextStyle(color: Color(0xFFEE5555), fontSize: 13),
+              a: const TextStyle(color: Color(0xFF93C5FD), fontSize: 13),
+              code: const TextStyle(
+                  color: Color(0xFFEE5555),
+                  fontFamily: 'monospace',
+                  fontSize: 12),
+            ),
+          ),
         );
       default:
         return const SizedBox.shrink();
@@ -526,26 +556,46 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
-        child: Row(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Expanded(
-              child: TextField(
-                controller: _input,
-                minLines: 1,
-                maxLines: 4,
-                onSubmitted: (_) => _send(),
-                decoration: InputDecoration(
-                  hintText: 'Message the agent…',
-                  isDense: true,
-                  border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12)),
+            if (_needsSignIn)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: FilledButton.tonal(
+                  onPressed: _busy
+                      ? null
+                      : () {
+                          _input.text = 'login';
+                          _send();
+                        },
+                  child: const Text('Sign in on the PC'),
                 ),
               ),
-            ),
-            const SizedBox(width: 8),
-            IconButton.filled(
-              onPressed: _send,
-              icon: const Icon(Icons.send),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _input,
+                    minLines: 1,
+                    maxLines: 4,
+                    onSubmitted: (_) => _send(),
+                    decoration: InputDecoration(
+                      hintText: _needsSignIn
+                          ? 'login or CURSOR_API_KEY=…'
+                          : 'Message the agent…',
+                      isDense: true,
+                      border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filled(
+                  onPressed: _send,
+                  icon: const Icon(Icons.send),
+                ),
+              ],
             ),
           ],
         ),
