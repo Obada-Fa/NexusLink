@@ -363,11 +363,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         for (final a in _agents)
           ListTile(
             leading: Icon(
-              a.id == 'claude'
-                  ? Icons.auto_awesome
-                  : a.id == 'cursor'
-                      ? Icons.code
-                      : Icons.smart_toy_outlined,
+              _agentIcon(a.id),
               color: a.available
                   ? const Color(0xFF2A6AFF)
                   : Colors.white24,
@@ -395,6 +391,21 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         ],
       ],
     );
+  }
+
+  IconData _agentIcon(String id) {
+    switch (id) {
+      case 'claude':
+        return Icons.auto_awesome;
+      case 'cursor':
+        return Icons.code;
+      case 'opencode':
+        return Icons.terminal;
+      case 'antigravity':
+        return Icons.rocket_launch_outlined;
+      default:
+        return Icons.smart_toy_outlined;
+    }
   }
 
   Widget _chat() {

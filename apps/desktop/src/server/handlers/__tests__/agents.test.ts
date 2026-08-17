@@ -16,13 +16,15 @@ import {
   resolveAgentPermission,
   setAgentBroadcast,
   buildCursorCliArgs,
+  buildOpenCodeArgs,
+  buildAntigravityArgs,
   parseCursorToolCall,
 } from '../agents';
 
-function installFakeCursor(script: string): { dir: string; argvFile: string; restore: () => void } {
-  const dir = join(tmpdir(), `nl-cursor-${crypto.randomUUID()}`);
+function installFakeBin(name: string, script: string): { dir: string; argvFile: string; restore: () => void } {
+  const dir = join(tmpdir(), `nl-agent-${crypto.randomUUID()}`);
   mkdirSync(dir, { recursive: true });
-  const bin = join(dir, 'cursor-agent');
+  const bin = join(dir, name);
   writeFileSync(bin, script);
   chmodSync(bin, 0o755);
   const prev = process.env.PATH;
@@ -50,6 +52,8 @@ describe('agent gateway', () => {
     const ids = agents.map((a) => a.id);
     expect(ids).toContain('claude');
     expect(ids).toContain('cursor');
+    expect(ids).toContain('opencode');
+    expect(ids).toContain('antigravity');
     expect(ids).toContain('mock');
     expect(agents.find((a) => a.id === 'mock')!.available).toBe(true);
   });
@@ -151,7 +155,7 @@ describe('agent gateway', () => {
   });
 
   test('cursor adapter streams assistant text from a fake CLI', async () => {
-    const fake = installFakeCursor(`#!/usr/bin/env bash
+    const fake = installFakeBin('cursor-agent',`#!/usr/bin/env bash
 printf '%s\\n' "$@" > "\${0}.argv"
 echo '{"type":"system","subtype":"init","session_id":"sess-1"}'
 echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"You are on Linux."}]}}'
@@ -186,7 +190,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"You are on
   });
 
   test('second Cursor CLI prompt resumes the same session', async () => {
-    const fake = installFakeCursor(`#!/usr/bin/env bash
+    const fake = installFakeBin('cursor-agent',`#!/usr/bin/env bash
 printf '%s\\n' "$@" > "\${0}.argv"
 echo '{"type":"system","subtype":"init","session_id":"sess-1"}'
 echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong"}]}}'
@@ -217,7 +221,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"pong","ses
   });
 
   test('cursor adapter surfaces stderr when the CLI exits with no JSON', async () => {
-    const fake = installFakeCursor(`#!/usr/bin/env bash
+    const fake = installFakeBin('cursor-agent',`#!/usr/bin/env bash
 echo 'Authentication required. Run cursor-agent login.' >&2
 exit 1
 `);
@@ -231,6 +235,148 @@ exit 1
       await waitFor(pushed, 'error');
       const err = pushed.find((e) => e.kind === 'error');
       expect(err?.text ?? '').toMatch(/login|Authentication/i);
+      closeAgentSession(info.agentSessionId);
+    } finally {
+      fake.restore();
+      setAgentBroadcast(() => {});
+    }
+  });
+
+  test('headless OpenCode argv uses run --format json --auto', () => {
+    const argv = buildOpenCodeArgs('/tmp/opencode', 'hello', {
+      cwd: '/home/me/proj',
+      sessionId: 'ses_abc',
+    });
+    expect(argv.slice(0, 6)).toEqual(['/tmp/opencode', 'run', '--format', 'json', '--auto', '--dir']);
+    expect(argv).toContain('/home/me/proj');
+    expect(argv).toContain('--session');
+    expect(argv).toContain('ses_abc');
+    expect(argv.at(-1)).toBe('hello');
+  });
+
+  test('headless Antigravity argv uses print stream-json', () => {
+    const argv = buildAntigravityArgs('/tmp/agy', 'hello', {
+      cwd: '/tmp',
+      sessionId: 'conv-1',
+    });
+    expect(argv).toContain('--print');
+    expect(argv).toContain('stream-json');
+    expect(argv).toContain('--dangerously-skip-permissions');
+    expect(argv).toContain('--conversation');
+    expect(argv).toContain('conv-1');
+    expect(argv.at(-1)).toBe('hello');
+  });
+
+  test('opencode adapter streams assistant text from a fake CLI', async () => {
+    const fake = installFakeBin('opencode', `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "\${0}.argv"
+echo '{"type":"step_start","sessionID":"ses_1"}'
+echo '{"type":"text","sessionID":"ses_1","part":{"type":"text","text":"OpenCode here."}}'
+echo '{"type":"tool_use","sessionID":"ses_1","part":{"callID":"c1","tool":"bash","state":{"status":"completed","input":{"command":"uname"},"output":"Linux\\n"}}}'
+echo '{"type":"step_finish","sessionID":"ses_1","part":{"type":"step-finish","reason":"stop"}}'
+`);
+    const pushed: AgentEvent[] = [];
+    setAgentBroadcast((msg: WsMessage) => {
+      if (msg.type === 'agent-event') pushed.push(msg.event);
+    });
+    try {
+      expect(listAgents().find((a) => a.id === 'opencode')!.available).toBe(true);
+      const info = createAgentSession('opencode', fake.dir, 'OpenCode');
+      promptAgent(info.agentSessionId, 'hello');
+      await waitFor(pushed, 'text');
+      await waitFor(pushed, 'result');
+      const argv = readFileSync(fake.argvFile, 'utf8');
+      expect(argv).toContain('run');
+      expect(argv).toContain('--format');
+      expect(argv).toContain('json');
+      expect(argv).toContain('--auto');
+      expect(pushed.some((e) => e.kind === 'text' && e.text?.includes('OpenCode'))).toBe(true);
+      expect(pushed.find((e) => e.kind === 'tool-start')?.toolName).toBe('bash');
+      closeAgentSession(info.agentSessionId);
+    } finally {
+      fake.restore();
+      setAgentBroadcast(() => {});
+    }
+  });
+
+  test('antigravity adapter streams assistant text from a fake CLI', async () => {
+    const fake = installFakeBin('agy', `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "\${0}.argv"
+echo '{"event":"init","conversation_id":"conv-9","init":{"cwd":"/tmp","permission_mode":"always-proceed"}}'
+echo '{"event":"step_update","step_update":{"conversation_id":"conv-9","step_index":3,"state":"DONE","step_type":"agent_response","text_delta":"Antigravity on this PC."}}'
+echo '{"event":"step_update","step_update":{"conversation_id":"conv-9","step_index":4,"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"uname"},"output":"Linux"}}}'
+echo '{"event":"result","result":{"conversation_id":"conv-9","status":"SUCCESS","response":"Antigravity on this PC."}}'
+`);
+    const pushed: AgentEvent[] = [];
+    setAgentBroadcast((msg: WsMessage) => {
+      if (msg.type === 'agent-event') pushed.push(msg.event);
+    });
+    try {
+      expect(listAgents().find((a) => a.id === 'antigravity')!.available).toBe(true);
+      const info = createAgentSession('antigravity', fake.dir, 'Antigravity');
+      promptAgent(info.agentSessionId, 'hello');
+      await waitFor(pushed, 'text');
+      await waitFor(pushed, 'result');
+      const argv = readFileSync(fake.argvFile, 'utf8');
+      expect(argv).toContain('--print');
+      expect(argv).toContain('stream-json');
+      expect(pushed.some((e) => e.kind === 'text' && e.text?.includes('Antigravity'))).toBe(true);
+      expect(pushed.find((e) => e.kind === 'tool-end')?.toolName).toBe('run_command');
+      closeAgentSession(info.agentSessionId);
+    } finally {
+      fake.restore();
+      setAgentBroadcast(() => {});
+    }
+  });
+
+  test('second OpenCode prompt resumes with --session', async () => {
+    const fake = installFakeBin('opencode', `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "\${0}.argv"
+echo '{"type":"text","sessionID":"ses_1","part":{"text":"pong"}}'
+echo '{"type":"step_finish","sessionID":"ses_1","part":{"reason":"stop"}}'
+`);
+    const pushed: AgentEvent[] = [];
+    setAgentBroadcast((msg: WsMessage) => {
+      if (msg.type === 'agent-event') pushed.push(msg.event);
+    });
+    try {
+      const info = createAgentSession('opencode', fake.dir, 'OpenCode');
+      promptAgent(info.agentSessionId, 'hello');
+      await waitFor(pushed, 'text');
+      pushed.length = 0;
+      promptAgent(info.agentSessionId, 'again');
+      await waitFor(pushed, 'text');
+      const argv = readFileSync(fake.argvFile, 'utf8');
+      expect(argv).toContain('--session');
+      expect(argv).toContain('ses_1');
+      closeAgentSession(info.agentSessionId);
+    } finally {
+      fake.restore();
+      setAgentBroadcast(() => {});
+    }
+  });
+
+  test('second Antigravity prompt resumes with --conversation', async () => {
+    const fake = installFakeBin('agy', `#!/usr/bin/env bash
+printf '%s\\n' "$@" > "\${0}.argv"
+echo '{"event":"init","conversation_id":"conv-9"}'
+echo '{"event":"step_update","step_update":{"conversation_id":"conv-9","state":"DONE","step_type":"agent_response","text_delta":"pong"}}'
+echo '{"event":"result","result":{"conversation_id":"conv-9","status":"SUCCESS","response":"pong"}}'
+`);
+    const pushed: AgentEvent[] = [];
+    setAgentBroadcast((msg: WsMessage) => {
+      if (msg.type === 'agent-event') pushed.push(msg.event);
+    });
+    try {
+      const info = createAgentSession('antigravity', fake.dir, 'Antigravity');
+      promptAgent(info.agentSessionId, 'hello');
+      await waitFor(pushed, 'text');
+      pushed.length = 0;
+      promptAgent(info.agentSessionId, 'again');
+      await waitFor(pushed, 'text');
+      const argv = readFileSync(fake.argvFile, 'utf8');
+      expect(argv).toContain('--conversation');
+      expect(argv).toContain('conv-9');
       closeAgentSession(info.agentSessionId);
     } finally {
       fake.restore();
