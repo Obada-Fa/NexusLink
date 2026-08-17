@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../state/connection.dart';
+import '../widgets/not_connected_view.dart';
 
 class SystemScreen extends ConsumerStatefulWidget {
   const SystemScreen({super.key});
@@ -66,7 +67,17 @@ class _SystemScreenState extends ConsumerState<SystemScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('System')),
       body: _error != null
-          ? Center(child: Text(_error!, style: const TextStyle(color: Colors.redAccent)))
+          ? looksLikeConnectionError(_error)
+              ? NotConnectedView(
+                  message: _error!,
+                  onReconnected: () {
+                    setState(() => _error = null);
+                    _init();
+                  },
+                )
+              : Center(
+                  child: Text(_error!,
+                      style: const TextStyle(color: Colors.redAccent)))
           : ListView(
               padding: const EdgeInsets.all(16),
               children: [

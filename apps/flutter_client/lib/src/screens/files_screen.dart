@@ -13,6 +13,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../rpc/models.dart';
 import '../state/connection.dart';
+import '../widgets/not_connected_view.dart';
 
 class FilesScreen extends ConsumerStatefulWidget {
   const FilesScreen({super.key});
@@ -185,6 +186,18 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
   Widget _list() {
     if (_loading) return const Center(child: CircularProgressIndicator());
     if (_error != null) {
+      if (looksLikeConnectionError(_error)) {
+        return NotConnectedView(
+          message: _error!,
+          onReconnected: () {
+            setState(() {
+              _loading = true;
+              _error = null;
+            });
+            _init();
+          },
+        );
+      }
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),

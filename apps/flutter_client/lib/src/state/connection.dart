@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../rpc/rpc_client.dart';
+import 'last_host.dart';
 
 class ConnectionState {
   final RpcClient? client;
@@ -69,6 +70,7 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
         client.dispose();
         return;
       }
+      await saveLastHostUrl(wsUrl);
       state = state.copyWith(status: RpcStatus.connected);
     } catch (_) {
       client.dispose();
@@ -80,6 +82,22 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
   void disconnect() {
     _teardown();
     if (!_disposed) state = const ConnectionState();
+  }
+
+  /// Reconnect using the current host URL, or the last saved host from prefs.
+  Future<void> reconnect() async {
+    final saved = state.hostUrl?.trim();
+    if (saved != null && saved.isNotEmpty) {
+      await connect(saved);
+      return;
+    }
+    final last = await loadLastHostUrl();
+    if (last == null || last.isEmpty) {
+      throw StateError(
+        'No saved PC — go back to the home screen and connect again.',
+      );
+    }
+    await connect(last);
   }
 
   void _teardown() {
