@@ -3,6 +3,7 @@ import { handleFsList } from './handlers/fs';
 import { listProcesses } from './handlers/process';
 import { getSystemInfo, getPerfSnapshot } from './handlers/system';
 import { handleTerminalCreate, handleTerminalInput, handleTerminalResize, handleTerminalKill, setSend as setTerminalSend } from './handlers/terminal';
+import { listAgents, runAgent, cancelAgentRun, setAgentSend } from './handlers/agent';
 import { validateToken, generateToken, handleSessionPair, validateSessionTOTP, isLocalDev, generateDevToken } from './handlers/auth';
 import { setSend as setSignalingSend } from './handlers/signaling';
 import { mouseMove, mouseClick, mouseScroll, keyEvent, typeText, buttonDown, buttonUp, mouseMoveAbs } from './handlers/input';
@@ -57,6 +58,7 @@ export async function startRpcServer(port = 45678) {
   }
 
   setTerminalSend(send);
+  setAgentSend(send);
   setSignalingSend(send);
   setCaptureSend(send);
 
@@ -82,8 +84,34 @@ export async function startRpcServer(port = 45678) {
       case 'process.kill':
         result = undefined;
         break;
+      case 'agent.list':
+        result = await listAgents();
+        break;
+      case 'agent.run':
+        result = await runAgent(
+          params.agentId as import('@nexuslink/rpc-types').AgentId,
+          params.prompt as string,
+          params.cwd as string | undefined,
+          params.continueSession as boolean | undefined,
+          ws,
+        );
+        break;
+      case 'agent.cancel':
+        cancelAgentRun(params.runId as string);
+        result = undefined;
+        break;
       case 'terminal.create':
-        result = await handleTerminalCreate(params.cols as number, params.rows as number, params.shell as string | undefined, ws);
+        result = handleTerminalCreate(
+          params.cols as number,
+          params.rows as number,
+          {
+            shell: params.shell as string | undefined,
+            command: params.command as string | undefined,
+            args: params.args as string[] | undefined,
+            cwd: params.cwd as string | undefined,
+          },
+          ws,
+        );
         break;
       case 'terminal.input':
         result = await handleTerminalInput(params.terminalId as string, params.data as string);
