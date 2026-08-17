@@ -1,4 +1,4 @@
-// Agent gateway: run AI coding agents (Claude Code, Cursor CLI) on the host
+// Agent gateway: run AI coding agents (Claude Code, Cursor CLI, OpenCode) on the host
 // and expose them to the phone as chat sessions with a normalized event
 // stream — the phone renders a native chat UI, never a terminal.
 //
@@ -34,12 +34,25 @@ interface AgentDef {
   makeAdapter(session: AgentSession): AgentAdapter;
 }
 
-function which(bin: string): string | null {
-  for (const dir of (process.env.PATH ?? '').split(':')) {
+/** Extra dirs GUI/systemd launches often omit from PATH. */
+function extraBinDirs(): string[] {
+  const home = homedir();
+  return [`${home}/.local/bin`, `${home}/.opencode/bin`, `${home}/bin`, '/usr/local/bin'];
+}
+
+export function resolveBin(bin: string): string | null {
+  const seen = new Set<string>();
+  for (const dir of [...(process.env.PATH ?? '').split(':'), ...extraBinDirs()]) {
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
     const p = `${dir}/${bin}`;
-    if (dir && existsSync(p)) return p;
+    if (existsSync(p)) return p;
   }
   return null;
+}
+
+function which(bin: string): string | null {
+  return resolveBin(bin);
 }
 
 const AGENT_DEFS: AgentDef[] = [
@@ -54,6 +67,12 @@ const AGENT_DEFS: AgentDef[] = [
     name: 'Cursor CLI',
     bin: 'cursor-agent',
     makeAdapter: (s) => new CursorAdapter(s),
+  },
+  {
+    id: 'opencode',
+    name: 'OpenCode',
+    bin: 'opencode',
+    makeAdapter: (s) => new OpenCodeAdapter(s),
   },
   {
     id: 'mock',
@@ -223,6 +242,178 @@ function contentToText(content: unknown): string {
   return '';
 }
 
+type AgentDelta = Omit<AgentEvent, 'seq' | 'ts'>;
+
+async function collectText(stream: unknown): Promise<string> {
+  if (!stream || typeof stream !== 'object' || !('getReader' in stream)) return '';
+  const reader = (stream as ReadableStream<Uint8Array>).getReader();
+  const decoder = new TextDecoder();
+  let out = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      out += decoder.decode(value, { stream: true });
+    }
+    out += decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+  return out.replace(/\x1b\[[0-9;]*m/g, '').trim();
+}
+
+/** When a CLI dies without a result event, turn stderr into a phone-visible error. */
+export function finishCliTurn(opts: {
+  sawResult: boolean;
+  exitCode: number | null;
+  stderr: string;
+}): AgentDelta | null {
+  if (opts.sawResult) return null;
+  const err = opts.stderr.trim();
+  if (err) return { kind: 'error', text: err };
+  return {
+    kind: 'error',
+    text: `Agent CLI exited without a reply (code ${opts.exitCode ?? '?'})`,
+  };
+}
+
+export function sessionIdFromEvent(msg: Record<string, unknown>): string | undefined {
+  for (const key of ['chatId', 'chat_id', 'sessionId', 'session_id', 'sessionID']) {
+    if (typeof msg[key] === 'string' && msg[key]) return msg[key] as string;
+  }
+  return undefined;
+}
+
+/** Cursor CLI nests tools as `{ readToolCall: { args, result } }` rather than `{ name, args }`. */
+export function describeCursorToolCall(toolCall: unknown): {
+  name: string;
+  args: unknown;
+  result: unknown;
+} {
+  if (!toolCall || typeof toolCall !== 'object') {
+    return { name: 'tool', args: {}, result: {} };
+  }
+  const obj = toolCall as Record<string, unknown>;
+  for (const [key, raw] of Object.entries(obj)) {
+    if (!raw || typeof raw !== 'object') continue;
+    const inner = raw as Record<string, unknown>;
+    if (key === 'function') {
+      return {
+        name: String(inner.name ?? 'function'),
+        args: inner.arguments ?? inner.args ?? {},
+        result: inner.result ?? {},
+      };
+    }
+    const name = key.replace(/ToolCall$/, '') || 'tool';
+    return { name, args: inner.args ?? inner, result: inner.result ?? {} };
+  }
+  return {
+    name: String(obj.name ?? 'tool'),
+    args: obj.args ?? obj,
+    result: obj.result ?? {},
+  };
+}
+
+export function parseCursorStreamEvent(msg: Record<string, unknown>): AgentDelta[] {
+  const type = msg.type;
+  if (type === 'assistant') {
+    const message = msg.message as Record<string, unknown> | undefined;
+    const text = contentToText(message?.content);
+    if (text.trim()) return [{ kind: 'text', text }];
+    return [];
+  }
+  if (type === 'tool_call') {
+    const meta = describeCursorToolCall(msg.tool_call ?? msg);
+    const refId = String(msg.call_id ?? msg.id ?? '');
+    if (msg.subtype === 'started') {
+      return [{
+        kind: 'tool-start',
+        toolName: meta.name,
+        toolInput: JSON.stringify(meta.args, null, 2).slice(0, 4000),
+        refId,
+      }];
+    }
+    if (msg.subtype === 'completed') {
+      return [{
+        kind: 'tool-end',
+        toolName: meta.name,
+        refId,
+        toolOutput: JSON.stringify(meta.result, null, 2).slice(0, 4000),
+      }];
+    }
+    return [];
+  }
+  if (type === 'result') {
+    const text = typeof msg.result === 'string' ? msg.result : '';
+    if (msg.is_error === true || msg.subtype === 'error') {
+      return [{ kind: 'error', text: text || 'Cursor CLI reported an error' }];
+    }
+    return [{ kind: 'result', text }];
+  }
+  if (type === 'system' && msg.subtype === 'init') {
+    return [];
+  }
+  return [];
+}
+
+export function parseOpencodeStreamEvent(msg: Record<string, unknown>): AgentDelta[] {
+  const type = msg.type;
+  const part = (msg.part as Record<string, unknown> | undefined) ?? {};
+  if (type === 'text' || part.type === 'text') {
+    const text = typeof part.text === 'string' ? part.text : typeof msg.text === 'string' ? msg.text : '';
+    if (text.trim()) return [{ kind: 'text', text }];
+    return [];
+  }
+  if (type === 'tool_use') {
+    const state = (part.state as Record<string, unknown> | undefined) ?? {};
+    const status = String(state.status ?? 'completed');
+    const refId = String(part.callID ?? part.id ?? '');
+    const name = String(part.tool ?? part.name ?? 'tool');
+    const input = JSON.stringify(state.input ?? part.input ?? {}, null, 2).slice(0, 4000);
+    const output = typeof state.output === 'string'
+      ? state.output.slice(0, 4000)
+      : JSON.stringify(state.output ?? {}, null, 2).slice(0, 4000);
+    if (status === 'pending' || status === 'running') {
+      return [{ kind: 'tool-start', toolName: name, toolInput: input, refId }];
+    }
+    return [
+      { kind: 'tool-start', toolName: name, toolInput: input, refId },
+      { kind: 'tool-end', toolName: name, toolOutput: output, refId },
+    ];
+  }
+  if (type === 'step_start') {
+    return [];
+  }
+  if (type === 'step_finish') {
+    return [{ kind: 'result', text: '' }];
+  }
+  if (type === 'error') {
+    const text =
+      (typeof msg.error === 'string' && msg.error) ||
+      (typeof part.message === 'string' && part.message) ||
+      (typeof msg.message === 'string' && msg.message) ||
+      JSON.stringify(msg.error ?? part ?? msg);
+    return [{ kind: 'error', text }];
+  }
+  return [];
+}
+
+function spawnJsonCli(
+  argv: string[],
+  cwd: string,
+  onEvent: (msg: Record<string, unknown>) => void,
+): { proc: Proc; stderr: Promise<string> } {
+  const proc = Bun.spawn(argv, {
+    cwd,
+    stdin: 'ignore',
+    stdout: 'pipe',
+    stderr: 'pipe',
+    env: process.env as Record<string, string>,
+  } as unknown as SpawnOpts);
+  void pumpJsonLines(proc, onEvent).catch(() => {});
+  return { proc, stderr: collectText(proc.stderr) };
+}
+
 // ---------------------------------------------------------------------------
 // Claude Code adapter — persistent `claude --print` with stream-json in/out.
 // ---------------------------------------------------------------------------
@@ -234,9 +425,10 @@ class ClaudeAdapter implements AgentAdapter {
 
   private ensureProc(): Proc {
     if (this.proc && this.proc.exitCode === null && !this.proc.killed) return this.proc;
+    const bin = resolveBin('claude') ?? 'claude';
     this.proc = Bun.spawn(
       [
-        'claude', '--print',
+        bin, '--print',
         '--input-format', 'stream-json',
         '--output-format', 'stream-json',
         '--verbose',
@@ -246,14 +438,23 @@ class ClaudeAdapter implements AgentAdapter {
         cwd: this.session.info.cwd,
         stdin: 'pipe',
         stdout: 'pipe',
-        stderr: 'ignore',
+        stderr: 'pipe',
+        env: process.env as Record<string, string>,
       } as unknown as SpawnOpts,
     );
+    const stderrP = collectText(this.proc.stderr);
     void pumpJsonLines(this.proc, (msg) => this.onEvent(msg)).catch(() => {});
-    this.proc.exited.then(() => {
+    const spawned = this.proc;
+    spawned.exited.then(async (code) => {
+      if (this.proc !== spawned) return;
+      const stderr = await stderrP.catch(() => '');
       if (this.session.info.busy) {
         setBusy(this.session, false);
-        emit(this.session, { kind: 'status', text: 'agent process exited' });
+        emit(this.session, finishCliTurn({
+          sawResult: false,
+          exitCode: code,
+          stderr: stderr || 'Claude Code process exited',
+        })!);
       }
       this.proc = null;
     }).catch(() => {});
@@ -377,56 +578,109 @@ class CursorAdapter implements AgentAdapter {
   constructor(private session: AgentSession) {}
 
   prompt(text: string): void {
+    this.cancel();
     this.sawResult = false;
-    const argv = ['cursor-agent', '--print', '--output-format', 'stream-json'];
+    const bin = resolveBin('cursor-agent') ?? 'cursor-agent';
+    const argv = [
+      bin, '--print', '--output-format', 'stream-json',
+      '--trust', '--force',
+      '--workspace', this.session.info.cwd,
+    ];
     if (this.chatId) argv.push('--resume', this.chatId);
     argv.push(text);
-    this.proc = Bun.spawn(argv, {
-      cwd: this.session.info.cwd,
-      stdin: 'ignore',
-      stdout: 'pipe',
-      stderr: 'ignore',
-    } as unknown as SpawnOpts);
-    void pumpJsonLines(this.proc, (msg) => this.onEvent(msg)).catch(() => {});
-    this.proc.exited.then(() => {
+    const { proc, stderr } = spawnJsonCli(argv, this.session.info.cwd, (msg) => this.onEvent(msg));
+    this.proc = proc;
+    proc.exited.then(async (code) => {
+      if (this.proc !== proc) return;
+      const errText = await stderr.catch(() => '');
       if (this.session.info.busy) {
         setBusy(this.session, false);
-        if (!this.sawResult) emit(this.session, { kind: 'result', text: '' });
+        const fail = finishCliTurn({
+          sawResult: this.sawResult,
+          exitCode: code,
+          stderr: errText,
+        });
+        if (fail) emit(this.session, fail);
       }
     }).catch(() => {});
   }
 
   private onEvent(msg: Record<string, unknown>): void {
-    const s = this.session;
-    // Remember the chat id from any event that carries one (init/system events).
-    for (const key of ['chatId', 'chat_id', 'sessionId', 'session_id']) {
-      if (typeof msg[key] === 'string') this.chatId = msg[key] as string;
-    }
-    const type = msg.type;
-    if (type === 'assistant') {
-      const message = msg.message as Record<string, unknown> | undefined;
-      const text = contentToText(message?.content);
-      if (text.trim()) emit(s, { kind: 'text', text });
-    } else if (type === 'tool_call') {
-      const sub = msg.subtype;
-      if (sub === 'started') {
-        emit(s, {
-          kind: 'tool-start',
-          toolName: String(msg.name ?? (msg.tool_call as Record<string, unknown>)?.name ?? 'tool'),
-          toolInput: JSON.stringify(msg.args ?? msg.tool_call ?? {}, null, 2).slice(0, 4000),
-          refId: String(msg.call_id ?? msg.id ?? ''),
-        });
-      } else if (sub === 'completed') {
-        emit(s, {
-          kind: 'tool-end',
-          refId: String(msg.call_id ?? msg.id ?? ''),
-          toolOutput: JSON.stringify(msg.result ?? {}, null, 2).slice(0, 4000),
-        });
+    const sid = sessionIdFromEvent(msg);
+    if (sid) this.chatId = sid;
+    const events = parseCursorStreamEvent(msg);
+    for (const ev of events) {
+      if (ev.kind === 'result' || ev.kind === 'error') {
+        this.sawResult = true;
+        setBusy(this.session, false);
       }
-    } else if (type === 'result') {
-      this.sawResult = true;
-      setBusy(s, false);
-      emit(s, { kind: 'result', text: typeof msg.result === 'string' ? msg.result : '' });
+      emit(this.session, ev);
+    }
+  }
+
+  cancel(): void {
+    try {
+      this.proc?.kill();
+    } catch {
+      // already gone
+    }
+    this.proc = null;
+  }
+
+  close(): void {
+    this.cancel();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode adapter — `opencode run --format json` per prompt, resumed with
+// --session. JSONL events are step_start / text / tool_use / step_finish.
+// ---------------------------------------------------------------------------
+
+class OpenCodeAdapter implements AgentAdapter {
+  private proc: Proc | null = null;
+  private ocSession: string | null = null;
+  private sawResult = false;
+
+  constructor(private session: AgentSession) {}
+
+  prompt(text: string): void {
+    this.cancel();
+    this.sawResult = false;
+    const bin = resolveBin('opencode') ?? 'opencode';
+    const argv = [
+      bin, 'run', '--format', 'json', '--auto',
+      '--dir', this.session.info.cwd,
+    ];
+    if (this.ocSession) argv.push('--session', this.ocSession);
+    argv.push(text);
+    const { proc, stderr } = spawnJsonCli(argv, this.session.info.cwd, (msg) => this.onEvent(msg));
+    this.proc = proc;
+    proc.exited.then(async (code) => {
+      if (this.proc !== proc) return;
+      const errText = await stderr.catch(() => '');
+      if (this.session.info.busy) {
+        setBusy(this.session, false);
+        const fail = finishCliTurn({
+          sawResult: this.sawResult,
+          exitCode: code,
+          stderr: errText,
+        });
+        if (fail) emit(this.session, fail);
+      }
+    }).catch(() => {});
+  }
+
+  private onEvent(msg: Record<string, unknown>): void {
+    const sid = sessionIdFromEvent(msg);
+    if (sid) this.ocSession = sid;
+    const events = parseOpencodeStreamEvent(msg);
+    for (const ev of events) {
+      if (ev.kind === 'result' || ev.kind === 'error') {
+        this.sawResult = true;
+        setBusy(this.session, false);
+      }
+      emit(this.session, ev);
     }
   }
 
@@ -483,7 +737,7 @@ class MockAdapter implements AgentAdapter {
         emit(s, { kind: 'tool-end', refId: 'mock-1', toolOutput: 'demo\n' });
         emit(s, {
           kind: 'text',
-          text: `You said: "${text}"\n\nThis is the **demo agent** — install the Claude Code or Cursor CLI on the PC to chat with a real agent here.\n\n\`\`\`diff\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,4 @@\n # NexusLink\n+Phone OS for your PC\n\`\`\``,
+          text: `You said: "${text}"\n\nThis is the **demo agent** — install Claude Code, Cursor CLI, or OpenCode on the PC to chat with a real agent here.\n\n\`\`\`diff\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,4 @@\n # NexusLink\n+Phone OS for your PC\n\`\`\``,
         });
         setBusy(s, false);
         emit(s, { kind: 'result', text: '' });

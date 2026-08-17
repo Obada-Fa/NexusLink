@@ -196,7 +196,7 @@ function Bubble({ e }: { e: AgentEvent }) {
   if (e.kind === 'text' || (e.kind === 'result' && e.text)) {
     return <pre style={{ ...styles.bubble, ...styles.assistant }}>{e.text}</pre>;
   }
-  if (e.kind === 'thinking') {
+  if (e.kind === 'thinking' || e.kind === 'status') {
     return <div style={styles.thinking}>{e.text || 'Thinking…'}</div>;
   }
   if (e.kind === 'tool-start' || e.kind === 'tool-end') {

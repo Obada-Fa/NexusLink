@@ -1,5 +1,5 @@
 // Native chat UI for AI agents that run on the PC (Claude Code, Cursor CLI,
-// or the built-in demo agent). The phone never sees a terminal — tool calls
+// OpenCode, or the built-in demo agent). The phone never sees a terminal — tool calls
 // become cards, assistant text is markdown, and history survives reconnects.
 
 import 'dart:async';
@@ -27,6 +27,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
   bool _loading = true;
+  bool _busy = false;
   String? _error;
   void Function()? _unsub;
 
@@ -77,7 +78,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     final ev = msg['event'];
     if (ev is! Map<String, dynamic>) return;
     final parsed = AgentEvent.fromJson(ev);
-    setState(() => _events.add(parsed));
+    setState(() {
+      _events.add(parsed);
+      if (parsed.kind == 'result' || parsed.kind == 'error') _busy = false;
+    });
     _scrollToEnd();
     if (parsed.kind == 'permission-request') {
       unawaited(_askPermission(parsed));
@@ -191,17 +195,25 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     final client = _client;
     if (client == null) return;
     final cwd = await _pickProject();
-    final created = await client.request('agent.createSession', {
-      'agent': agent.id,
-      'title': agent.name,
-      ?'cwd': cwd,
-    }) as Map<String, dynamic>;
-    final session = AgentSessionInfo.fromJson(created);
-    setState(() {
-      _sessions.insert(0, session);
-      _active = session;
-      _events.clear();
-    });
+    try {
+      final created = await client.request('agent.createSession', {
+        'agent': agent.id,
+        'title': agent.name,
+        ?'cwd': cwd,
+      }) as Map<String, dynamic>;
+      final session = AgentSessionInfo.fromJson(created);
+      setState(() {
+        _sessions.insert(0, session);
+        _active = session;
+        _events.clear();
+        _busy = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString())),
+      );
+    }
   }
 
   Future<void> _openSession(AgentSessionInfo s) async {
@@ -213,6 +225,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     if (!mounted) return;
     setState(() {
       _active = s;
+      _busy = s.busy;
       _events
         ..clear()
         ..addAll(raw.map((e) => AgentEvent.fromJson(e as Map<String, dynamic>)));
@@ -226,10 +239,25 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     final client = _client;
     if (text.isEmpty || session == null || client == null) return;
     _input.clear();
-    await client.request('agent.prompt', {
-      'agentSessionId': session.agentSessionId,
-      'text': text,
-    });
+    setState(() => _busy = true);
+    _scrollToEnd();
+    try {
+      await client.request('agent.prompt', {
+        'agentSessionId': session.agentSessionId,
+        'text': text,
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _events.add(AgentEvent(
+          seq: _events.length + 1,
+          ts: DateTime.now().millisecondsSinceEpoch,
+          kind: 'error',
+          text: e.toString(),
+        ));
+      });
+    }
   }
 
   Future<void> _closeActive() async {
@@ -242,6 +270,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       _sessions.removeWhere((s) => s.agentSessionId == session.agentSessionId);
       _active = null;
       _events.clear();
+      _busy = false;
     });
   }
 
@@ -297,7 +326,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                   ? Icons.auto_awesome
                   : a.id == 'cursor'
                       ? Icons.code
-                      : Icons.smart_toy_outlined,
+                      : a.id == 'opencode'
+                          ? Icons.terminal
+                          : Icons.smart_toy_outlined,
               color: a.available
                   ? const Color(0xFF2A6AFF)
                   : Colors.white24,
@@ -334,8 +365,20 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
           child: ListView.builder(
             controller: _scroll,
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-            itemCount: _events.length,
-            itemBuilder: (_, i) => _bubble(_events[i]),
+            itemCount: _events.length + (_busy ? 1 : 0),
+            itemBuilder: (_, i) {
+              if (i >= _events.length) {
+                return const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                  child: Text('Working…',
+                      style: TextStyle(
+                          color: Colors.white38,
+                          fontSize: 12,
+                          fontStyle: FontStyle.italic)),
+                );
+              }
+              return _bubble(_events[i]);
+            },
           ),
         ),
         _composer(),
@@ -360,6 +403,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
           ),
         );
       case 'text':
+      case 'text-delta':
       case 'result':
         if ((e.text ?? '').trim().isEmpty) return const SizedBox.shrink();
         return _align(
@@ -385,6 +429,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
           ),
         );
       case 'thinking':
+      case 'status':
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
           child: Text(e.text ?? 'Thinking…',
