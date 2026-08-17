@@ -1,3 +1,17 @@
+export type AgentId = 'cursor' | 'opencode' | 'antigravity'
+
+export interface AgentInfo {
+  id: AgentId
+  label: string
+  /** Resolved binary on the host PATH, if installed. */
+  path?: string
+  installed: boolean
+  version?: string
+  supportsChat: boolean
+  supportsTerminal: boolean
+  installHint?: string
+}
+
 export type RpcMethod =
   | 'fs.list'
   | 'fs.read'
@@ -7,6 +21,9 @@ export type RpcMethod =
   | 'process.list'
   | 'process.kill'
   | 'process.spawn'
+  | 'agent.list'
+  | 'agent.run'
+  | 'agent.cancel'
   | 'terminal.create'
   | 'terminal.input'
   | 'terminal.resize'
@@ -64,8 +81,21 @@ export type Params<M extends RpcMethod> =
     ? { pid: number }
     : M extends 'process.spawn'
     ? { command: string; args?: string[] }
+    : M extends 'agent.list'
+    ? {}
+    : M extends 'agent.run'
+    ? { agentId: AgentId; prompt: string; cwd?: string; continueSession?: boolean }
+    : M extends 'agent.cancel'
+    ? { runId: string }
     : M extends 'terminal.create'
-    ? { cols: number; rows: number; shell?: string }
+    ? {
+        cols: number
+        rows: number
+        shell?: string
+        command?: string
+        args?: string[]
+        cwd?: string
+      }
     : M extends 'terminal.input'
     ? { terminalId: string; data: string }
     : M extends 'terminal.resize'
@@ -137,6 +167,12 @@ export type Result<M extends RpcMethod> =
     ? void
     : M extends 'process.spawn'
     ? { pid: number }
+    : M extends 'agent.list'
+    ? AgentInfo[]
+    : M extends 'agent.run'
+    ? { runId: string }
+    : M extends 'agent.cancel'
+    ? void
     : M extends 'terminal.create'
     ? { terminalId: string }
     : M extends 'terminal.input'
@@ -270,4 +306,5 @@ export type WsMessage =
   | { type: 'stream-frame'; streamId: string; data: string; timestamp: number }
   | { type: 'stream-region'; streamId: string; region: CaptureRegion }
   | { type: 'terminal-output'; terminalId: string; data: string }
+  | { type: 'agent-output'; runId: string; data: string; done?: boolean; exitCode?: number }
   | { type: 'perf-update'; data: PerfSnapshot }

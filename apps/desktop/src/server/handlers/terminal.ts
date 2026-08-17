@@ -16,29 +16,60 @@ export function setSend(fn: SendFn) {
   sendFn = fn;
 }
 
-export function handleTerminalCreate(cols: number, rows: number, shell?: string, ws?: WebSocket): { terminalId: string } {
-  const id = crypto.randomUUID();
-  const cmd = shell || process.env.SHELL || '/bin/bash';
-
-  const proc = Bun.spawn([cmd], {
-    stdin: 'pipe',
-    stdout: 'pipe',
-    stderr: 'pipe',
-    env: { ...process.env, TERM: 'xterm-256color', COLUMNS: String(cols), LINES: String(rows) },
-  });
-
-  const session: TerminalSession = { proc, ws: ws!, cols, rows };
-  terminals.set(id, session);
-
+function streamOutput(id: string, session: TerminalSession, stream: ReadableStream<Uint8Array> | null) {
+  if (!stream) return;
+  const decoder = new TextDecoder();
   (async () => {
-    const decoder = new TextDecoder();
-    for await (const chunk of proc.stdout) {
+    for await (const chunk of stream) {
       const data = decoder.decode(chunk);
       if (sendFn && session.ws) {
         sendFn(session.ws, { type: 'terminal-output', terminalId: id, data });
       }
     }
   })().catch(() => {});
+}
+
+export function handleTerminalCreate(
+  cols: number,
+  rows: number,
+  options?: { shell?: string; command?: string; args?: string[]; cwd?: string },
+  ws?: WebSocket,
+): { terminalId: string } {
+  const id = crypto.randomUUID();
+  const cwd = options?.cwd || process.env.HOME || process.cwd();
+  const env = {
+    ...process.env,
+    TERM: 'xterm-256color',
+    COLORTERM: 'truecolor',
+    COLUMNS: String(cols),
+    LINES: String(rows),
+  };
+
+  let proc: ReturnType<typeof Bun.spawn>;
+  if (options?.command) {
+    proc = Bun.spawn([options.command, ...(options.args ?? [])], {
+      cwd,
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env,
+    });
+  } else {
+    const cmd = options?.shell || process.env.SHELL || '/bin/bash';
+    proc = Bun.spawn([cmd], {
+      cwd,
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env,
+    });
+  }
+
+  const session: TerminalSession = { proc, ws: ws!, cols, rows };
+  terminals.set(id, session);
+
+  streamOutput(id, session, proc.stdout);
+  streamOutput(id, session, proc.stderr);
 
   return { terminalId: id };
 }
@@ -57,6 +88,7 @@ export function handleTerminalResize(terminalId: string, cols: number, rows: num
   try {
     session.proc.kill('SIGWINCH');
   } catch {
+    /* ignore */
   }
 }
 
@@ -66,6 +98,7 @@ export function handleTerminalKill(terminalId: string): void {
   try {
     session.proc.kill('SIGTERM');
   } catch {
+    /* ignore */
   }
   terminals.delete(terminalId);
 }

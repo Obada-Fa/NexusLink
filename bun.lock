@@ -37,6 +37,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@nexuslink/gesture-engine": "workspace:*",
+        "@nexuslink/rpc-types": "workspace:*",
         "@nexuslink/ui-components": "workspace:*",
         "@noble/curves": "^2.2.0",
         "@noble/hashes": "^2.2.0",
