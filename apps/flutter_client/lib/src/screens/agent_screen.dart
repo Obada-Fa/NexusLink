@@ -4,10 +4,14 @@
 // survives reconnects.
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
@@ -20,6 +24,13 @@ class AgentScreen extends ConsumerStatefulWidget {
   ConsumerState<AgentScreen> createState() => _AgentScreenState();
 }
 
+class _PendingPhoto {
+  final String name;
+  final String mime;
+  final Uint8List bytes;
+  _PendingPhoto({required this.name, required this.mime, required this.bytes});
+}
+
 class _AgentScreenState extends ConsumerState<AgentScreen> {
   List<AgentInfo> _agents = [];
   List<AgentSessionInfo> _sessions = [];
@@ -27,6 +38,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   final _events = <AgentEvent>[];
   final _input = TextEditingController();
   final _scroll = ScrollController();
+  final _imagePicker = ImagePicker();
+  final _photos = <_PendingPhoto>[];
+  final _thumbsBySeq = <int, List<Uint8List>>{};
+  List<Uint8List>? _pendingThumbs;
+  String _mode = 'agent';
+  String _thinking = 'medium';
+  String? _model;
   bool _loading = true;
   bool _busy = false;
   String? _error;
@@ -79,6 +97,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     final ev = msg['event'];
     if (ev is! Map<String, dynamic>) return;
     final parsed = AgentEvent.fromJson(ev);
+    if (parsed.kind == 'user' && _pendingThumbs != null) {
+      _thumbsBySeq[parsed.seq] = _pendingThumbs!;
+      _pendingThumbs = null;
+    }
     setState(() {
       _events.add(parsed);
       if (parsed.kind == 'result' || parsed.kind == 'error') _busy = false;
@@ -200,7 +222,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       final created = await client.request('agent.createSession', {
         'agent': agent.id,
         'title': agent.name,
-        ?'cwd': cwd,
+        'cwd': ?cwd,
       }) as Map<String, dynamic>;
       final session = AgentSessionInfo.fromJson(created);
       setState(() {
@@ -208,7 +230,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         _active = session;
         _events.clear();
         _busy = false;
+        _photos.clear();
       });
+      await _loadComposerPrefs(agent.id);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -230,27 +254,105 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       _events
         ..clear()
         ..addAll(raw.map((e) => AgentEvent.fromJson(e as Map<String, dynamic>)));
+      _photos.clear();
     });
+    await _loadComposerPrefs(s.agent);
     _scrollToEnd();
+  }
+
+  AgentInfo? get _activeAgent {
+    final id = _active?.agent;
+    if (id == null) return null;
+    for (final a in _agents) {
+      if (a.id == id) return a;
+    }
+    return null;
+  }
+
+  AgentCapabilities get _caps =>
+      _activeAgent?.capabilities ?? AgentCapabilities.empty;
+
+  Future<void> _loadComposerPrefs(String agentId) async {
+    final p = await SharedPreferences.getInstance();
+    final caps = _caps;
+    var mode = p.getString('agent-composer-$agentId-mode') ?? 'agent';
+    if (!caps.modes.contains(mode)) {
+      mode = caps.modes.isNotEmpty ? caps.modes.first : 'agent';
+    }
+    var thinking = p.getString('agent-composer-$agentId-thinking') ?? 'medium';
+    if (caps.thinkingLevels.isNotEmpty && !caps.thinkingLevels.contains(thinking)) {
+      thinking = caps.thinkingLevels.contains('medium')
+          ? 'medium'
+          : caps.thinkingLevels[caps.thinkingLevels.length ~/ 2];
+    }
+    var model = p.getString('agent-composer-$agentId-model');
+    if (model != null &&
+        caps.models.isNotEmpty &&
+        !caps.models.any((m) => m.id == model)) {
+      model = caps.models.first.id;
+    }
+    model ??= caps.models.isNotEmpty ? caps.models.first.id : null;
+    if (!mounted) return;
+    setState(() {
+      _mode = mode;
+      _thinking = thinking;
+      _model = model;
+    });
+  }
+
+  Future<void> _saveComposerPrefs() async {
+    final agentId = _active?.agent;
+    if (agentId == null) return;
+    final p = await SharedPreferences.getInstance();
+    await p.setString('agent-composer-$agentId-mode', _mode);
+    await p.setString('agent-composer-$agentId-thinking', _thinking);
+    if (_model != null) {
+      await p.setString('agent-composer-$agentId-model', _model!);
+    }
   }
 
   Future<void> _send() async {
     final text = _input.text.trim();
     final session = _active;
     final client = _client;
-    if (text.isEmpty || session == null || client == null) return;
+    if ((text.isEmpty && _photos.isEmpty) || session == null || client == null) {
+      return;
+    }
+    final photos = List<_PendingPhoto>.from(_photos);
     _input.clear();
-    setState(() => _busy = true);
+    setState(() {
+      _busy = true;
+      _pendingThumbs = photos.map((p) => p.bytes).toList();
+      _photos.clear();
+    });
     _scrollToEnd();
     try {
-      await client.request('agent.prompt', {
-        'agentSessionId': session.agentSessionId,
-        'text': text,
-      });
+      await client.request(
+        'agent.prompt',
+        {
+          'agentSessionId': session.agentSessionId,
+          'text': text,
+          if (_model != null && _model != 'auto' && _model != 'default')
+            'model': _model,
+          if (_mode != 'agent') 'mode': _mode,
+          if (_thinking.isNotEmpty) 'thinking': _thinking,
+          if (photos.isNotEmpty)
+            'images': [
+              for (final p in photos)
+                {
+                  'name': p.name,
+                  'mime': p.mime,
+                  'data': base64Encode(p.bytes),
+                },
+            ],
+        },
+        const Duration(seconds: 60),
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _busy = false;
+        _pendingThumbs = null;
         _events.add(AgentEvent(
           seq: _events.length + 1,
           ts: DateTime.now().millisecondsSinceEpoch,
@@ -259,6 +361,17 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         ));
       });
     }
+  }
+
+  Future<void> _cancel() async {
+    final session = _active;
+    final client = _client;
+    if (session == null || client == null) return;
+    try {
+      await client.request(
+          'agent.cancel', {'agentSessionId': session.agentSessionId});
+    } catch (_) {}
+    if (mounted) setState(() => _busy = false);
   }
 
   bool get _needsSignIn {
@@ -293,6 +406,242 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     });
   }
 
+  void _leaveChat() {
+    setState(() {
+      _active = null;
+      _events.clear();
+      _busy = false;
+    });
+  }
+
+  IconData _iconFor(String id) {
+    return switch (id) {
+      'claude' => Icons.auto_awesome,
+      'cursor' => Icons.code,
+      'opencode' => Icons.terminal,
+      'antigravity' => Icons.rocket_launch_outlined,
+      _ => Icons.smart_toy_outlined,
+    };
+  }
+
+  String _modeLabel(String mode) => switch (mode) {
+        'plan' => 'Plan',
+        'ask' => 'Ask',
+        _ => 'Agent',
+      };
+
+  String _thinkingLabel(String level) => switch (level) {
+        'minimal' => 'Minimal',
+        'low' => 'Low',
+        'high' => 'High',
+        'extra-high' => 'Extra high',
+        'max' => 'Max',
+        _ => 'Medium',
+      };
+
+  String get _modelLabel {
+    final id = _model;
+    if (id == null) return 'Model';
+    for (final m in _caps.models) {
+      if (m.id == id) return m.name;
+    }
+    return id;
+  }
+
+  void _cycleMode() {
+    final modes = _caps.modes;
+    if (modes.length < 2) return;
+    final i = modes.indexOf(_mode);
+    setState(() => _mode = modes[(i + 1) % modes.length]);
+    unawaited(_saveComposerPrefs());
+  }
+
+  Future<void> _pickThinking() async {
+    final levels = _caps.thinkingLevels;
+    if (levels.isEmpty || !mounted) return;
+    final chosen = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFF151522),
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(8, 8, 8, 24),
+          children: [
+            const ListTile(
+              title: Text('Thinking',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+            ),
+            for (final level in levels)
+              ListTile(
+                title: Text(_thinkingLabel(level)),
+                trailing: level == _thinking
+                    ? const Icon(Icons.check, color: Color(0xFF2A6AFF))
+                    : null,
+                onTap: () => Navigator.pop(ctx, level),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (chosen == null || !mounted) return;
+    setState(() => _thinking = chosen);
+    await _saveComposerPrefs();
+  }
+
+  Future<void> _pickModel() async {
+    final models = _caps.models;
+    if (models.length < 2 || !mounted) return;
+    final chosen = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFF151522),
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(8, 8, 8, 24),
+          children: [
+            const ListTile(
+              title: Text('Model',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+            ),
+            for (final m in models)
+              ListTile(
+                title: Text(m.name),
+                subtitle: Text(m.id,
+                    style: const TextStyle(color: Colors.white38, fontSize: 12)),
+                trailing: m.id == _model
+                    ? const Icon(Icons.check, color: Color(0xFF2A6AFF))
+                    : null,
+                onTap: () => Navigator.pop(ctx, m.id),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (chosen == null || !mounted) return;
+    setState(() => _model = chosen);
+    await _saveComposerPrefs();
+  }
+
+  Future<void> _attachPhoto() async {
+    if (!mounted || _photos.length >= 4) return;
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: const Color(0xFF151522),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('Photo library'),
+              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined),
+              title: const Text('Camera'),
+              onTap: () => Navigator.pop(ctx, ImageSource.camera),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (source == null) return;
+    try {
+      if (source == ImageSource.camera) {
+        final x = await _imagePicker.pickImage(
+          source: ImageSource.camera,
+          maxWidth: 1600,
+          maxHeight: 1600,
+          imageQuality: 78,
+        );
+        if (x != null) await _addXFile(x);
+      } else {
+        final xs = await _imagePicker.pickMultiImage(
+          maxWidth: 1600,
+          maxHeight: 1600,
+          imageQuality: 78,
+        );
+        for (final x in xs.take(4 - _photos.length)) {
+          await _addXFile(x);
+        }
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not add photo: $e')),
+      );
+    }
+  }
+
+  Future<void> _addXFile(XFile x) async {
+    final bytes = await x.readAsBytes();
+    if (bytes.isEmpty || bytes.lengthInBytes > 4 * 1024 * 1024) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Photo is empty or larger than 4 MB')),
+      );
+      return;
+    }
+    final lower = x.name.toLowerCase();
+    final mime = x.mimeType ??
+        (lower.endsWith('.png')
+            ? 'image/png'
+            : lower.endsWith('.webp')
+                ? 'image/webp'
+                : 'image/jpeg');
+    if (!mounted) return;
+    setState(() {
+      _photos.add(_PendingPhoto(
+        name: x.name.isEmpty ? 'photo.jpg' : x.name,
+        mime: mime,
+        bytes: bytes,
+      ));
+    });
+  }
+
+  Future<void> _selectAgent() async {
+    if (!mounted) return;
+    final chosen = await showModalBottomSheet<AgentInfo>(
+      context: context,
+      backgroundColor: const Color(0xFF151522),
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(8, 8, 8, 24),
+          children: [
+            const ListTile(
+              title: Text('Select agent',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+            ),
+            for (final a in _agents)
+              ListTile(
+                leading: Icon(
+                  _iconFor(a.id),
+                  color: a.available
+                      ? const Color(0xFF2A6AFF)
+                      : Colors.white24,
+                ),
+                title: Text(a.name),
+                subtitle: Text(a.available
+                    ? 'Runs on the PC — chat here'
+                    : 'CLI not installed on the PC'),
+                enabled: a.available,
+                trailing: a.available
+                    ? FilledButton(
+                        onPressed: () => Navigator.pop(ctx, a),
+                        child: const Text('Select'),
+                      )
+                    : null,
+                onTap: a.available ? () => Navigator.pop(ctx, a) : null,
+              ),
+          ],
+        ),
+      ),
+    );
+    if (chosen != null) await _newChat(chosen);
+  }
+
   @override
   void dispose() {
     _unsub?.call();
@@ -303,30 +652,48 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF0A0A0F),
-      appBar: AppBar(
+    return PopScope(
+      canPop: _active == null,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) _leaveChat();
+      },
+      child: Scaffold(
         backgroundColor: const Color(0xFF0A0A0F),
-        title: Text(_active?.title ?? 'Agents',
-            style: const TextStyle(fontSize: 16)),
-        actions: [
-          if (_active != null)
+        appBar: AppBar(
+          backgroundColor: const Color(0xFF0A0A0F),
+          leading: _active == null
+              ? null
+              : IconButton(
+                  tooltip: 'Agent list',
+                  icon: const Icon(Icons.arrow_back),
+                  onPressed: _leaveChat,
+                ),
+          title: Text(_active?.title ?? 'Agents',
+              style: const TextStyle(fontSize: 16)),
+          actions: [
             IconButton(
-              tooltip: 'End chat',
-              icon: const Icon(Icons.delete_outline),
-              onPressed: _closeActive,
+              tooltip: 'Select agent',
+              icon: const Icon(Icons.smart_toy_outlined),
+              onPressed: _selectAgent,
             ),
-        ],
+            if (_active != null)
+              IconButton(
+                tooltip: 'End chat',
+                icon: const Icon(Icons.delete_outline),
+                onPressed: _closeActive,
+              ),
+          ],
+        ),
+        body: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : _error != null
+                ? Center(
+                    child: Text(_error!,
+                        style: const TextStyle(color: Colors.white70)))
+                : _active == null
+                    ? _picker()
+                    : _chat(),
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? Center(
-                  child: Text(_error!,
-                      style: const TextStyle(color: Colors.white70)))
-              : _active == null
-                  ? _picker()
-                  : _chat(),
     );
   }
 
@@ -341,15 +708,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         for (final a in _agents)
           ListTile(
             leading: Icon(
-              a.id == 'claude'
-                  ? Icons.auto_awesome
-                  : a.id == 'cursor'
-                      ? Icons.code
-                      : a.id == 'opencode'
-                          ? Icons.terminal
-                          : a.id == 'antigravity'
-                              ? Icons.rocket_launch_outlined
-                              : Icons.smart_toy_outlined,
+              _iconFor(a.id),
               color: a.available
                   ? const Color(0xFF2A6AFF)
                   : Colors.white24,
@@ -359,6 +718,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                 ? 'Runs on the PC — chat here'
                 : 'CLI not installed on the PC'),
             enabled: a.available,
+            trailing: a.available
+                ? FilledButton(
+                    onPressed: () => _newChat(a),
+                    child: const Text('Select'),
+                  )
+                : null,
             onTap: a.available ? () => _newChat(a) : null,
           ),
         if (_sessions.isNotEmpty) ...[
@@ -410,17 +775,49 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   Widget _bubble(AgentEvent e) {
     switch (e.kind) {
       case 'user':
+        final thumbs = _thumbsBySeq[e.seq];
         return _align(
           Alignment.centerRight,
-          Container(
-            margin: const EdgeInsets.symmetric(vertical: 4),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              color: const Color(0xFF2A6AFF),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Text(e.text ?? '',
-                style: const TextStyle(color: Colors.white)),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              if (thumbs != null && thumbs.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    alignment: WrapAlignment.end,
+                    children: [
+                      for (final b in thumbs)
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: Image.memory(b,
+                              width: 88, height: 88, fit: BoxFit.cover),
+                        ),
+                    ],
+                  ),
+                )
+              else if (e.images.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Text(e.images.join(', '),
+                      style: const TextStyle(
+                          color: Colors.white38, fontSize: 11)),
+                ),
+              if ((e.text ?? '').isNotEmpty)
+                Container(
+                  margin: const EdgeInsets.symmetric(vertical: 4),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF2A6AFF),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Text(e.text ?? '',
+                      style: const TextStyle(color: Colors.white)),
+                ),
+            ],
           ),
         );
       case 'text':
@@ -572,32 +969,164 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                   child: const Text('Sign in on the PC'),
                 ),
               ),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
+            Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFF151522),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: const Color(0xFF2A2A40)),
+              ),
+              padding: const EdgeInsets.fromLTRB(8, 8, 8, 6),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (_photos.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+                      child: SizedBox(
+                        height: 64,
+                        child: ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: _photos.length,
+                          separatorBuilder: (_, _) => const SizedBox(width: 8),
+                          itemBuilder: (_, i) {
+                            final p = _photos[i];
+                            return Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Image.memory(p.bytes,
+                                      width: 64, height: 64, fit: BoxFit.cover),
+                                ),
+                                Positioned(
+                                  top: -6,
+                                  right: -6,
+                                  child: IconButton(
+                                    visualDensity: VisualDensity.compact,
+                                    style: IconButton.styleFrom(
+                                      backgroundColor: const Color(0xFF0A0A0F),
+                                      minimumSize: const Size(22, 22),
+                                      tapTargetSize:
+                                          MaterialTapTargetSize.shrinkWrap,
+                                    ),
+                                    iconSize: 14,
+                                    onPressed: () =>
+                                        setState(() => _photos.removeAt(i)),
+                                    icon: const Icon(Icons.close),
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  TextField(
                     controller: _input,
                     minLines: 1,
-                    maxLines: 4,
+                    maxLines: 6,
+                    enabled: !_busy,
                     onSubmitted: (_) => _send(),
                     decoration: InputDecoration(
                       hintText: _needsSignIn
                           ? 'login or CURSOR_API_KEY=…'
-                          : 'Message the agent…',
+                          : _photos.isEmpty
+                              ? 'Message the agent…'
+                              : 'Add a note about the photo…',
                       isDense: true,
-                      border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12)),
+                      filled: true,
+                      fillColor: Colors.transparent,
+                      border: InputBorder.none,
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 8),
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                IconButton.filled(
-                  onPressed: _send,
-                  icon: const Icon(Icons.send),
-                ),
-              ],
+                  Row(
+                    children: [
+                      if (_caps.images)
+                        IconButton(
+                          tooltip: 'Add photo',
+                          onPressed: _busy ? null : _attachPhoto,
+                          icon: const Icon(Icons.add_photo_alternate_outlined),
+                        ),
+                      Expanded(
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: [
+                              if (_caps.modes.length > 1)
+                                _composerChip(
+                                  _modeLabel(_mode),
+                                  onTap: _busy ? null : _cycleMode,
+                                  icon: _mode == 'plan'
+                                      ? Icons.checklist_outlined
+                                      : _mode == 'ask'
+                                          ? Icons.help_outline
+                                          : Icons.smart_toy_outlined,
+                                  active: _mode != 'agent',
+                                ),
+                              if (_caps.thinkingLevels.isNotEmpty)
+                                _composerChip(
+                                  _thinkingLabel(_thinking),
+                                  onTap: _busy ? null : _pickThinking,
+                                  icon: Icons.psychology_outlined,
+                                ),
+                              if (_caps.models.length > 1)
+                                _composerChip(
+                                  _modelLabel,
+                                  onTap: _busy ? null : _pickModel,
+                                  icon: Icons.memory_outlined,
+                                ),
+                              _composerChip(
+                                _activeAgent?.name ?? 'Agent',
+                                onTap: _busy ? null : _selectAgent,
+                                icon: _iconFor(_activeAgent?.id ?? ''),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      IconButton.filled(
+                        tooltip: _busy ? 'Stop' : 'Send',
+                        onPressed: _busy ? _cancel : _send,
+                        icon: Icon(_busy ? Icons.stop : Icons.arrow_upward),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _composerChip(
+    String label, {
+    required VoidCallback? onTap,
+    IconData? icon,
+    bool active = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: ActionChip(
+        onPressed: onTap,
+        avatar: icon == null
+            ? null
+            : Icon(icon, size: 16, color: const Color(0xFFB8B8CC)),
+        label: Text(label),
+        labelStyle: TextStyle(
+          fontSize: 12,
+          color: active ? const Color(0xFF2A6AFF) : Colors.white70,
+        ),
+        visualDensity: VisualDensity.compact,
+        backgroundColor: active
+            ? const Color(0xFF2A6AFF).withValues(alpha: 0.12)
+            : const Color(0xFF1C1C2A),
+        side: BorderSide(
+          color: active ? const Color(0xFF2A6AFF) : const Color(0xFF2A2A40),
         ),
       ),
     );

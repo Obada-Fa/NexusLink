@@ -42,5 +42,38 @@ void main() {
       expect(end.refId, start.refId);
       expect(end.toolOutput, 'ok');
     });
+
+    test('parses composer capabilities and attached photo names', () {
+      final agent = AgentInfo.fromJson({
+        'id': 'cursor',
+        'name': 'Cursor CLI',
+        'available': true,
+        'capabilities': {
+          'modes': ['agent', 'plan', 'ask'],
+          'thinkingLevels': ['low', 'medium', 'high'],
+          'models': [
+            {'id': 'auto', 'name': 'Auto'},
+            {'id': 'gpt-5', 'name': 'GPT-5'},
+          ],
+          'images': true,
+        },
+      });
+      expect(agent.capabilities.images, isTrue);
+      expect(agent.capabilities.modes, ['agent', 'plan', 'ask']);
+      expect(agent.capabilities.models.first.name, 'Auto');
+
+      final oldHost = AgentInfo.fromJson({'id': 'mock', 'name': 'Demo'});
+      expect(oldHost.capabilities.images, isFalse);
+      expect(oldHost.capabilities.modes, ['agent']);
+
+      final user = AgentEvent.fromJson({
+        'seq': 1,
+        'ts': 1,
+        'kind': 'user',
+        'text': 'look',
+        'images': ['shot.jpg'],
+      });
+      expect(user.images, ['shot.jpg']);
+    });
   });
 }

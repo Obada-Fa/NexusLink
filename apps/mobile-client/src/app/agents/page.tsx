@@ -129,6 +129,13 @@ export default function AgentsPage() {
           {active ? '←' : '⌂'}
         </button>
         <span style={styles.title}>{active?.title ?? 'Agents'}</span>
+        {active ? (
+          <button onClick={() => setActive(null)} style={styles.barBtn} title="Select agent">
+            ☰
+          </button>
+        ) : (
+          <span style={{ width: 34 }} />
+        )}
       </header>
 
       {status !== 'connected' ? (
@@ -149,6 +156,7 @@ export default function AgentsPage() {
               <span style={styles.muted}>
                 {a.available ? 'Runs on the PC — chat here' : 'CLI not installed on the PC'}
               </span>
+              {a.available && <span style={styles.selectBtn}>Select</span>}
             </button>
           ))}
           {sessions.length > 0 && <h2 style={styles.section}>Recent</h2>}
@@ -265,6 +273,16 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: 'left',
   },
   muted: { fontSize: 12, color: '#778' },
+  selectBtn: {
+    marginTop: 8,
+    padding: '6px 12px',
+    borderRadius: 8,
+    background: '#2a6aff',
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 600,
+    alignSelf: 'flex-start',
+  },
   chat: { flex: 1, overflowY: 'auto', padding: 12 },
   bubble: {
     maxWidth: '85%',

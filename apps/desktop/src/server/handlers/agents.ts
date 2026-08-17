@@ -7,9 +7,18 @@
 // phone can replay history via agent.history) and pushed live as
 // `agent-event` WebSocket messages.
 
-import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
-import type { AgentEvent, AgentInfo, AgentSessionInfo, WsMessage } from '@nexuslink/rpc-types';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type {
+  AgentCapabilities,
+  AgentEvent,
+  AgentImageAttachment,
+  AgentInfo,
+  AgentMode,
+  AgentSessionInfo,
+  WsMessage,
+} from '@nexuslink/rpc-types';
 
 type SpawnOpts = Parameters<typeof Bun.spawn>[1];
 type Proc = ReturnType<typeof Bun.spawn>;
@@ -27,10 +36,26 @@ export function setAgentBroadcast(fn: BroadcastFn): void {
 // Agent catalog
 // ---------------------------------------------------------------------------
 
+export interface AgentPromptOpts {
+  model?: string;
+  mode?: AgentMode;
+  thinking?: string;
+  images?: AgentImageAttachment[];
+}
+
+interface AdapterPromptOpts {
+  model?: string;
+  mode?: AgentMode;
+  thinking?: string;
+  imagePaths?: string[];
+  images?: { name: string; mime: string; data: string }[];
+}
+
 interface AgentDef {
   id: string;
   name: string;
   bin?: string;
+  capabilities: AgentCapabilities;
   makeAdapter(session: AgentSession): AgentAdapter;
 }
 
@@ -62,34 +87,86 @@ function which(bin: string): string | null {
   return resolveBin(bin);
 }
 
+const MAX_IMAGES = 4;
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+
+const CURSOR_MODELS = [
+  { id: 'auto', name: 'Auto' },
+  { id: 'composer-2', name: 'Composer' },
+  { id: 'gpt-5', name: 'GPT-5' },
+  { id: 'sonnet-4-thinking', name: 'Sonnet 4' },
+  { id: 'claude-opus-4-8', name: 'Opus 4.8' },
+  { id: 'grok-4.6', name: 'Grok 4.6' },
+];
+
+const CLAUDE_MODELS = [
+  { id: 'default', name: 'Default' },
+  { id: 'sonnet', name: 'Sonnet' },
+  { id: 'opus', name: 'Opus' },
+  { id: 'haiku', name: 'Haiku' },
+];
+
 const AGENT_DEFS: AgentDef[] = [
   {
     id: 'claude',
     name: 'Claude Code',
     bin: 'claude',
+    capabilities: {
+      modes: ['agent', 'plan'],
+      thinkingLevels: ['low', 'medium', 'high'],
+      models: CLAUDE_MODELS,
+      images: true,
+    },
     makeAdapter: (s) => new ClaudeAdapter(s),
   },
   {
     id: 'cursor',
     name: 'Cursor CLI',
     bin: 'cursor-agent',
+    capabilities: {
+      modes: ['agent', 'plan', 'ask'],
+      thinkingLevels: ['low', 'medium', 'high', 'extra-high'],
+      models: CURSOR_MODELS,
+      images: true,
+    },
     makeAdapter: (s) => new CursorAdapter(s),
   },
   {
     id: 'opencode',
     name: 'OpenCode',
     bin: 'opencode',
+    capabilities: {
+      modes: ['agent', 'plan'],
+      thinkingLevels: ['minimal', 'low', 'medium', 'high', 'max'],
+      models: [{ id: 'default', name: 'Default' }],
+      images: true,
+    },
     makeAdapter: (s) => new OpenCodeAdapter(s),
   },
   {
     id: 'antigravity',
     name: 'Antigravity',
     bin: 'agy',
+    capabilities: {
+      modes: ['agent', 'plan'],
+      thinkingLevels: ['low', 'medium', 'high'],
+      models: [{ id: 'default', name: 'Default' }],
+      images: true,
+    },
     makeAdapter: (s) => new AntigravityAdapter(s),
   },
   {
     id: 'mock',
     name: 'Demo Agent',
+    capabilities: {
+      modes: ['agent', 'plan', 'ask'],
+      thinkingLevels: ['low', 'medium', 'high', 'extra-high'],
+      models: [
+        { id: 'demo', name: 'Demo' },
+        { id: 'composer-2', name: 'Composer' },
+      ],
+      images: true,
+    },
     makeAdapter: (s) => new MockAdapter(s),
   },
 ];
@@ -99,7 +176,166 @@ export function listAgents(): AgentInfo[] {
     id: d.id,
     name: d.name,
     available: d.bin ? which(d.bin) !== null : true,
+    capabilities: d.capabilities,
   }));
+}
+
+export function thinkingToEffort(thinking?: string): 'low' | 'medium' | 'high' | undefined {
+  if (!thinking) return undefined;
+  const t = thinking.toLowerCase();
+  if (t === 'none' || t === 'off') return undefined;
+  if (t === 'low' || t === 'minimal') return 'low';
+  if (t === 'high' || t === 'extra-high' || t === 'max' || t === 'xhigh') return 'high';
+  return 'medium';
+}
+
+/** Cursor `--model` value, including `[effort=…]` when thinking is set. */
+export function cursorModelFlag(model?: string, thinking?: string): string | undefined {
+  const m = (model || '').trim();
+  if (!m || m === 'auto' || m === 'default') return undefined;
+  if (m.includes('[')) return m;
+  const effort = thinkingToEffort(thinking);
+  const extraHigh = ['extra-high', 'max', 'xhigh'].includes((thinking || '').toLowerCase());
+  if (!effort || (effort === 'medium' && !extraHigh)) return m;
+  return `${m}[effort=${effort}${extraHigh ? ',fast=false' : ''}]`;
+}
+
+export function withImageMentions(text: string, paths?: string[]): string {
+  const body = text.trim() || (paths?.length ? 'Please look at the attached image(s).' : '');
+  if (!paths?.length) return body;
+  return `${body}\n\n${paths.map((p) => `@${p}`).join('\n')}`;
+}
+
+export function materializeAgentImages(
+  sessionId: string,
+  images: AgentImageAttachment[] | undefined,
+): { paths: string[]; files: { name: string; mime: string; data: string }[] } {
+  if (!images?.length) return { paths: [], files: [] };
+  const dir = join(tmpdir(), 'nexuslink-agent-inbox', sessionId);
+  mkdirSync(dir, { recursive: true });
+  const paths: string[] = [];
+  const files: { name: string; mime: string; data: string }[] = [];
+  for (const img of images.slice(0, MAX_IMAGES)) {
+    if (!img.data) continue;
+    let raw: Buffer;
+    try {
+      raw = Buffer.from(img.data, 'base64');
+    } catch {
+      continue;
+    }
+    if (!raw.length || raw.length > MAX_IMAGE_BYTES) continue;
+    const mime = (img.mime || 'image/jpeg').toLowerCase();
+    if (!mime.startsWith('image/')) continue;
+    const ext = mime.includes('png') ? 'png' : mime.includes('webp') ? 'webp' : mime.includes('gif') ? 'gif' : 'jpg';
+    const rawName = (img.name || `photo.${ext}`).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 80);
+    const dest = join(dir, `${Date.now()}-${rawName || `photo.${ext}`}`);
+    writeFileSync(dest, raw);
+    paths.push(dest);
+    files.push({ name: rawName || `photo.${ext}`, mime, data: img.data });
+  }
+  return { paths, files };
+}
+
+export function buildCursorArgv(opts: {
+  bin: string;
+  cwd: string;
+  chatId?: string | null;
+  text: string;
+  model?: string;
+  mode?: AgentMode;
+  thinking?: string;
+  imagePaths?: string[];
+}): string[] {
+  const argv = [
+    opts.bin, '--print', '--output-format', 'stream-json',
+    '--trust', '--force',
+    '--workspace', opts.cwd,
+  ];
+  if (opts.mode === 'plan' || opts.mode === 'ask') argv.push('--mode', opts.mode);
+  const model = cursorModelFlag(opts.model, opts.thinking);
+  if (model) argv.push('--model', model);
+  if (opts.chatId) argv.push('--resume', opts.chatId);
+  argv.push(withImageMentions(opts.text, opts.imagePaths));
+  return argv;
+}
+
+export function buildOpencodeArgv(opts: {
+  bin: string;
+  cwd: string;
+  session?: string | null;
+  text: string;
+  model?: string;
+  mode?: AgentMode;
+  thinking?: string;
+  imagePaths?: string[];
+}): string[] {
+  const argv = [opts.bin, 'run', '--format', 'json', '--auto', '--dir', opts.cwd];
+  if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
+  if (opts.mode === 'plan') argv.push('--agent', 'plan');
+  const variant = opts.thinking && opts.thinking !== 'medium' ? opts.thinking : undefined;
+  if (variant) argv.push('--variant', variant === 'extra-high' ? 'max' : variant);
+  if (opts.session) argv.push('--session', opts.session);
+  for (const p of opts.imagePaths ?? []) argv.push('--file', p);
+  argv.push(opts.text.trim() || 'Please look at the attached image(s).');
+  return argv;
+}
+
+export function buildAgyArgv(opts: {
+  bin: string;
+  conversationId?: string | null;
+  text: string;
+  model?: string;
+  mode?: AgentMode;
+  thinking?: string;
+  imagePaths?: string[];
+}): string[] {
+  const argv = [
+    opts.bin,
+    '--output-format', 'stream-json',
+    '--dangerously-skip-permissions',
+    '--print-timeout', '15m',
+  ];
+  if (opts.mode === 'plan') argv.push('--mode', 'plan');
+  if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
+  const effort = thinkingToEffort(opts.thinking);
+  if (effort) argv.push('--effort', effort);
+  if (opts.conversationId) argv.push('--conversation', opts.conversationId);
+  argv.push('-p', withImageMentions(opts.text, opts.imagePaths));
+  return argv;
+}
+
+export function claudeSpawnArgs(opts: {
+  bin: string;
+  model?: string;
+  mode?: AgentMode;
+  thinking?: string;
+}): string[] {
+  const argv = [
+    opts.bin, '--print',
+    '--input-format', 'stream-json',
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--permission-mode', opts.mode === 'plan' ? 'plan' : 'acceptEdits',
+  ];
+  if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
+  const effort = thinkingToEffort(opts.thinking);
+  if (effort && effort !== 'medium') argv.push('--effort', effort);
+  return argv;
+}
+
+export function claudeUserContent(
+  text: string,
+  images?: { mime: string; data: string }[],
+): unknown[] {
+  const content: unknown[] = [];
+  for (const img of images ?? []) {
+    content.push({
+      type: 'image',
+      source: { type: 'base64', media_type: img.mime, data: img.data },
+    });
+  }
+  content.push({ type: 'text', text: text.trim() || 'Please look at the attached image(s).' });
+  return content;
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +351,7 @@ interface AgentSession {
 }
 
 interface AgentAdapter {
-  prompt(text: string): void;
+  prompt(text: string, opts?: AdapterPromptOpts): void;
   cancel(): void;
   close(): void;
   permission?(requestId: string, allow: boolean): void;
@@ -165,13 +401,31 @@ export function agentHistory(agentSessionId: string): AgentEvent[] {
   return agentSessions.get(agentSessionId)?.history.slice() ?? [];
 }
 
-export function promptAgent(agentSessionId: string, text: string): { ok: boolean } {
+export function promptAgent(
+  agentSessionId: string,
+  text: string,
+  opts: AgentPromptOpts = {},
+): { ok: boolean } {
   const session = agentSessions.get(agentSessionId);
-  if (!session || session.info.status !== 'running' || !text.trim()) return { ok: false };
+  if (!session || session.info.status !== 'running') return { ok: false };
+  const materialized = materializeAgentImages(session.info.agentSessionId, opts.images);
   const key = parseEnvApiKey(text, ['CURSOR_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY']);
-  emit(session, { kind: 'user', text: key ? `${key.name}=••••` : text });
+  const display = (key ? `${key.name}=••••` : text.trim())
+    || (materialized.files.length ? 'Attached photo(s)' : '');
+  if (!display) return { ok: false };
+  emit(session, {
+    kind: 'user',
+    text: display,
+    images: materialized.files.map((f) => f.name),
+  });
   setBusy(session, true);
-  session.adapter.prompt(text);
+  session.adapter.prompt(text.trim() || 'Please look at the attached image(s).', {
+    model: opts.model,
+    mode: opts.mode,
+    thinking: opts.thinking,
+    imagePaths: materialized.paths,
+    images: materialized.files,
+  });
   return { ok: true };
 }
 
@@ -576,20 +830,25 @@ function openUrlOnHost(url: string): void {
 
 class ClaudeAdapter implements AgentAdapter {
   private proc: Proc | null = null;
+  private spawnKey = '';
 
   constructor(private session: AgentSession) {}
 
-  private ensureProc(): Proc {
-    if (this.proc && this.proc.exitCode === null && !this.proc.killed) return this.proc;
+  private ensureProc(opts?: AdapterPromptOpts): Proc {
+    const key = `${opts?.model ?? ''}|${opts?.mode ?? 'agent'}|${opts?.thinking ?? ''}`;
+    if (this.proc && this.proc.exitCode === null && !this.proc.killed && this.spawnKey === key) {
+      return this.proc;
+    }
+    this.cancel();
+    this.spawnKey = key;
     const bin = resolveBin('claude') ?? 'claude';
     this.proc = Bun.spawn(
-      [
-        bin, '--print',
-        '--input-format', 'stream-json',
-        '--output-format', 'stream-json',
-        '--verbose',
-        '--permission-mode', 'acceptEdits',
-      ],
+      claudeSpawnArgs({
+        bin,
+        model: opts?.model,
+        mode: opts?.mode,
+        thinking: opts?.thinking,
+      }),
       {
         cwd: this.session.info.cwd,
         stdin: 'pipe',
@@ -690,11 +949,11 @@ class ClaudeAdapter implements AgentAdapter {
     }
   }
 
-  prompt(text: string): void {
-    const proc = this.ensureProc();
+  prompt(text: string, opts?: AdapterPromptOpts): void {
+    const proc = this.ensureProc(opts);
     const line = JSON.stringify({
       type: 'user',
-      message: { role: 'user', content: [{ type: 'text', text }] },
+      message: { role: 'user', content: claudeUserContent(text, opts?.images) },
     });
     try {
       const stdin = proc.stdin as unknown as { write(s: string): unknown; flush?: () => void };
@@ -743,7 +1002,7 @@ class CursorAdapter implements AgentAdapter {
     return env;
   }
 
-  prompt(text: string): void {
+  prompt(text: string, opts?: AdapterPromptOpts): void {
     const key = parseEnvApiKey(text, ['CURSOR_API_KEY']);
     if (key) {
       this.apiKey = key.value;
@@ -759,20 +1018,23 @@ class CursorAdapter implements AgentAdapter {
       this.startLogin();
       return;
     }
-    this.runPrompt(text);
+    this.runPrompt(text, opts);
   }
 
-  private runPrompt(text: string): void {
+  private runPrompt(text: string, opts?: AdapterPromptOpts): void {
     this.cancel();
     this.sawResult = false;
     const bin = resolveBin('cursor-agent') ?? 'cursor-agent';
-    const argv = [
-      bin, '--print', '--output-format', 'stream-json',
-      '--trust', '--force',
-      '--workspace', this.session.info.cwd,
-    ];
-    if (this.chatId) argv.push('--resume', this.chatId);
-    argv.push(text);
+    const argv = buildCursorArgv({
+      bin,
+      cwd: this.session.info.cwd,
+      chatId: this.chatId,
+      text,
+      model: opts?.model,
+      mode: opts?.mode,
+      thinking: opts?.thinking,
+      imagePaths: opts?.imagePaths,
+    });
     const { proc, stderr } = spawnJsonCli(
       argv,
       this.session.info.cwd,
@@ -933,16 +1195,20 @@ class OpenCodeAdapter implements AgentAdapter {
 
   constructor(private session: AgentSession) {}
 
-  prompt(text: string): void {
+  prompt(text: string, opts?: AdapterPromptOpts): void {
     this.cancel();
     this.sawResult = false;
     const bin = resolveBin('opencode') ?? 'opencode';
-    const argv = [
-      bin, 'run', '--format', 'json', '--auto',
-      '--dir', this.session.info.cwd,
-    ];
-    if (this.ocSession) argv.push('--session', this.ocSession);
-    argv.push(text);
+    const argv = buildOpencodeArgv({
+      bin,
+      cwd: this.session.info.cwd,
+      session: this.ocSession,
+      text,
+      model: opts?.model,
+      mode: opts?.mode,
+      thinking: opts?.thinking,
+      imagePaths: opts?.imagePaths,
+    });
     const { proc, stderr } = spawnJsonCli(argv, this.session.info.cwd, (msg) => this.onEvent(msg));
     this.proc = proc;
     proc.exited.then(async (code) => {
@@ -1009,7 +1275,7 @@ class AntigravityAdapter implements AgentAdapter {
     return env;
   }
 
-  prompt(text: string): void {
+  prompt(text: string, opts?: AdapterPromptOpts): void {
     const key = parseEnvApiKey(text, ['GEMINI_API_KEY', 'GOOGLE_API_KEY']);
     if (key) {
       this.apiKey = key.value;
@@ -1036,14 +1302,15 @@ class AntigravityAdapter implements AgentAdapter {
     this.sawResult = false;
     this.streamedText = false;
     const bin = resolveBin('agy') ?? 'agy';
-    const argv = [
+    const argv = buildAgyArgv({
       bin,
-      '--output-format', 'stream-json',
-      '--dangerously-skip-permissions',
-      '--print-timeout', '15m',
-    ];
-    if (this.conversationId) argv.push('--conversation', this.conversationId);
-    argv.push('-p', text);
+      conversationId: this.conversationId,
+      text,
+      model: opts?.model,
+      mode: opts?.mode,
+      thinking: opts?.thinking,
+      imagePaths: opts?.imagePaths,
+    });
     const { proc, stderr } = spawnJsonCli(
       argv,
       this.session.info.cwd,
@@ -1110,9 +1377,15 @@ class MockAdapter implements AgentAdapter {
 
   constructor(private session: AgentSession) {}
 
-  prompt(text: string): void {
+  prompt(text: string, opts?: AdapterPromptOpts): void {
     const s = this.session;
     const at = (ms: number, fn: () => void) => this.timers.push(setTimeout(fn, ms));
+    const bits: string[] = [];
+    if (opts?.mode && opts.mode !== 'agent') bits.push(`mode=${opts.mode}`);
+    if (opts?.thinking) bits.push(`thinking=${opts.thinking}`);
+    if (opts?.model) bits.push(`model=${opts.model}`);
+    if (opts?.imagePaths?.length) bits.push(`${opts.imagePaths.length} photo(s)`);
+    const extras = bits.length ? `\n\nComposer: ${bits.join(', ')}` : '';
     at(150, () => emit(s, { kind: 'thinking', text: 'Looking at the request…' }));
     at(400, () =>
       emit(s, {
@@ -1139,7 +1412,7 @@ class MockAdapter implements AgentAdapter {
         emit(s, { kind: 'tool-end', refId: 'mock-1', toolOutput: 'demo\n' });
         emit(s, {
           kind: 'text',
-          text: `You said: "${text}"\n\nThis is the **demo agent** — install Claude Code, Cursor CLI, OpenCode, or Antigravity on the PC to chat with a real agent here.\n\n\`\`\`diff\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,4 @@\n # NexusLink\n+Phone OS for your PC\n\`\`\``,
+          text: `You said: "${text}"${extras}\n\nThis is the **demo agent** — install Claude Code, Cursor CLI, OpenCode, or Antigravity on the PC to chat with a real agent here.\n\n\`\`\`diff\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,4 @@\n # NexusLink\n+Phone OS for your PC\n\`\`\``,
         });
         setBusy(s, false);
         emit(s, { kind: 'result', text: '' });

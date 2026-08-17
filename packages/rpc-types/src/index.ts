@@ -154,7 +154,14 @@ export type Params<M extends RpcMethod> =
     : M extends 'agent.listSessions'
     ? {}
     : M extends 'agent.prompt'
-    ? { agentSessionId: string; text: string }
+    ? {
+        agentSessionId: string
+        text: string
+        model?: string
+        mode?: AgentMode
+        thinking?: string
+        images?: AgentImageAttachment[]
+      }
     : M extends 'agent.permission'
     ? { agentSessionId: string; requestId: string; allow: boolean }
     : M extends 'agent.cancel'
@@ -407,12 +414,36 @@ export type WebRtcSignal =
   | { kind: 'offer' | 'answer'; sdp: string }
   | { kind: 'ice'; candidate: string; sdpMLineIndex: number }
 
+/** Composer mode — same idea as Cursor Agent / Plan / Ask. */
+export type AgentMode = 'agent' | 'plan' | 'ask'
+
+export interface AgentModelOption {
+  id: string
+  name: string
+}
+
+/** What the phone composer should offer for this CLI. */
+export interface AgentCapabilities {
+  modes: AgentMode[]
+  thinkingLevels: string[]
+  models: AgentModelOption[]
+  images: boolean
+}
+
+/** Photo/screenshot attached from the phone (base64, already compressed). */
+export interface AgentImageAttachment {
+  name?: string
+  mime?: string
+  data: string
+}
+
 /** An AI agent CLI installed on the host (Claude Code, Cursor CLI, ...). */
 export interface AgentInfo {
   id: string
   name: string
   available: boolean
   version?: string
+  capabilities: AgentCapabilities
 }
 
 export interface AgentSessionInfo {
@@ -446,6 +477,8 @@ export interface AgentEvent {
   toolOutput?: string
   /** Correlates tool-start/tool-end pairs and permission requests. */
   refId?: string
+  /** Filenames of photos attached to a user message. */
+  images?: string[]
 }
 
 export type WsMessage =
