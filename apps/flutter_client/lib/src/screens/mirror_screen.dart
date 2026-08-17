@@ -66,6 +66,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   int _fps = 0;
   bool _keyboardOpen = false;
   bool _precision = false;
+  int? _queuedDragX;
+  int? _queuedDragY;
 
   // Virtual session state (Tier 1).
   AppSessionInfo? _session;
@@ -104,6 +106,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       // Drive long-press evaluation + inertia on a shared clock. Keep ticking
       // while streaming so a pending long-press fires even without new frames.
       _engine.tick(_nowMs);
+      _flushQueuedDrag();
     })..start();
     WidgetsBinding.instance.addPostFrameCallback((_) => _start());
   }
@@ -487,16 +490,22 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         client.notify('input.buttonDown',
             _sid({'button': 'left', 'x': hx(e.x), 'y': hy(e.y)}));
       case DragMoveEvent():
-        client.notify('input.mouseMoveAbs', _sid({'x': hx(e.x), 'y': hy(e.y)}));
+        // Latest position wins — sending every pointer event queues latency.
+        _queuedDragX = hx(e.x);
+        _queuedDragY = hy(e.y);
       case DragEndEvent():
+        _flushQueuedDrag();
         client.notify('input.buttonUp',
             _sid({'button': 'left', 'x': hx(e.x), 'y': hy(e.y)}));
       case ZoomEvent():
+        // Pinch scale is a small delta (px * 0.005). Map to scroll-px conservatively;
+        // the host coalesces ctrl+wheel to at most one step / 50ms so a delayed
+        // burst cannot dump twenty zoom steps.
         client.notify(
             'input.mouseScroll',
             _sid({
               'deltaX': 0,
-              'deltaY': (-e.scale * 400).round(),
+              'deltaY': (-e.scale * 160).round(),
               'x': hx(e.x),
               'y': hy(e.y),
               'modifiers': ['ctrl'],
@@ -504,7 +513,14 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     }
   }
 
-  // --- raw pointer → engine touch events ------------------------------------
+  void _flushQueuedDrag() {
+    final x = _queuedDragX;
+    final y = _queuedDragY;
+    if (x == null || y == null) return;
+    _queuedDragX = null;
+    _queuedDragY = null;
+    _client?.notify('input.mouseMoveAbs', _sid({'x': x, 'y': y}));
+  }
 
   List<TouchPoint> get _touches => _activePointers.entries
       .map((e) => TouchPoint(e.key, e.value.dx, e.value.dy))
