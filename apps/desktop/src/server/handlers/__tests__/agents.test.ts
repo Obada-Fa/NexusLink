@@ -10,6 +10,7 @@ import {
   promptAgent,
   agentHistory,
   closeAgentSession,
+  resolveAgentPermission,
   setAgentBroadcast,
 } from '../agents';
 
@@ -37,6 +38,12 @@ describe('agent gateway', () => {
     expect(res.ok).toBe(true);
 
     const deadline = Date.now() + 5000;
+    while (!pushed.some((e) => e.kind === 'permission-request') && Date.now() < deadline) {
+      await Bun.sleep(50);
+    }
+    expect(pushed.some((e) => e.kind === 'permission-request')).toBe(true);
+    expect(resolveAgentPermission(info.agentSessionId, 'mock-perm', true).ok).toBe(true);
+
     while (!pushed.some((e) => e.kind === 'result') && Date.now() < deadline) {
       await Bun.sleep(50);
     }
@@ -44,6 +51,7 @@ describe('agent gateway', () => {
     const kinds = pushed.map((e) => e.kind);
     expect(kinds[0]).toBe('user');
     expect(kinds).toContain('thinking');
+    expect(kinds).toContain('permission-request');
     expect(kinds).toContain('tool-start');
     expect(kinds).toContain('tool-end');
     expect(kinds).toContain('text');

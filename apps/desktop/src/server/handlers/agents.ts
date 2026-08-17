@@ -79,12 +79,14 @@ interface AgentSession {
   history: AgentEvent[];
   adapter: AgentAdapter;
   seq: number;
+  pendingPermissions: Map<string, (allow: boolean) => void>;
 }
 
 interface AgentAdapter {
   prompt(text: string): void;
   cancel(): void;
   close(): void;
+  permission?(requestId: string, allow: boolean): void;
 }
 
 const agentSessions = new Map<string, AgentSession>();
@@ -114,7 +116,10 @@ export function createAgentSession(agentId: string, cwd?: string, title?: string
     busy: false,
     status: 'running',
   };
-  const session: AgentSession = { info, history: [], adapter: null as unknown as AgentAdapter, seq: 0 };
+  const session: AgentSession = {
+    info, history: [], adapter: null as unknown as AgentAdapter, seq: 0,
+    pendingPermissions: new Map(),
+  };
   session.adapter = def.makeAdapter(session);
   agentSessions.set(info.agentSessionId, session);
   return { ...info };
@@ -152,6 +157,24 @@ export function closeAgentSession(agentSessionId: string): { ok: boolean } {
   session.adapter.close();
   session.info.status = 'exited';
   agentSessions.delete(agentSessionId);
+  return { ok: true };
+}
+
+/** ACP-shaped session/request_permission response from the phone. */
+export function resolveAgentPermission(
+  agentSessionId: string,
+  requestId: string,
+  allow: boolean,
+): { ok: boolean } {
+  const session = agentSessions.get(agentSessionId);
+  if (!session) return { ok: false };
+  const pending = session.pendingPermissions.get(requestId);
+  if (pending) {
+    session.pendingPermissions.delete(requestId);
+    pending(allow);
+    return { ok: true };
+  }
+  session.adapter.permission?.(requestId, allow);
   return { ok: true };
 }
 
@@ -284,6 +307,29 @@ class ClaudeAdapter implements AgentAdapter {
       });
     } else if (type === 'system' && msg.subtype === 'init') {
       emit(s, { kind: 'status', text: 'ready' });
+    } else if (type === 'control_request' || msg.subtype === 'can_use_tool') {
+      const requestId = String(msg.request_id ?? msg.id ?? crypto.randomUUID());
+      const tool = (msg.request as Record<string, unknown> | undefined) ?? msg;
+      emit(s, {
+        kind: 'permission-request',
+        refId: requestId,
+        toolName: String(tool.tool_name ?? tool.name ?? 'tool'),
+        toolInput: JSON.stringify(tool.input ?? tool.tool_input ?? {}, null, 2),
+        text: `Allow ${String(tool.tool_name ?? tool.name ?? 'this tool')}?`,
+      });
+      s.pendingPermissions.set(requestId, (allow) => {
+        try {
+          const stdin = this.proc?.stdin as unknown as { write(s: string): unknown; flush?: () => void } | undefined;
+          stdin?.write(JSON.stringify({
+            type: 'control_response',
+            request_id: requestId,
+            response: { allowed: allow },
+          }) + '\n');
+          stdin?.flush?.();
+        } catch {
+          emit(s, { kind: 'error', text: 'failed to send permission response' });
+        }
+      });
     }
   }
 
@@ -419,15 +465,29 @@ class MockAdapter implements AgentAdapter {
         toolInput: JSON.stringify({ command: 'echo demo' }, null, 2),
         refId: 'mock-1',
       }));
-    at(900, () => emit(s, { kind: 'tool-end', refId: 'mock-1', toolOutput: 'demo\n' }));
-    at(1200, () =>
+    at(500, () => {
       emit(s, {
-        kind: 'text',
-        text: `You said: "${text}"\n\nThis is the **demo agent** — install the Claude Code or Cursor CLI on the PC to chat with a real agent here.`,
-      }));
-    at(1400, () => {
-      setBusy(s, false);
-      emit(s, { kind: 'result', text: '' });
+        kind: 'permission-request',
+        refId: 'mock-perm',
+        toolName: 'Shell',
+        toolInput: JSON.stringify({ command: 'echo demo' }, null, 2),
+        text: 'Allow the demo agent to run `echo demo`?',
+      });
+      s.pendingPermissions.set('mock-perm', (allow) => {
+        if (!allow) {
+          emit(s, { kind: 'error', text: 'Permission denied' });
+          setBusy(s, false);
+          emit(s, { kind: 'result', text: '' });
+          return;
+        }
+        emit(s, { kind: 'tool-end', refId: 'mock-1', toolOutput: 'demo\n' });
+        emit(s, {
+          kind: 'text',
+          text: `You said: "${text}"\n\nThis is the **demo agent** — install the Claude Code or Cursor CLI on the PC to chat with a real agent here.\n\n\`\`\`diff\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,4 @@\n # NexusLink\n+Phone OS for your PC\n\`\`\``,
+        });
+        setBusy(s, false);
+        emit(s, { kind: 'result', text: '' });
+      });
     });
   }
 
