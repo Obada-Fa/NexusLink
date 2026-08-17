@@ -1,6 +1,7 @@
 'use client';
 
 import dynamic from 'next/dynamic';
+import ConnectionProvider from '@/components/ConnectionProvider';
 
 const AgentContent = dynamic(() => import('./agent-content'), {
   ssr: false,
@@ -23,5 +24,9 @@ const AgentContent = dynamic(() => import('./agent-content'), {
 });
 
 export default function AgentPage() {
-  return <AgentContent />;
+  return (
+    <ConnectionProvider>
+      <AgentContent />
+    </ConnectionProvider>
+  );
 }

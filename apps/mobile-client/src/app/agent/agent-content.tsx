@@ -8,6 +8,7 @@ import { useRouter } from 'next/navigation';
 import type { AgentId, AgentInfo } from '@nexuslink/rpc-types';
 import { useConnectionStore } from '@/store/connection';
 import { AGENT_TOOLBAR_KEYS, AGENT_UI, agentUi } from '@/lib/agent-registry';
+import { deriveHostWsUrl } from '@/lib/host-url';
 
 interface ChatMessage {
   id: string;
@@ -95,9 +96,9 @@ export default function AgentContent() {
   }, [selectedInfo, mode]);
 
   const handleReconnect = useCallback(async () => {
-    if (!hostUrl) return;
+    const target = hostUrl || deriveHostWsUrl();
     try {
-      await connect(hostUrl);
+      await connect(target);
     } catch {
       /* store handles */
     }
