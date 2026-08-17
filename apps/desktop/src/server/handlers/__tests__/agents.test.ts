@@ -14,8 +14,14 @@ import {
   finishCliTurn,
   parseCursorStreamEvent,
   parseOpencodeStreamEvent,
+  parseAgyStreamEvent,
   describeCursorToolCall,
   sessionIdFromEvent,
+  looksLikeAgentLogin,
+  parseEnvApiKey,
+  extractAuthUrl,
+  isCliAuthError,
+  rewriteCliAuthError,
 } from '../agents';
 
 describe('agent gateway', () => {
@@ -25,6 +31,7 @@ describe('agent gateway', () => {
     expect(ids).toContain('claude');
     expect(ids).toContain('cursor');
     expect(ids).toContain('opencode');
+    expect(ids).toContain('antigravity');
     expect(ids).toContain('mock');
     expect(agents.find((a) => a.id === 'mock')!.available).toBe(true);
   });
@@ -203,5 +210,106 @@ describe('CLI stream parsers', () => {
     expect(events.some((e) => e.kind === 'tool-start' && e.toolName === 'bash')).toBe(true);
     expect(events.some((e) => e.kind === 'tool-end' && e.toolOutput?.includes('hi'))).toBe(true);
     expect(events[events.length - 1]).toEqual({ kind: 'result', text: '' });
+  });
+
+  test('parses Antigravity stream-json init, text, tools, and result', () => {
+    expect(
+      sessionIdFromEvent({
+        event: 'init',
+        conversation_id: 'c3b66b04-872b-4fbe-a3a4-058a026ef20a',
+        init: { cwd: '/tmp' },
+      }),
+    ).toBe('c3b66b04-872b-4fbe-a3a4-058a026ef20a');
+
+    expect(parseAgyStreamEvent({ event: 'init', init: { cwd: '/tmp' } })).toEqual([]);
+
+    expect(
+      parseAgyStreamEvent({
+        event: 'step_update',
+        step_update: {
+          conversation_id: 'c3b66b04-872b-4fbe-a3a4-058a026ef20a',
+          step_index: 3,
+          state: 'DONE',
+          step_type: 'agent_response',
+          text_delta: 'Git rebase rewrites history.\n',
+        },
+      }),
+    ).toEqual([{ kind: 'text-delta', text: 'Git rebase rewrites history.\n' }]);
+
+    expect(
+      parseAgyStreamEvent({
+        event: 'step_update',
+        step_update: {
+          step_index: 4,
+          state: 'DONE',
+          step_type: 'tool',
+          tool_name: 'run_command',
+          tool_info: {
+            name: 'run_command',
+            parameters: { CommandLine: 'echo hello' },
+            output: 'hello\n',
+          },
+        },
+      }),
+    ).toEqual([{
+      kind: 'tool-end',
+      toolName: 'run_command',
+      toolOutput: 'hello\n',
+      refId: '4',
+    }]);
+
+    expect(
+      parseAgyStreamEvent({
+        event: 'result',
+        result: {
+          conversation_id: 'c3b66b04-872b-4fbe-a3a4-058a026ef20a',
+          status: 'SUCCESS',
+          response: 'done\n',
+        },
+      }),
+    ).toEqual([{ kind: 'result', text: 'done\n' }]);
+
+    expect(
+      parseAgyStreamEvent({
+        event: 'result',
+        result: { status: 'ERROR', error: 'authentication required', response: '' },
+      }),
+    ).toEqual([{ kind: 'error', text: 'authentication required' }]);
+  });
+});
+
+describe('CLI login helpers', () => {
+  test('treats chat login phrases as login, not prompts', () => {
+    expect(looksLikeAgentLogin('agent login')).toBe(true);
+    expect(looksLikeAgentLogin('/agent login')).toBe(true);
+    expect(looksLikeAgentLogin('login')).toBe(true);
+    expect(looksLikeAgentLogin('create test txt file')).toBe(false);
+  });
+
+  test('parses pasted API keys without treating normal prompts as keys', () => {
+    expect(parseEnvApiKey('CURSOR_API_KEY=sk-test-123', ['CURSOR_API_KEY'])).toEqual({
+      name: 'CURSOR_API_KEY',
+      value: 'sk-test-123',
+    });
+    expect(parseEnvApiKey('export GEMINI_API_KEY=abc', ['GEMINI_API_KEY'])).toEqual({
+      name: 'GEMINI_API_KEY',
+      value: 'abc',
+    });
+    expect(parseEnvApiKey('create a file', ['CURSOR_API_KEY'])).toBeUndefined();
+  });
+
+  test('extracts a sign-in URL and rewrites Cursor auth errors', () => {
+    expect(extractAuthUrl('Visit https://cursor.com/loginCli?token=abc to continue.')).toBe(
+      'https://cursor.com/loginCli?token=abc',
+    );
+    expect(isCliAuthError(
+      "Error: Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY environment variable.",
+    )).toBe(true);
+    const rewritten = rewriteCliAuthError(
+      "Error: Authentication required. Please run 'agent login' first.",
+      'Cursor CLI',
+    );
+    expect(rewritten).toContain("isn't signed in");
+    expect(rewritten).toContain('CURSOR_API_KEY');
   });
 });

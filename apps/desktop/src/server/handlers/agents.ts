@@ -1,6 +1,6 @@
-// Agent gateway: run AI coding agents (Claude Code, Cursor CLI, OpenCode) on the host
-// and expose them to the phone as chat sessions with a normalized event
-// stream — the phone renders a native chat UI, never a terminal.
+// Agent gateway: run AI coding agents (Claude Code, Cursor CLI, OpenCode,
+// Antigravity) on the host and expose them to the phone as chat sessions with a
+// normalized event stream — the phone renders a native chat UI, never a terminal.
 //
 // Each CLI gets an adapter that translates its stream-json output into
 // AgentEvent records. Events are buffered per session (so a reconnecting
@@ -37,7 +37,14 @@ interface AgentDef {
 /** Extra dirs GUI/systemd launches often omit from PATH. */
 function extraBinDirs(): string[] {
   const home = homedir();
-  return [`${home}/.local/bin`, `${home}/.opencode/bin`, `${home}/bin`, '/usr/local/bin'];
+  return [
+    `${home}/.local/bin`,
+    `${home}/.opencode/bin`,
+    `${home}/.cursor/bin`,
+    `${home}/.gemini/antigravity-cli`,
+    `${home}/bin`,
+    '/usr/local/bin',
+  ];
 }
 
 export function resolveBin(bin: string): string | null {
@@ -73,6 +80,12 @@ const AGENT_DEFS: AgentDef[] = [
     name: 'OpenCode',
     bin: 'opencode',
     makeAdapter: (s) => new OpenCodeAdapter(s),
+  },
+  {
+    id: 'antigravity',
+    name: 'Antigravity',
+    bin: 'agy',
+    makeAdapter: (s) => new AntigravityAdapter(s),
   },
   {
     id: 'mock',
@@ -155,7 +168,8 @@ export function agentHistory(agentSessionId: string): AgentEvent[] {
 export function promptAgent(agentSessionId: string, text: string): { ok: boolean } {
   const session = agentSessions.get(agentSessionId);
   if (!session || session.info.status !== 'running' || !text.trim()) return { ok: false };
-  emit(session, { kind: 'user', text });
+  const key = parseEnvApiKey(text, ['CURSOR_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY']);
+  emit(session, { kind: 'user', text: key ? `${key.name}=••••` : text });
   setBusy(session, true);
   session.adapter.prompt(text);
   return { ok: true };
@@ -278,10 +292,67 @@ export function finishCliTurn(opts: {
 }
 
 export function sessionIdFromEvent(msg: Record<string, unknown>): string | undefined {
-  for (const key of ['chatId', 'chat_id', 'sessionId', 'session_id', 'sessionID']) {
+  for (const key of [
+    'chatId', 'chat_id', 'sessionId', 'session_id', 'sessionID',
+    'conversation_id', 'conversationId',
+  ]) {
     if (typeof msg[key] === 'string' && msg[key]) return msg[key] as string;
   }
+  const nested = [msg.step_update, msg.result, msg.init];
+  for (const raw of nested) {
+    if (!raw || typeof raw !== 'object') continue;
+    const inner = sessionIdFromEvent(raw as Record<string, unknown>);
+    if (inner) return inner;
+  }
   return undefined;
+}
+
+/** Chat text that should run the CLI's login subcommand, not a model prompt. */
+export function looksLikeAgentLogin(text: string): boolean {
+  const t = text.trim().toLowerCase().replace(/^\/+/, '');
+  return (
+    t === 'login' ||
+    t === 'agent login' ||
+    t === 'auth login' ||
+    t === 'agy login' ||
+    t === 'agy auth login' ||
+    t === 'cursor-agent login'
+  );
+}
+
+export function parseEnvApiKey(text: string, names: string[]): { name: string; value: string } | undefined {
+  const trimmed = text.trim().replace(/^export\s+/i, '');
+  for (const name of names) {
+    const m = trimmed.match(new RegExp(`^${name}\\s*=\\s*(\\S+)`, 'i'));
+    if (m?.[1]) return { name, value: m[1] };
+  }
+  return undefined;
+}
+
+export function extractAuthUrl(text: string): string | undefined {
+  const m = text.match(/https?:\/\/[^\s"'<>\\]+/i);
+  if (!m) return undefined;
+  return m[0].replace(/[.,;:)\\]+$/, '');
+}
+
+export function isCliAuthError(text: string): boolean {
+  return /authentication required|not authenticated|not logged in|please run ['`]?agent login/i.test(text);
+}
+
+export function rewriteCliAuthError(stderr: string, agentName: string): string {
+  if (agentName === 'Cursor CLI') {
+    return [
+      "Cursor CLI isn't signed in on the PC.",
+      'Send **login** in this chat to open a sign-in link, or paste `CURSOR_API_KEY=…` from https://cursor.com/dashboard/api',
+    ].join('\n\n');
+  }
+  if (agentName === 'Antigravity') {
+    return [
+      "Antigravity isn't signed in on the PC.",
+      'Run `agy` once on the PC to sign in, or paste `GEMINI_API_KEY=…` here.',
+    ].join('\n\n');
+  }
+  return stderr.trim();
 }
 
 /** Cursor CLI nests tools as `{ readToolCall: { args, result } }` rather than `{ name, args }`. */
@@ -398,20 +469,105 @@ export function parseOpencodeStreamEvent(msg: Record<string, unknown>): AgentDel
   return [];
 }
 
+export function parseAgyStreamEvent(msg: Record<string, unknown>): AgentDelta[] {
+  const event = String(msg.event ?? msg.type ?? '');
+  if (event === 'init') return [];
+  if (event === 'step_update') {
+    const step = (msg.step_update as Record<string, unknown> | undefined) ?? {};
+    const stepType = String(step.step_type ?? '');
+    const state = String(step.state ?? '');
+    if (stepType === 'agent_response') {
+      const text = typeof step.text_delta === 'string' ? step.text_delta : '';
+      if (text) return [{ kind: 'text-delta', text }];
+      return [];
+    }
+    if (stepType === 'tool') {
+      const info = (step.tool_info as Record<string, unknown> | undefined) ?? {};
+      const name = String(step.tool_name ?? info.name ?? 'tool');
+      const refId = String(step.step_index ?? info.name ?? name);
+      const input = JSON.stringify(info.parameters ?? {}, null, 2).slice(0, 4000);
+      const output = typeof info.output === 'string'
+        ? info.output.slice(0, 4000)
+        : JSON.stringify(info.output ?? {}, null, 2).slice(0, 4000);
+      if (state === 'ACTIVE') {
+        return [{ kind: 'tool-start', toolName: name, toolInput: input, refId }];
+      }
+      return [{ kind: 'tool-end', toolName: name, toolOutput: output, refId }];
+    }
+    return [];
+  }
+  if (event === 'result') {
+    const result = (msg.result as Record<string, unknown> | undefined) ?? msg;
+    const status = String(result.status ?? '');
+    const response = typeof result.response === 'string' ? result.response : '';
+    const error = typeof result.error === 'string' ? result.error : '';
+    if (status === 'ERROR' || (error && status !== 'SUCCESS')) {
+      return [{ kind: 'error', text: error || 'Antigravity reported an error' }];
+    }
+    return [{ kind: 'result', text: response }];
+  }
+  return [];
+}
+
+function hostEnv(extra?: Record<string, string>): Record<string, string> {
+  return { ...(process.env as Record<string, string>), ...extra };
+}
+
 function spawnJsonCli(
   argv: string[],
   cwd: string,
   onEvent: (msg: Record<string, unknown>) => void,
+  extraEnv?: Record<string, string>,
 ): { proc: Proc; stderr: Promise<string> } {
   const proc = Bun.spawn(argv, {
     cwd,
     stdin: 'ignore',
     stdout: 'pipe',
     stderr: 'pipe',
-    env: process.env as Record<string, string>,
+    env: hostEnv(extraEnv),
   } as unknown as SpawnOpts);
   void pumpJsonLines(proc, onEvent).catch(() => {});
   return { proc, stderr: collectText(proc.stderr) };
+}
+
+async function pumpTextStream(
+  stream: unknown,
+  onChunk: (chunk: string) => void,
+): Promise<string> {
+  if (!stream || typeof stream !== 'object' || !('getReader' in stream)) return '';
+  const reader = (stream as ReadableStream<Uint8Array>).getReader();
+  const decoder = new TextDecoder();
+  let out = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      out += chunk;
+      if (chunk) onChunk(chunk);
+    }
+    const tail = decoder.decode();
+    if (tail) {
+      out += tail;
+      onChunk(tail);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return out.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+function openUrlOnHost(url: string): void {
+  try {
+    Bun.spawn([resolveBin('xdg-open') ?? 'xdg-open', url], {
+      stdin: 'ignore',
+      stdout: 'ignore',
+      stderr: 'ignore',
+      env: hostEnv({ DISPLAY: process.env.DISPLAY || ':0' }),
+    } as unknown as SpawnOpts);
+  } catch {
+    // Phone still gets the URL in chat.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -574,10 +730,39 @@ class CursorAdapter implements AgentAdapter {
   private proc: Proc | null = null;
   private chatId: string | null = null;
   private sawResult = false;
+  private apiKey = process.env.CURSOR_API_KEY || '';
+  private loggingIn = false;
+  private autoLoginAttempted = false;
+  private loginTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private session: AgentSession) {}
 
+  private extraEnv(): Record<string, string> {
+    const env: Record<string, string> = {};
+    if (this.apiKey) env.CURSOR_API_KEY = this.apiKey;
+    return env;
+  }
+
   prompt(text: string): void {
+    const key = parseEnvApiKey(text, ['CURSOR_API_KEY']);
+    if (key) {
+      this.apiKey = key.value;
+      this.cancel();
+      setBusy(this.session, false);
+      emit(this.session, {
+        kind: 'status',
+        text: 'Saved CURSOR_API_KEY for this chat. Send your task again.',
+      });
+      return;
+    }
+    if (looksLikeAgentLogin(text)) {
+      this.startLogin();
+      return;
+    }
+    this.runPrompt(text);
+  }
+
+  private runPrompt(text: string): void {
     this.cancel();
     this.sawResult = false;
     const bin = resolveBin('cursor-agent') ?? 'cursor-agent';
@@ -588,21 +773,120 @@ class CursorAdapter implements AgentAdapter {
     ];
     if (this.chatId) argv.push('--resume', this.chatId);
     argv.push(text);
-    const { proc, stderr } = spawnJsonCli(argv, this.session.info.cwd, (msg) => this.onEvent(msg));
+    const { proc, stderr } = spawnJsonCli(
+      argv,
+      this.session.info.cwd,
+      (msg) => this.onEvent(msg),
+      this.extraEnv(),
+    );
     this.proc = proc;
     proc.exited.then(async (code) => {
       if (this.proc !== proc) return;
       const errText = await stderr.catch(() => '');
-      if (this.session.info.busy) {
-        setBusy(this.session, false);
-        const fail = finishCliTurn({
-          sawResult: this.sawResult,
-          exitCode: code,
-          stderr: errText,
+      if (!this.session.info.busy) return;
+      setBusy(this.session, false);
+      const fail = finishCliTurn({
+        sawResult: this.sawResult,
+        exitCode: code,
+        stderr: errText,
+      });
+      if (!fail) return;
+      if (isCliAuthError(fail.text ?? '')) {
+        emit(this.session, {
+          kind: 'error',
+          text: rewriteCliAuthError(fail.text ?? '', 'Cursor CLI'),
         });
-        if (fail) emit(this.session, fail);
+        if (!this.autoLoginAttempted) {
+          this.autoLoginAttempted = true;
+          this.startLogin();
+        }
+        return;
       }
+      emit(this.session, fail);
     }).catch(() => {});
+  }
+
+  private startLogin(): void {
+    if (this.loggingIn && this.proc && this.proc.exitCode === null) {
+      setBusy(this.session, false);
+      emit(this.session, {
+        kind: 'status',
+        text: 'Sign-in is already waiting — open the link above, or paste `CURSOR_API_KEY=…`.',
+      });
+      return;
+    }
+    this.cancel();
+    this.loggingIn = true;
+    setBusy(this.session, true);
+    const bin = resolveBin('cursor-agent') ?? 'cursor-agent';
+    const proc = Bun.spawn([bin, 'login'], {
+      cwd: this.session.info.cwd,
+      stdin: 'ignore',
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: hostEnv({
+        NO_OPEN_BROWSER: '1',
+        DISPLAY: process.env.DISPLAY || ':0',
+        ...this.extraEnv(),
+      }),
+    } as unknown as SpawnOpts);
+    this.proc = proc;
+    emit(this.session, { kind: 'status', text: 'Starting Cursor sign-in on the PC…' });
+
+    let combined = '';
+    let urlEmitted = false;
+    const onChunk = (chunk: string) => {
+      combined += chunk;
+      if (urlEmitted) return;
+      const url = extractAuthUrl(combined);
+      if (!url) return;
+      urlEmitted = true;
+      openUrlOnHost(url);
+      setBusy(this.session, false);
+      emit(this.session, {
+        kind: 'text',
+        text: [
+          'Open this link to sign in (a browser may also open on the PC):',
+          '',
+          url,
+          '',
+          'Or paste a key from https://cursor.com/dashboard/api as `CURSOR_API_KEY=…`.',
+        ].join('\n'),
+      });
+    };
+
+    this.loginTimer = setTimeout(() => {
+      try { proc.kill(); } catch { /* already gone */ }
+    }, 5 * 60 * 1000);
+
+    void Promise.all([
+      pumpTextStream(proc.stdout, onChunk),
+      pumpTextStream(proc.stderr, onChunk),
+      proc.exited,
+    ]).then(([, , code]) => {
+      if (this.proc !== proc) return;
+      this.loggingIn = false;
+      if (this.loginTimer) {
+        clearTimeout(this.loginTimer);
+        this.loginTimer = null;
+      }
+      setBusy(this.session, false);
+      if (code === 0) {
+        this.autoLoginAttempted = false;
+        emit(this.session, {
+          kind: 'result',
+          text: 'Signed in to Cursor CLI. Send your task again.',
+        });
+      } else if (!urlEmitted) {
+        emit(this.session, {
+          kind: 'error',
+          text: rewriteCliAuthError(combined || 'login failed', 'Cursor CLI'),
+        });
+      }
+    }).catch(() => {
+      this.loggingIn = false;
+      setBusy(this.session, false);
+    });
   }
 
   private onEvent(msg: Record<string, unknown>): void {
@@ -619,6 +903,11 @@ class CursorAdapter implements AgentAdapter {
   }
 
   cancel(): void {
+    if (this.loginTimer) {
+      clearTimeout(this.loginTimer);
+      this.loginTimer = null;
+    }
+    this.loggingIn = false;
     try {
       this.proc?.kill();
     } catch {
@@ -699,6 +988,119 @@ class OpenCodeAdapter implements AgentAdapter {
 }
 
 // ---------------------------------------------------------------------------
+// Antigravity adapter — `agy -p` with stream-json, resumed via --conversation.
+// ---------------------------------------------------------------------------
+
+class AntigravityAdapter implements AgentAdapter {
+  private proc: Proc | null = null;
+  private conversationId: string | null = null;
+  private sawResult = false;
+  private streamedText = false;
+  private apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+
+  constructor(private session: AgentSession) {}
+
+  private extraEnv(): Record<string, string> {
+    const env: Record<string, string> = {};
+    if (this.apiKey) {
+      env.GEMINI_API_KEY = this.apiKey;
+      env.GOOGLE_API_KEY = this.apiKey;
+    }
+    return env;
+  }
+
+  prompt(text: string): void {
+    const key = parseEnvApiKey(text, ['GEMINI_API_KEY', 'GOOGLE_API_KEY']);
+    if (key) {
+      this.apiKey = key.value;
+      this.cancel();
+      setBusy(this.session, false);
+      emit(this.session, {
+        kind: 'status',
+        text: `Saved ${key.name} for this chat. Send your task again.`,
+      });
+      return;
+    }
+    if (looksLikeAgentLogin(text)) {
+      setBusy(this.session, false);
+      emit(this.session, {
+        kind: 'text',
+        text: [
+          'Antigravity has no headless login command.',
+          'Run `agy` once in a terminal on the PC to sign in, or paste `GEMINI_API_KEY=…` here.',
+        ].join('\n\n'),
+      });
+      return;
+    }
+    this.cancel();
+    this.sawResult = false;
+    this.streamedText = false;
+    const bin = resolveBin('agy') ?? 'agy';
+    const argv = [
+      bin,
+      '--output-format', 'stream-json',
+      '--dangerously-skip-permissions',
+      '--print-timeout', '15m',
+    ];
+    if (this.conversationId) argv.push('--conversation', this.conversationId);
+    argv.push('-p', text);
+    const { proc, stderr } = spawnJsonCli(
+      argv,
+      this.session.info.cwd,
+      (msg) => this.onEvent(msg),
+      this.extraEnv(),
+    );
+    this.proc = proc;
+    proc.exited.then(async (code) => {
+      if (this.proc !== proc) return;
+      const errText = await stderr.catch(() => '');
+      if (!this.session.info.busy) return;
+      setBusy(this.session, false);
+      const fail = finishCliTurn({
+        sawResult: this.sawResult,
+        exitCode: code,
+        stderr: errText,
+      });
+      if (!fail) return;
+      emit(this.session, isCliAuthError(fail.text ?? '')
+        ? { kind: 'error', text: rewriteCliAuthError(fail.text ?? '', 'Antigravity') }
+        : fail);
+    }).catch(() => {});
+  }
+
+  private onEvent(msg: Record<string, unknown>): void {
+    const sid = sessionIdFromEvent(msg);
+    if (sid) this.conversationId = sid;
+    const events = parseAgyStreamEvent(msg);
+    for (const ev of events) {
+      if (ev.kind === 'text' || ev.kind === 'text-delta') this.streamedText = true;
+      if (ev.kind === 'result' || ev.kind === 'error') {
+        this.sawResult = true;
+        setBusy(this.session, false);
+      }
+      if (ev.kind === 'result' && this.streamedText) {
+        emit(this.session, { kind: 'result', text: '' });
+        continue;
+      }
+      emit(this.session, ev);
+    }
+  }
+
+  cancel(): void {
+    try {
+      this.proc?.kill();
+    } catch {
+      // already gone
+    }
+    this.proc = null;
+  }
+
+  close(): void {
+    this.cancel();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Mock adapter — deterministic canned conversation for tests and demos, so the
 // whole gateway → WS → phone chat pipeline can be exercised without any CLI.
 // ---------------------------------------------------------------------------
@@ -737,7 +1139,7 @@ class MockAdapter implements AgentAdapter {
         emit(s, { kind: 'tool-end', refId: 'mock-1', toolOutput: 'demo\n' });
         emit(s, {
           kind: 'text',
-          text: `You said: "${text}"\n\nThis is the **demo agent** — install Claude Code, Cursor CLI, or OpenCode on the PC to chat with a real agent here.\n\n\`\`\`diff\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,4 @@\n # NexusLink\n+Phone OS for your PC\n\`\`\``,
+          text: `You said: "${text}"\n\nThis is the **demo agent** — install Claude Code, Cursor CLI, OpenCode, or Antigravity on the PC to chat with a real agent here.\n\n\`\`\`diff\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,4 @@\n # NexusLink\n+Phone OS for your PC\n\`\`\``,
         });
         setBusy(s, false);
         emit(s, { kind: 'result', text: '' });

@@ -3,7 +3,7 @@
 Remote desktop that feels like a phone OS: the PC runs the apps, the phone is the
 screen. Tapping an app opens it in a **phone-shaped virtual display** on the host
 (your real desktop is never resized). Chrome launches with a mobile user-agent so
-sites reflow like native Chrome. Claude Code, Cursor CLI, and OpenCode run on the PC and
+sites reflow like native Chrome. Claude Code, Cursor CLI, OpenCode, and Antigravity run on the PC and
 show up as a chat UI on the phone.
 
 ## Architecture
@@ -16,7 +16,7 @@ phone (PWA or Flutter)
                  ├── MJPEG WS    → ffmpeg x11grab of that display (always-on)
                  ├── WebRTC      → GStreamer webrtcbin H.264 + Opus (upgrade)
                  ├── PTY         → python pty-host.py → xterm on the phone
-                 └── agents      → Claude Code / Cursor CLI / OpenCode → chat UI
+                 └── agents      → Claude Code / Cursor CLI / OpenCode / Antigravity → chat UI
 ```
 
 Control plane is the existing ECDH-paired JSON WebSocket. Video upgrades to
