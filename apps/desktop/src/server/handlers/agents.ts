@@ -30,30 +30,63 @@ export function setAgentBroadcast(fn: BroadcastFn): void {
 interface AgentDef {
   id: string;
   name: string;
-  bin?: string;
-  makeAdapter(session: AgentSession): AgentAdapter;
+  /** Candidate binaries, first match on PATH (plus well-known install dirs) wins. */
+  bins?: string[];
+  makeAdapter(session: AgentSession, bin?: string): AgentAdapter;
 }
 
-function which(bin: string): string | null {
-  for (const dir of (process.env.PATH ?? '').split(':')) {
+function extraBinDirs(): string[] {
+  const home = homedir();
+  return [
+    `${home}/.local/bin`,
+    `${home}/.cursor/bin`,
+    `${home}/.cursor/cli`,
+    '/usr/local/bin',
+    '/opt/cursor/bin',
+  ];
+}
+
+export function which(bin: string): string | null {
+  const dirs = [...(process.env.PATH ?? '').split(':'), ...extraBinDirs()];
+  const seen = new Set<string>();
+  for (const dir of dirs) {
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
     const p = `${dir}/${bin}`;
-    if (dir && existsSync(p)) return p;
+    if (existsSync(p)) return p;
   }
   return null;
+}
+
+export function resolveAgentBin(bins: string[]): string | null {
+  for (const bin of bins) {
+    const found = which(bin);
+    if (found) return found;
+  }
+  return null;
+}
+
+function spawnEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (typeof v === 'string') env[k] = v;
+  }
+  env.PATH = `${extraBinDirs().join(':')}:${env.PATH ?? ''}`;
+  return env;
 }
 
 const AGENT_DEFS: AgentDef[] = [
   {
     id: 'claude',
     name: 'Claude Code',
-    bin: 'claude',
-    makeAdapter: (s) => new ClaudeAdapter(s),
+    bins: ['claude'],
+    makeAdapter: (s, bin) => new ClaudeAdapter(s, bin ?? 'claude'),
   },
   {
     id: 'cursor',
     name: 'Cursor CLI',
-    bin: 'cursor-agent',
-    makeAdapter: (s) => new CursorAdapter(s),
+    bins: ['cursor-agent', 'agent'],
+    makeAdapter: (s, bin) => new CursorAdapter(s, bin ?? 'cursor-agent'),
   },
   {
     id: 'mock',
@@ -66,7 +99,7 @@ export function listAgents(): AgentInfo[] {
   return AGENT_DEFS.map((d) => ({
     id: d.id,
     name: d.name,
-    available: d.bin ? which(d.bin) !== null : true,
+    available: d.bins ? resolveAgentBin(d.bins) !== null : true,
   }));
 }
 
@@ -105,7 +138,8 @@ function setBusy(session: AgentSession, busy: boolean): void {
 export function createAgentSession(agentId: string, cwd?: string, title?: string): AgentSessionInfo {
   const def = AGENT_DEFS.find((d) => d.id === agentId);
   if (!def) throw new Error(`unknown agent: ${agentId}`);
-  if (def.bin && !which(def.bin)) throw new Error(`${def.name} CLI not installed on the host`);
+  const bin = def.bins ? resolveAgentBin(def.bins) : undefined;
+  if (def.bins && !bin) throw new Error(`${def.name} CLI not installed on the host`);
 
   const info: AgentSessionInfo = {
     agentSessionId: crypto.randomUUID(),
@@ -120,7 +154,7 @@ export function createAgentSession(agentId: string, cwd?: string, title?: string
     info, history: [], adapter: null as unknown as AgentAdapter, seq: 0,
     pendingPermissions: new Map(),
   };
-  session.adapter = def.makeAdapter(session);
+  session.adapter = def.makeAdapter(session, bin ?? undefined);
   agentSessions.set(info.agentSessionId, session);
   return { ...info };
 }
@@ -203,9 +237,88 @@ async function pumpJsonLines(proc: Proc, onLine: (msg: Record<string, unknown>) 
         }
       }
     }
+    const tail = buf.trim();
+    if (tail) {
+      try {
+        onLine(JSON.parse(tail));
+      } catch {
+        // leftover non-JSON
+      }
+    }
   } finally {
     reader.releaseLock();
   }
+}
+
+async function collectStream(stream: ReadableStream<Uint8Array> | undefined): Promise<string> {
+  if (!stream) return '';
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let out = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      out += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return out.trim();
+}
+
+/** Nested Cursor CLI tool_call payload → a display name + args/result. */
+export function parseCursorToolCall(msg: Record<string, unknown>): {
+  name: string;
+  args: unknown;
+  result: unknown;
+} {
+  const nested = msg.tool_call;
+  if (nested && typeof nested === 'object') {
+    const rec = nested as Record<string, unknown>;
+    if (typeof rec.name === 'string') {
+      return { name: rec.name, args: rec.args ?? rec.arguments ?? rec, result: rec.result };
+    }
+    const entries = Object.entries(rec);
+    if (entries.length) {
+      const [key, val] = entries[0]!;
+      const body = val && typeof val === 'object' ? (val as Record<string, unknown>) : {};
+      const name =
+        key === 'function' && typeof body.name === 'string'
+          ? body.name
+          : key.replace(/ToolCall$/, '') || 'tool';
+      return { name, args: body.args ?? body.arguments ?? body, result: body.result };
+    }
+  }
+  return {
+    name: String(msg.name ?? 'tool'),
+    args: msg.args ?? {},
+    result: msg.result,
+  };
+}
+
+/**
+ * Headless Cursor CLI argv. `--trust` and `--force` are required: without them
+ * `cursor-agent --print` blocks on a TTY workspace/permission prompt, stdout
+ * stays empty, and the phone chat looks frozen after the user's bubble.
+ */
+export function buildCursorCliArgs(
+  bin: string,
+  prompt: string,
+  opts: { sessionId?: string | null; cwd: string },
+): string[] {
+  const argv = [
+    bin,
+    '--print',
+    '--output-format', 'stream-json',
+    '--trust',
+    '--force',
+    '--approve-mcps',
+    '--workspace', opts.cwd,
+  ];
+  if (opts.sessionId) argv.push('--resume', opts.sessionId);
+  argv.push(prompt);
+  return argv;
 }
 
 function contentToText(content: unknown): string {
@@ -230,13 +343,13 @@ function contentToText(content: unknown): string {
 class ClaudeAdapter implements AgentAdapter {
   private proc: Proc | null = null;
 
-  constructor(private session: AgentSession) {}
+  constructor(private session: AgentSession, private bin = 'claude') {}
 
   private ensureProc(): Proc {
     if (this.proc && this.proc.exitCode === null && !this.proc.killed) return this.proc;
     this.proc = Bun.spawn(
       [
-        'claude', '--print',
+        this.bin, '--print',
         '--input-format', 'stream-json',
         '--output-format', 'stream-json',
         '--verbose',
@@ -247,6 +360,7 @@ class ClaudeAdapter implements AgentAdapter {
         stdin: 'pipe',
         stdout: 'pipe',
         stderr: 'ignore',
+        env: spawnEnv(),
       } as unknown as SpawnOpts,
     );
     void pumpJsonLines(this.proc, (msg) => this.onEvent(msg)).catch(() => {});
@@ -373,70 +487,143 @@ class CursorAdapter implements AgentAdapter {
   private proc: Proc | null = null;
   private chatId: string | null = null;
   private sawResult = false;
+  private sawAssistantText = false;
+  private stderr = '';
 
-  constructor(private session: AgentSession) {}
+  constructor(private session: AgentSession, private bin = 'cursor-agent') {}
 
   prompt(text: string): void {
+    this.cancel();
     this.sawResult = false;
-    const argv = ['cursor-agent', '--print', '--output-format', 'stream-json'];
-    if (this.chatId) argv.push('--resume', this.chatId);
-    argv.push(text);
-    this.proc = Bun.spawn(argv, {
+    this.sawAssistantText = false;
+    this.stderr = '';
+    emit(this.session, { kind: 'thinking', text: 'Waiting for Cursor CLI…' });
+
+    const argv = buildCursorCliArgs(this.bin, text, {
+      sessionId: this.chatId,
       cwd: this.session.info.cwd,
-      stdin: 'ignore',
-      stdout: 'pipe',
-      stderr: 'ignore',
-    } as unknown as SpawnOpts);
-    void pumpJsonLines(this.proc, (msg) => this.onEvent(msg)).catch(() => {});
-    this.proc.exited.then(() => {
-      if (this.session.info.busy) {
-        setBusy(this.session, false);
-        if (!this.sawResult) emit(this.session, { kind: 'result', text: '' });
-      }
+    });
+
+    let proc: Proc;
+    try {
+      proc = Bun.spawn(argv, {
+        cwd: this.session.info.cwd,
+        stdin: 'ignore',
+        stdout: 'pipe',
+        stderr: 'pipe',
+        env: spawnEnv(),
+      } as unknown as SpawnOpts);
+    } catch (err) {
+      setBusy(this.session, false);
+      emit(this.session, {
+        kind: 'error',
+        text: `Could not start Cursor CLI (${this.bin}): ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+
+    this.proc = proc;
+    const stderrP = collectStream(proc.stderr as unknown as ReadableStream<Uint8Array>);
+    void pumpJsonLines(proc, (msg) => {
+      if (this.proc === proc) this.onEvent(msg);
     }).catch(() => {});
+    proc.exited.then(async (code) => {
+      const errText = await stderrP.catch(() => '');
+      if (this.proc !== proc) return;
+      this.proc = null;
+      this.stderr = errText;
+      if (this.sawResult) return;
+      setBusy(this.session, false);
+      emit(this.session, { kind: 'error', text: this.failMessage(code) });
+    }).catch(() => {});
+  }
+
+  private failMessage(code: number | null): string {
+    const err = this.stderr.replace(/\s+/g, ' ').trim();
+    const loginHint = ' On the PC run `cursor-agent login` (or set CURSOR_API_KEY).';
+    if (/log ?in|auth|api[- ]key|unauthorized|not signed/i.test(err)) {
+      return (err || 'Cursor CLI is not signed in.') + loginHint;
+    }
+    if (err) return err.slice(0, 1500);
+    return `Cursor CLI exited without a reply (code ${code ?? 'unknown'}).${loginHint}`;
   }
 
   private onEvent(msg: Record<string, unknown>): void {
     const s = this.session;
-    // Remember the chat id from any event that carries one (init/system events).
     for (const key of ['chatId', 'chat_id', 'sessionId', 'session_id']) {
-      if (typeof msg[key] === 'string') this.chatId = msg[key] as string;
+      if (typeof msg[key] === 'string' && (msg[key] as string).length > 0) {
+        this.chatId = msg[key] as string;
+      }
     }
     const type = msg.type;
     if (type === 'assistant') {
+      // Skip duplicate flushes from --stream-partial-output (model_call_id, or
+      // final flush with no timestamp after we already showed text).
+      if (msg.model_call_id) return;
       const message = msg.message as Record<string, unknown> | undefined;
       const text = contentToText(message?.content);
-      if (text.trim()) emit(s, { kind: 'text', text });
+      if (!text.trim()) return;
+      const isDelta = typeof msg.timestamp_ms === 'number';
+      if (isDelta) {
+        emit(s, { kind: 'text-delta', text });
+        this.sawAssistantText = true;
+      } else if (!this.sawAssistantText || !msg.timestamp_ms) {
+        // Complete assistant message (no --stream-partial-output). Skip the
+        // trailing duplicate flush that has neither timestamp nor new content
+        // after deltas — handled above via sawAssistantText + empty skip.
+        if (this.sawAssistantText) return;
+        emit(s, { kind: 'text', text });
+        this.sawAssistantText = true;
+      }
     } else if (type === 'tool_call') {
       const sub = msg.subtype;
+      const parsed = parseCursorToolCall(msg);
+      const refId = String(msg.call_id ?? msg.id ?? '');
       if (sub === 'started') {
         emit(s, {
           kind: 'tool-start',
-          toolName: String(msg.name ?? (msg.tool_call as Record<string, unknown>)?.name ?? 'tool'),
-          toolInput: JSON.stringify(msg.args ?? msg.tool_call ?? {}, null, 2).slice(0, 4000),
-          refId: String(msg.call_id ?? msg.id ?? ''),
+          toolName: parsed.name,
+          toolInput: JSON.stringify(parsed.args ?? {}, null, 2).slice(0, 4000),
+          refId,
         });
       } else if (sub === 'completed') {
         emit(s, {
           kind: 'tool-end',
-          refId: String(msg.call_id ?? msg.id ?? ''),
-          toolOutput: JSON.stringify(msg.result ?? {}, null, 2).slice(0, 4000),
+          toolName: parsed.name,
+          refId,
+          toolOutput: JSON.stringify(parsed.result ?? {}, null, 2).slice(0, 4000),
         });
       }
     } else if (type === 'result') {
       this.sawResult = true;
       setBusy(s, false);
-      emit(s, { kind: 'result', text: typeof msg.result === 'string' ? msg.result : '' });
+      const text = typeof msg.result === 'string' ? msg.result : '';
+      if (msg.is_error) {
+        emit(s, { kind: 'error', text: text || this.stderr || 'Cursor CLI reported an error' });
+      } else if (text && !this.sawAssistantText) {
+        emit(s, { kind: 'text', text });
+      } else {
+        emit(s, { kind: 'result', text: '' });
+      }
+      // cursor-agent --print often hangs after writing the result event.
+      try {
+        this.proc?.kill();
+      } catch {
+        // already exiting
+      }
+    } else if (type === 'system' && msg.subtype === 'init') {
+      emit(s, { kind: 'status', text: 'ready' });
     }
   }
 
   cancel(): void {
+    const proc = this.proc;
+    this.proc = null;
     try {
-      this.proc?.kill();
+      proc?.kill();
     } catch {
       // already gone
     }
-    this.proc = null;
   }
 
   close(): void {
