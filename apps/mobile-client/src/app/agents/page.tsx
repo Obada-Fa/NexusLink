@@ -70,6 +70,18 @@ export default function AgentsPage() {
       if (!m.event || m.agentSessionId !== activeIdRef.current) return;
       if (m.event.kind === 'user') setBusy(true);
       if (m.event.kind === 'result' || m.event.kind === 'error') setBusy(false);
+      if (m.event.kind === 'text-delta') {
+        const delta = m.event.text || '';
+        if (!delta) return;
+        setEvents((prev) => {
+          const last = prev[prev.length - 1];
+          if (last?.kind === 'text') {
+            return [...prev.slice(0, -1), { ...last, text: (last.text || '') + delta }];
+          }
+          return [...prev, { ...m.event!, kind: 'text' }];
+        });
+        return;
+      }
       if (m.event.kind === 'result' && !(m.event.text || '').trim()) return;
       if (m.event.kind === 'status') return;
       setEvents((prev) => [...prev, m.event!]);
