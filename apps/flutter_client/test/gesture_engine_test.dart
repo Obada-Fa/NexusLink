@@ -39,19 +39,24 @@ void main() {
       expect(result.y, 540);
     });
 
-    test('handles wider view than host (letterbox top/bottom)', () {
+    test('handles wider view than host (letterbox left/right)', () {
       final result = scaleToHost(100, 50, 200, 100, 1920, 1080);
       expect(result.x, 960);
-      expect(result.y, greaterThan(0));
-      expect(result.y, lessThan(1080));
+      expect(result.y, 540);
     });
 
-    test('handles taller view than host (letterbox left/right)', () {
+    test('handles taller view than host (letterbox top/bottom)', () {
       final result = scaleToHost(50, 100, 100, 200, 1920, 1080);
-      expect(result.x, greaterThan(0));
-      expect(result.x, lessThan(1920));
-      expect(result.y, greaterThan(0));
-      expect(result.y, lessThan(1080));
+      expect(result.x, 960);
+      expect(result.y, 540);
+    });
+
+    test('maps a tap on the painted content, not the letterbox, on a tall phone', () {
+      final mid = scaleToHost(195, 390, 390, 780, 1920, 1080);
+      expect(mid.x, 960);
+      expect(mid.y, 540);
+      final topBar = scaleToHost(195, 10, 390, 780, 1920, 1080);
+      expect(topBar.y, 0);
     });
 
     test('clamps output to host bounds', () {
