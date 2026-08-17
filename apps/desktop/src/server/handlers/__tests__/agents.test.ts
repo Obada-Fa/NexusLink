@@ -13,6 +13,7 @@ import {
   setAgentBroadcast,
   finishCliTurn,
   parseCursorStreamEvent,
+  withoutDuplicateResult,
   parseOpencodeStreamEvent,
   parseAgyStreamEvent,
   describeCursorToolCall,
@@ -390,6 +391,13 @@ describe('CLI stream parsers', () => {
     expect(describeCursorToolCall({ writeToolCall: { args: { path: 'a.txt' } } }).name).toBe(
       'write',
     );
+
+    expect(
+      withoutDuplicateResult({ kind: 'result', text: "I'll read README.mdDone." }, true),
+    ).toEqual({ kind: 'result', text: '' });
+    expect(
+      withoutDuplicateResult({ kind: 'result', text: 'only in the result event' }, false),
+    ).toEqual({ kind: 'result', text: 'only in the result event' });
   });
 
   test('parses OpenCode run --format json text and tools', () => {

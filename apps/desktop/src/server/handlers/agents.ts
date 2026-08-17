@@ -890,6 +890,15 @@ export function parseCursorStreamEvent(msg: Record<string, unknown>): AgentDelta
   return [];
 }
 
+/** Phone paints `result` as a chat bubble — blank it if the reply already streamed. */
+export function withoutDuplicateResult(
+  ev: AgentDelta,
+  streamedText: boolean,
+): AgentDelta {
+  if (ev.kind === 'result' && streamedText) return { kind: 'result', text: '' };
+  return ev;
+}
+
 export function parseOpencodeStreamEvent(msg: Record<string, unknown>): AgentDelta[] {
   const type = msg.type;
   const part = (msg.part as Record<string, unknown> | undefined) ?? {};
@@ -1198,6 +1207,8 @@ class CursorAdapter implements AgentAdapter {
   private proc: Proc | null = null;
   private chatId: string | null = null;
   private sawResult = false;
+  private streamedText = false;
+  private lastText = '';
   private apiKey = process.env.CURSOR_API_KEY || '';
   private loggingIn = false;
   private autoLoginAttempted = false;
@@ -1233,6 +1244,8 @@ class CursorAdapter implements AgentAdapter {
   private runPrompt(text: string, opts?: AdapterPromptOpts): void {
     this.cancel();
     this.sawResult = false;
+    this.streamedText = false;
+    this.lastText = '';
     const bin = resolveBin('cursor-agent') ?? 'cursor-agent';
     const argv = buildCursorArgv({
       bin,
@@ -1366,11 +1379,16 @@ class CursorAdapter implements AgentAdapter {
     if (sid) this.chatId = sid;
     const events = parseCursorStreamEvent(msg);
     for (const ev of events) {
+      if (ev.kind === 'text' || ev.kind === 'text-delta') {
+        if ((ev.text ?? '') === this.lastText) continue;
+        this.lastText = ev.text ?? '';
+        this.streamedText = true;
+      }
       if (ev.kind === 'result' || ev.kind === 'error') {
         this.sawResult = true;
         setBusy(this.session, false);
       }
-      emit(this.session, ev);
+      emit(this.session, withoutDuplicateResult(ev, this.streamedText));
     }
   }
 
@@ -1556,11 +1574,7 @@ class AntigravityAdapter implements AgentAdapter {
         this.sawResult = true;
         setBusy(this.session, false);
       }
-      if (ev.kind === 'result' && this.streamedText) {
-        emit(this.session, { kind: 'result', text: '' });
-        continue;
-      }
-      emit(this.session, ev);
+      emit(this.session, withoutDuplicateResult(ev, this.streamedText));
     }
   }
 
