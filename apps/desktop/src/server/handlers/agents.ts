@@ -913,6 +913,125 @@ export function rewriteCliAuthError(stderr: string, agentName: string): string {
   return stderr.trim();
 }
 
+function asToolRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function pickToolString(obj: Record<string, unknown>, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = obj[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function toolBasename(path: string): string {
+  const trimmed = path.replace(/\/+$/, '');
+  const i = trimmed.lastIndexOf('/');
+  return i < 0 ? trimmed : trimmed.slice(i + 1);
+}
+
+/** One-line summary of what a Cursor tool is doing — no raw JSON on the phone. */
+export function formatCursorToolInput(name: string, args: unknown): string {
+  const a = asToolRecord(args);
+  const tool = name.toLowerCase();
+
+  if (tool === 'shell' || tool === 'bash') {
+    return pickToolString(a, 'command', 'cmd');
+  }
+  if (tool === 'read' || tool === 'write' || tool === 'edit' || tool === 'delete') {
+    return pickToolString(a, 'path', 'file', 'target_file');
+  }
+  if (tool === 'readlints') {
+    const paths = a.paths;
+    if (Array.isArray(paths) && paths.length) {
+      return paths.map((p) => toolBasename(String(p))).join(', ');
+    }
+    return pickToolString(a, 'path');
+  }
+  if (tool === 'grep' || tool === 'search') {
+    const pattern = pickToolString(a, 'pattern', 'query');
+    const path = pickToolString(a, 'path', 'glob');
+    return path ? `${pattern} in ${toolBasename(path) || path}` : pattern;
+  }
+  if (tool === 'glob' || tool === 'glob_file_search') {
+    return pickToolString(a, 'pattern', 'glob_pattern', 'glob');
+  }
+  if (tool === 'list' || tool === 'ls') {
+    return pickToolString(a, 'path', 'target_directory') || '.';
+  }
+  if (tool === 'webfetch' || tool === 'fetch') {
+    return pickToolString(a, 'url');
+  }
+  if (tool === 'task') {
+    return pickToolString(a, 'description', 'prompt');
+  }
+
+  for (const key of ['command', 'path', 'query', 'pattern', 'url', 'description', 'prompt']) {
+    const text = pickToolString(a, key);
+    if (text) return text;
+  }
+  return '';
+}
+
+/** Short tool result for the phone — hide empty success payloads and metadata JSON. */
+export function formatCursorToolOutput(name: string, result: unknown): string {
+  if (result == null) return '';
+  if (typeof result === 'string') return result.trim().slice(0, 2000);
+
+  const r = asToolRecord(result);
+  const tool = name.toLowerCase();
+  const failure = asToolRecord(r.failure);
+  if (Object.keys(failure).length) {
+    return pickToolString(failure, 'message', 'error', 'reason') || 'failed';
+  }
+
+  const success = asToolRecord(r.success);
+  const bag = Object.keys(success).length ? success : r;
+
+  if (tool === 'shell' || tool === 'bash') {
+    const stdout = pickToolString(bag, 'stdout', 'output', 'stdoutText');
+    const stderr = pickToolString(bag, 'stderr');
+    const exitCode = bag.exitCode ?? r.exitCode;
+    if (stdout) return stdout.slice(0, 2000);
+    if (stderr) return stderr.slice(0, 500);
+    if (exitCode === 0 || exitCode === '0') return '';
+    if (exitCode != null && exitCode !== '') return `exit ${exitCode}`;
+    return '';
+  }
+
+  if (tool === 'readlints') {
+    const count = bag.totalDiagnostics ?? r.totalDiagnostics;
+    if (count === 0 || count === '0') return '';
+    return `${count} issue(s)`;
+  }
+
+  if (tool === 'read') {
+    const content = bag.content ?? bag.text;
+    if (typeof content === 'string' && content.trim()) return content.slice(0, 2000);
+  }
+
+  if (tool === 'write' || tool === 'edit' || tool === 'delete') {
+    return '';
+  }
+
+  const text = pickToolString(bag, 'output', 'text', 'content', 'message');
+  if (text) return text.slice(0, 2000);
+
+  const keys = Object.keys(r);
+  if (
+    keys.length <= 3 &&
+    keys.some((k) => k === 'success' || k === 'exitCode' || k === 'command')
+  ) {
+    return '';
+  }
+  if (r.totalDiagnostics === 0 || bag.totalDiagnostics === 0) return '';
+
+  return '';
+}
+
 /** Cursor CLI nests tools as `{ readToolCall: { args, result } }` rather than `{ name, args }`. */
 export function describeCursorToolCall(toolCall: unknown): {
   name: string;
@@ -958,7 +1077,7 @@ export function parseCursorStreamEvent(msg: Record<string, unknown>): AgentDelta
       return [{
         kind: 'tool-start',
         toolName: meta.name,
-        toolInput: JSON.stringify(meta.args, null, 2).slice(0, 4000),
+        toolInput: formatCursorToolInput(meta.name, meta.args).slice(0, 500),
         refId,
       }];
     }
@@ -967,7 +1086,7 @@ export function parseCursorStreamEvent(msg: Record<string, unknown>): AgentDelta
         kind: 'tool-end',
         toolName: meta.name,
         refId,
-        toolOutput: JSON.stringify(meta.result, null, 2).slice(0, 4000),
+        toolOutput: formatCursorToolOutput(meta.name, meta.result).slice(0, 2000),
       }];
     }
     return [];

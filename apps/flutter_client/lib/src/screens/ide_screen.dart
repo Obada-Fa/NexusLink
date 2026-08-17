@@ -8,6 +8,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
+import '../widgets/not_connected_view.dart';
 
 class IdeScreen extends ConsumerStatefulWidget {
   const IdeScreen({super.key});
@@ -80,14 +81,26 @@ class _IdeScreenState extends ConsumerState<IdeScreen> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
-              ? Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Center(
-                    child: Text(_error!,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(color: Colors.white70)),
-                  ),
-                )
+              ? looksLikeConnectionError(_error)
+                  ? NotConnectedView(
+                      message: _error!,
+                      onReconnected: () {
+                        setState(() {
+                          _loading = true;
+                          _error = null;
+                          _web = null;
+                        });
+                        _start();
+                      },
+                    )
+                  : Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Center(
+                        child: Text(_error!,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(color: Colors.white70)),
+                      ),
+                    )
               : _web != null
                   ? WebViewWidget(controller: _web!)
                   : const SizedBox.shrink(),

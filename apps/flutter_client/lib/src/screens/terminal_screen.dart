@@ -8,6 +8,7 @@ import 'package:xterm/xterm.dart';
 
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
+import '../widgets/not_connected_view.dart';
 
 class ExtraKey {
   final String label;
@@ -221,6 +222,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
 
   Widget _body() {
     if (_error != null) {
+      if (looksLikeConnectionError(_error)) {
+        return NotConnectedView(
+          message: _error!,
+          onReconnected: () {
+            setState(() => _error = null);
+            _start();
+          },
+        );
+      }
       return Center(
           child: Text(_error!, style: const TextStyle(color: Colors.white70)));
     }

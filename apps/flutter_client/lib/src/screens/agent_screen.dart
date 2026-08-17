@@ -16,6 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
+import '../widgets/not_connected_view.dart';
 import 'cwd_picker.dart';
 
 class AgentScreen extends ConsumerStatefulWidget {
@@ -1006,9 +1007,20 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         body: _loading
             ? const Center(child: CircularProgressIndicator())
             : _error != null
-                ? Center(
-                    child: Text(_error!,
-                        style: const TextStyle(color: Colors.white70)))
+                ? looksLikeConnectionError(_error)
+                    ? NotConnectedView(
+                        message: _error!,
+                        onReconnected: () {
+                          setState(() {
+                            _loading = true;
+                            _error = null;
+                          });
+                          _load();
+                        },
+                      )
+                    : Center(
+                        child: Text(_error!,
+                            style: const TextStyle(color: Colors.white70)))
                 : _active == null
                     ? _picker()
                     : _chat(),
@@ -1086,15 +1098,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   }
 
   Widget _chat() {
+    final display = _displayEvents(_events);
     return Column(
       children: [
         Expanded(
           child: ListView.builder(
             controller: _scroll,
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-            itemCount: _events.length + (_busy ? 1 : 0),
+            itemCount: display.length + (_busy ? 1 : 0),
             itemBuilder: (_, i) {
-              if (i >= _events.length) {
+              if (i >= display.length) {
                 return const Padding(
                   padding: EdgeInsets.symmetric(vertical: 4, horizontal: 8),
                   child: Text('Working…',
@@ -1104,13 +1117,44 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                           fontStyle: FontStyle.italic)),
                 );
               }
-              return _bubble(_events[i]);
+              return _bubble(display[i]);
             },
           ),
         ),
         _composer(),
       ],
     );
+  }
+
+  /// Merge tool-start + tool-end pairs so each tool shows as one compact row.
+  List<AgentEvent> _displayEvents(List<AgentEvent> events) {
+    final out = <AgentEvent>[];
+    final startIdx = <String, int>{};
+
+    for (final e in events) {
+      final ref = e.refId ?? '';
+      if (e.kind == 'tool-start' && ref.isNotEmpty) {
+        startIdx[ref] = out.length;
+        out.add(e);
+        continue;
+      }
+      if (e.kind == 'tool-end' && ref.isNotEmpty && startIdx.containsKey(ref)) {
+        final i = startIdx.remove(ref)!;
+        final start = out[i];
+        out[i] = AgentEvent(
+          seq: e.seq,
+          ts: e.ts,
+          kind: 'tool-end',
+          toolName: e.toolName ?? start.toolName,
+          toolInput: start.toolInput,
+          toolOutput: e.toolOutput,
+          refId: ref,
+        );
+        continue;
+      }
+      out.add(e);
+    }
+    return out;
   }
 
   Widget _bubble(AgentEvent e) {
@@ -1226,12 +1270,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   }
 
   Widget _toolCard(AgentEvent e, {required bool running}) {
+    final detail = (e.toolInput ?? '').trim();
+    final output = (e.toolOutput ?? '').trim();
+    final showDetail = detail.isNotEmpty && detail != (e.toolName ?? '');
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      padding: const EdgeInsets.all(10),
+      margin: const EdgeInsets.symmetric(vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
         color: const Color(0xFF12121C),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(8),
         border: Border.all(color: const Color(0xFF22223A)),
       ),
       child: Column(
@@ -1245,34 +1292,40 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                       ? const Color(0xFFF0C040)
                       : const Color(0xFF4ADE80)),
               const SizedBox(width: 6),
-              Text(e.toolName ?? 'tool',
+              Expanded(
+                child: Text(
+                  e.toolName ?? 'tool',
                   style: const TextStyle(
-                      fontWeight: FontWeight.w600, fontSize: 12)),
+                      fontWeight: FontWeight.w600, fontSize: 12),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
             ],
           ),
-          if ((e.toolInput ?? '').isNotEmpty)
+          if (showDetail)
             Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Text(e.toolInput!,
-                  maxLines: 6,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 11,
-                      color: Colors.white54)),
+              padding: const EdgeInsets.only(top: 4, left: 20),
+              child: Text(
+                detail,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 11, color: Colors.white54),
+              ),
             ),
-          if (!running && (e.toolOutput ?? '').isNotEmpty)
+          if (!running && output.isNotEmpty)
             Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Text(e.toolOutput!,
-                  maxLines: _looksLikeDiff(e.toolOutput!) ? 20 : 8,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                      fontFamily: 'monospace',
-                      fontSize: 11,
-                      color: _looksLikeDiff(e.toolOutput!)
-                          ? const Color(0xFF93C5FD)
-                          : const Color(0xFF6EE7B7))),
+              padding: const EdgeInsets.only(top: 4, left: 20),
+              child: Text(
+                output,
+                maxLines: _looksLikeDiff(output) ? 12 : 4,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontFamily: _looksLikeDiff(output) ? 'monospace' : null,
+                    fontSize: 11,
+                    color: _looksLikeDiff(output)
+                        ? const Color(0xFF93C5FD)
+                        : const Color(0xFF6EE7B7)),
+              ),
             ),
         ],
       ),

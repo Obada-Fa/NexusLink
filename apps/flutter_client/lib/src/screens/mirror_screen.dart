@@ -14,6 +14,7 @@ import '../gestures/gesture_engine.dart';
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
+import '../widgets/not_connected_view.dart';
 
 /// What to show: a virtual app session (sessionAppId launches a new one,
 /// sessionId re-attaches), an existing window (windowId), an app to launch on
@@ -657,6 +658,19 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           );
         });
       case MirrorPhase.error:
+        if (looksLikeConnectionError(_errorMsg)) {
+          return NotConnectedView(
+            message: _errorMsg,
+            onReconnected: () {
+              setState(() {
+                _started = false;
+                _errorMsg = '';
+                _phase = MirrorPhase.launching;
+              });
+              _start();
+            },
+          );
+        }
         return _centered(Icons.warning_amber, _errorMsg, action: 'Back to apps');
       default:
         return _centered(

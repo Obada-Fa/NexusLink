@@ -20,6 +20,8 @@ import {
   parseOpencodeStreamEvent,
   parseAgyStreamEvent,
   describeCursorToolCall,
+  formatCursorToolInput,
+  formatCursorToolOutput,
   sessionIdFromEvent,
   looksLikeAgentLogin,
   parseEnvApiKey,
@@ -411,6 +413,20 @@ describe('CLI stream parsers', () => {
 
     expect(describeCursorToolCall({ writeToolCall: { args: { path: 'a.txt' } } }).name).toBe(
       'write',
+    );
+
+    expect(formatCursorToolInput('shell', { command: 'dart analyze lib/' })).toBe(
+      'dart analyze lib/',
+    );
+    expect(formatCursorToolInput('readLints', { paths: ['/a/page.tsx', '/b/lib.ts'] })).toBe(
+      'page.tsx, lib.ts',
+    );
+    expect(formatCursorToolOutput('shell', { command: 'echo hi', exitCode: 0 })).toBe('');
+    expect(formatCursorToolOutput('readLints', { totalDiagnostics: 0, fileDiagnostics: [] })).toBe(
+      '',
+    );
+    expect(formatCursorToolOutput('shell', { success: { stdout: 'ok\n', exitCode: 0 } })).toBe(
+      'ok',
     );
 
     expect(

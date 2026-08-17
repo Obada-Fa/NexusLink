@@ -4,6 +4,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useConnectionStore } from '@/store/connection';
 import type { RpcClient } from '@/lib/rpc-client';
+import {
+  comparePathNames,
+  folderDisplayName,
+  loadLastAgentCwd,
+  saveLastAgentCwd,
+} from '@/lib/last-cwd';
 
 interface AgentInfo {
   id: string;
@@ -59,9 +65,41 @@ function parentUnixPath(path: string): string {
   return i <= 0 ? '/' : trimmed.slice(0, i);
 }
 
+function mergeToolEvents(events: AgentEvent[]): AgentEvent[] {
+  const out: AgentEvent[] = [];
+  const startIdx = new Map<string, number>();
+
+  for (const e of events) {
+    const ref = e.refId ?? '';
+    if (e.kind === 'tool-start' && ref) {
+      startIdx.set(ref, out.length);
+      out.push(e);
+      continue;
+    }
+    if (e.kind === 'tool-end' && ref && startIdx.has(ref)) {
+      const i = startIdx.get(ref)!;
+      startIdx.delete(ref);
+      const start = out[i]!;
+      out[i] = {
+        ...start,
+        seq: e.seq,
+        ts: e.ts,
+        kind: 'tool-end',
+        toolName: e.toolName ?? start.toolName,
+        toolOutput: e.toolOutput,
+      };
+      continue;
+    }
+    out.push(e);
+  }
+  return out;
+}
+
 export default function AgentsPage() {
   const client = useConnectionStore((s) => s.client);
   const status = useConnectionStore((s) => s.status);
+  const connect = useConnectionStore((s) => s.connect);
+  const hostUrl = useConnectionStore((s) => s.hostUrl);
   const router = useRouter();
 
   const [agents, setAgents] = useState<AgentInfo[]>([]);
@@ -72,10 +110,24 @@ export default function AgentsPage() {
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
   const [picking, setPicking] = useState<AgentInfo | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
   const unsubRef = useRef<(() => void) | null>(null);
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = active?.agentSessionId ?? null;
+
+  const handleReconnect = useCallback(async () => {
+    if (!hostUrl) return;
+    setReconnecting(true);
+    setError('');
+    try {
+      await connect(hostUrl);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not reconnect.');
+    } finally {
+      setReconnecting(false);
+    }
+  }, [connect, hostUrl]);
 
   useEffect(() => {
     if (status !== 'connected' || !client) return;
@@ -199,7 +251,17 @@ export default function AgentsPage() {
       </header>
 
       {status !== 'connected' ? (
-        <p style={styles.center}>Not connected to the PC.</p>
+        <div style={styles.disconnected}>
+          <p style={styles.center}>Not connected to the PC.</p>
+          <button
+            type="button"
+            onClick={() => void handleReconnect()}
+            disabled={reconnecting || !hostUrl}
+            style={styles.reconnectBtnLarge}
+          >
+            {reconnecting ? 'Reconnecting…' : 'Reconnect'}
+          </button>
+        </div>
       ) : error ? (
         <p style={styles.center}>{error}</p>
       ) : !active ? (
@@ -241,7 +303,7 @@ export default function AgentsPage() {
       ) : (
         <>
           <div ref={listRef} style={styles.chat}>
-            {events.map((e, i) => (
+            {mergeToolEvents(events).map((e, i) => (
               <Bubble key={`${e.seq}-${i}`} e={e} />
             ))}
           </div>
@@ -288,12 +350,21 @@ function CwdPicker({
   const [browse, setBrowse] = useState(false);
   const [home, setHome] = useState('/');
   const [cwd, setCwd] = useState('/');
+  const [recentPath, setRecentPath] = useState<string | null>(null);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [dirs, setDirs] = useState<DirEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [typed, setTyped] = useState('');
   const [entering, setEntering] = useState(false);
+
+  const pick = useCallback(
+    (path: string) => {
+      saveLastAgentCwd(path);
+      onPick(path);
+    },
+    [onPick],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -303,17 +374,28 @@ function CwdPicker({
         const info = (await client.request('system.getInfo')) as { homeDir?: string };
         if (info.homeDir) homeDir = info.homeDir;
       } catch { /* keep / */ }
+      const recent = loadLastAgentCwd();
+      const seen = new Set<string>();
       const hints: ProjectInfo[] = [{ name: 'Home', path: homeDir }];
+      seen.add(homeDir);
+      if (recent) seen.add(recent);
       try {
         const listed = (await client.request('fs.listProjects')) as ProjectInfo[];
         for (const p of listed) {
-          if (!hints.some((h) => h.path === p.path)) hints.push(p);
+          if (!p.path || seen.has(p.path)) continue;
+          seen.add(p.path);
+          hints.push(p);
         }
       } catch { /* suggestions optional */ }
+      const sorted = [
+        hints[0],
+        ...hints.slice(1).sort((a, b) => comparePathNames(a.name, b.name)),
+      ];
       if (!cancelled) {
         setHome(homeDir);
         setCwd(homeDir);
-        setProjects(hints);
+        setRecentPath(recent);
+        setProjects(sorted);
         setLoading(false);
       }
     })();
@@ -329,7 +411,11 @@ function CwdPicker({
       setCwd(path);
       try {
         const entries = (await client.request('fs.list', { path })) as DirEntry[];
-        setDirs(entries.filter((e) => e.isDirectory));
+        setDirs(
+          entries
+            .filter((e) => e.isDirectory)
+            .sort((a, b) => comparePathNames(a.name, b.name)),
+        );
       } catch (e) {
         setDirs([]);
         setError(e instanceof Error ? e.message : 'Could not list folder');
@@ -358,7 +444,7 @@ function CwdPicker({
           )}
           <strong>{browse ? 'Browse folders' : 'Working directory'}</strong>
           {browse ? (
-            <button type="button" onClick={() => onPick(cwd)} style={styles.selectBtn}>
+            <button type="button" onClick={() => pick(cwd)} style={styles.selectBtn}>
               Use this folder
             </button>
           ) : (
@@ -400,7 +486,7 @@ function CwdPicker({
               onSubmit={(e) => {
                 e.preventDefault();
                 const path = typed.trim();
-                if (path) onPick(path);
+                if (path) pick(path);
               }}
             >
               <input
@@ -432,12 +518,25 @@ function CwdPicker({
                 <span style={styles.muted}>Type or paste a folder path</span>
               </button>
               <h2 style={styles.section}>Suggestions</h2>
-              {projects.map((p) => (
-                <button key={p.path} type="button" onClick={() => onPick(p.path)} style={styles.row}>
-                  <strong>{p.name}</strong>
-                  <span style={styles.muted}>{p.path}</span>
+              {recentPath && (
+                <button
+                  key={`recent-${recentPath}`}
+                  type="button"
+                  onClick={() => pick(recentPath)}
+                  style={styles.row}
+                >
+                  <strong>{folderDisplayName(recentPath)}</strong>
+                  <span style={styles.muted}>{recentPath}</span>
                 </button>
-              ))}
+              )}
+              {projects
+                .filter((p) => p.path !== recentPath)
+                .map((p) => (
+                  <button key={p.path} type="button" onClick={() => pick(p.path)} style={styles.row}>
+                    <strong>{p.name}</strong>
+                    <span style={styles.muted}>{p.path}</span>
+                  </button>
+                ))}
             </>
           )}
         </div>
@@ -457,13 +556,16 @@ function Bubble({ e }: { e: AgentEvent }) {
     return <div style={styles.thinking}>{e.text || 'Thinking…'}</div>;
   }
   if (e.kind === 'tool-start' || e.kind === 'tool-end') {
+    const detail = e.toolInput?.trim();
+    const output = e.toolOutput?.trim();
+    const running = e.kind === 'tool-start';
     return (
       <div style={styles.tool}>
         <strong>
-          {e.kind === 'tool-end' ? '✓' : '▶'} {e.toolName || 'tool'}
+          {running ? '▶' : '✓'} {e.toolName || 'tool'}
         </strong>
-        {e.toolInput && <pre style={styles.code}>{e.toolInput}</pre>}
-        {e.kind === 'tool-end' && e.toolOutput && <pre style={styles.out}>{e.toolOutput}</pre>}
+        {detail && detail !== e.toolName && <span style={styles.muted}>{detail}</span>}
+        {!running && output && <pre style={styles.out}>{output}</pre>}
       </div>
     );
   }
@@ -498,6 +600,25 @@ const styles: Record<string, React.CSSProperties> = {
   },
   title: { flex: 1, textAlign: 'center', fontWeight: 600, fontSize: 14 },
   center: { textAlign: 'center', color: '#889', marginTop: 40 },
+  disconnected: {
+    flex: 1,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 16,
+    padding: 24,
+  },
+  reconnectBtnLarge: {
+    padding: '10px 24px',
+    borderRadius: 8,
+    border: 'none',
+    background: '#2a6aff',
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
   list: { padding: 16, overflowY: 'auto' },
   section: {
     fontSize: 11,

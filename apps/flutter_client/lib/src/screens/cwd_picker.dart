@@ -2,10 +2,13 @@
 // from fs.listProjects; Browse walks the PC via fs.list so any folder works.
 // A later host-side allow-list can restrict this without changing the UI.
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
+import '../state/last_cwd.dart';
 
 Future<String?> pickWorkingDirectory({
   required BuildContext context,
@@ -49,6 +52,7 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
   bool _browse = false;
   String _home = '/';
   String _cwd = '/';
+  String? _recentPath;
   List<_ProjectHint> _projects = const [];
   List<FileEntry> _dirs = const [];
   bool _loading = true;
@@ -70,23 +74,33 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
           : '/';
     } catch (_) {}
 
-    List<_ProjectHint> projects = [_ProjectHint('Home', home)];
+    final recent = await loadLastAgentCwd();
+    final seen = <String>{};
+    var projects = <_ProjectHint>[_ProjectHint('Home', home)];
+    seen.add(home);
+    if (recent != null && recent.isNotEmpty) seen.add(recent);
     try {
       final raw = await widget.client.requestList('fs.listProjects');
       for (final e in raw) {
         if (e is! Map) continue;
         final name = '${e['name'] ?? ''}';
         final path = '${e['path'] ?? ''}';
-        if (path.isEmpty) continue;
-        if (projects.any((p) => p.path == path)) continue;
+        if (path.isEmpty || seen.contains(path)) continue;
+        seen.add(path);
         projects.add(_ProjectHint(name.isEmpty ? path : name, path));
       }
     } catch (_) {}
+    projects = [
+      projects.first,
+      ...projects.skip(1).toList()
+        ..sort((a, b) => comparePathNames(a.name, b.name)),
+    ];
 
     if (!mounted) return;
     setState(() {
       _home = home;
       _cwd = home;
+      _recentPath = recent;
       _projects = projects;
       _loading = false;
     });
@@ -115,7 +129,8 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
           .whereType<Map>()
           .map((e) => FileEntry.fromJson(Map<String, dynamic>.from(e)))
           .where((e) => e.isDirectory)
-          .toList();
+          .toList()
+        ..sort((a, b) => comparePathNames(a.name, b.name));
       if (!mounted) return;
       setState(() {
         _dirs = dirs;
@@ -161,11 +176,14 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
     );
     controller.dispose();
     if (path != null && path.isNotEmpty && mounted) {
-      Navigator.pop(context, path);
+      _use(path);
     }
   }
 
-  void _use(String path) => Navigator.pop(context, path);
+  void _use(String path) {
+    unawaited(saveLastAgentCwd(path));
+    Navigator.pop(context, path);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -266,13 +284,26 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
                 fontSize: 11, letterSpacing: 0.8, color: Color(0xFF666677)),
           ),
         ),
-        for (final p in _projects)
+        if (_recentPath != null)
           ListTile(
-            leading: const Icon(Icons.folder, color: Color(0xFF6B8CFF)),
-            title: Text(p.name),
-            subtitle: Text(p.path, maxLines: 1, overflow: TextOverflow.ellipsis),
-            onTap: () => _use(p.path),
+            leading: const Icon(Icons.history, color: Color(0xFF6B8CFF)),
+            title: Text(folderDisplayName(_recentPath!)),
+            subtitle: Text(
+              _recentPath!,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            onTap: () => _use(_recentPath!),
           ),
+        for (final p in _projects)
+          if (p.path != _recentPath)
+            ListTile(
+              leading: const Icon(Icons.folder, color: Color(0xFF6B8CFF)),
+              title: Text(p.name),
+              subtitle:
+                  Text(p.path, maxLines: 1, overflow: TextOverflow.ellipsis),
+              onTap: () => _use(p.path),
+            ),
       ],
     );
   }
