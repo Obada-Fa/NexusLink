@@ -185,6 +185,37 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"You are on
     }
   });
 
+  test('second Cursor CLI prompt resumes the same session', async () => {
+    const fake = installFakeCursor(`#!/usr/bin/env bash
+printf '%s\\n' "$@" > "\${0}.argv"
+echo '{"type":"system","subtype":"init","session_id":"sess-1"}'
+echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong"}]}}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"pong","session_id":"sess-1"}'
+`);
+    const pushed: AgentEvent[] = [];
+    setAgentBroadcast((msg: WsMessage) => {
+      if (msg.type === 'agent-event') pushed.push(msg.event);
+    });
+    try {
+      const info = createAgentSession('cursor', fake.dir, 'Cursor CLI');
+      promptAgent(info.agentSessionId, 'hello');
+      await waitFor(pushed, 'text');
+      pushed.length = 0;
+      promptAgent(info.agentSessionId, 'what system am i using');
+      await waitFor(pushed, 'text');
+      const argv = readFileSync(fake.argvFile, 'utf8');
+      expect(argv).toContain('--resume');
+      expect(argv).toContain('sess-1');
+      expect(argv).toContain('what system am i using');
+      expect(pushed.some((e) => e.kind === 'user' && e.text === 'what system am i using')).toBe(true);
+      expect(pushed.some((e) => e.kind === 'text' && e.text?.includes('pong'))).toBe(true);
+      closeAgentSession(info.agentSessionId);
+    } finally {
+      fake.restore();
+      setAgentBroadcast(() => {});
+    }
+  });
+
   test('cursor adapter surfaces stderr when the CLI exits with no JSON', async () => {
     const fake = installFakeCursor(`#!/usr/bin/env bash
 echo 'Authentication required. Run cursor-agent login.' >&2
