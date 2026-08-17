@@ -50,15 +50,18 @@ enum ScaleFit {
   double offsetY;
 
   if (viewAspect > hostAspect) {
-    contentWidth = viewWidth;
-    contentHeight = viewWidth / hostAspect;
-    offsetX = 0;
-    offsetY = (viewHeight - contentHeight) / 2;
-  } else {
+    // View is relatively wider than the host: contain fits height and
+    // letterboxes left/right (same as CSS object-fit:contain / BoxFit.contain).
     contentHeight = viewHeight;
     contentWidth = viewHeight * hostAspect;
     offsetX = (viewWidth - contentWidth) / 2;
     offsetY = 0;
+  } else {
+    // View is relatively taller: contain fits width and letterboxes top/bottom.
+    contentWidth = viewWidth;
+    contentHeight = viewWidth / hostAspect;
+    offsetX = 0;
+    offsetY = (viewHeight - contentHeight) / 2;
   }
 
   if (contentWidth <= 0 || contentHeight <= 0) {

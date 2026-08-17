@@ -108,6 +108,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       _engine.tick(_nowMs);
       _flushQueuedDrag();
     })..start();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     WidgetsBinding.instance.addPostFrameCallback((_) => _start());
   }
 
@@ -231,12 +232,10 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       session = hit.first;
     } else {
       final media = MediaQuery.of(context);
-      final padding = media.padding;
+      // Full phone stage: chrome overlays the stream, so the virtual monitor
+      // must match the whole screen or the picture letterboxes vertically.
       var w = media.size.width;
-      var h = media.size.height -
-          padding.top -
-          padding.bottom -
-          kToolbarHeight;
+      var h = media.size.height;
       if (h < 200) h = media.size.height;
       // Phone-OS virtual monitors are portrait; the host letterboxes if you
       // rotate. Sending landscape here is what produced a strip at the top.
@@ -253,7 +252,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           'height': h.round(),
           'dpr': media.devicePixelRatio,
         },
-        const Duration(seconds: 20),
+        const Duration(seconds: 45),
       );
       session = AppSessionInfo.fromJson(created);
       // Host already waited for the first window and fitted it.
@@ -261,6 +260,14 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     }
     if (!mounted) return;
     _session = session;
+    // Map touch to the framebuffer immediately — don't wait for capture,
+    // and don't leave the engine on its 1920×1080 default.
+    _setRegion(CaptureRegion(
+      0,
+      0,
+      session.width,
+      session.height,
+    ));
 
     await _beginCapture(client, {
       'quality': 'medium',
@@ -279,7 +286,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       }
     }));
     if (mounted) setState(() => _phase = MirrorPhase.streaming);
-    // MJPEG is already showing; upgrade to H.264 in the background.
+    // MJPEG is the reliable path. WebRTC is an upgrade: never stop MJPEG
+    // when onTrack fires (that left new apps on a black RTC surface).
     unawaited(_tryWebrtc(client, session.sessionId));
   }
 
@@ -329,7 +337,11 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
 
       final pc = await createPeerConnection({
         'sdpSemantics': 'unified-plan',
-        'iceServers': <Map<String, dynamic>>[],
+        'iceServers': [
+          {
+            'urls': ['stun:stun.l.google.com:19302'],
+          },
+        ],
       });
       _pc = pc;
       pc.onTrack = (event) {
@@ -337,11 +349,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         renderer.srcObject = event.streams[0];
         if (!mounted) return;
         setState(() => _rtcLive = true);
-        final id = _streamId;
-        if (id != null) {
-          client.notify('screen.stopCapture', {'streamId': id});
-          _streamId = null;
-        }
+        // Keep MJPEG running. Stopping it here made new-app streams go
+        // black whenever ICE/track setup was incomplete.
       };
       pc.onIceCandidate = (c) {
         if (c.candidate == null || _webrtcId == null) return;
@@ -417,6 +426,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     _ticker.dispose();
     _frameSub?.cancel();
     _fpsTimer?.cancel();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     for (final u in _unsubs) {
       u();
     }
@@ -562,8 +572,11 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
             : 'Desktop');
     return Scaffold(
       backgroundColor: Colors.black,
+      extendBodyBehindAppBar: true,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF0A0A0F),
+        backgroundColor: const Color(0xCC0A0A0F),
+        elevation: 0,
+        scrolledUnderElevation: 0,
         leading: IconButton(
           icon: const Icon(Icons.home_outlined),
           onPressed: () => Navigator.of(context).maybePop(),
@@ -602,10 +615,11 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
             ),
         ],
       ),
-      body: Column(
+      body: Stack(
         children: [
-          Expanded(child: _stage()),
-          if (_keyboardOpen) _keyboardBar(),
+          Positioned.fill(child: _stage()),
+          if (_keyboardOpen)
+            Positioned(left: 0, right: 0, bottom: 0, child: _keyboardBar()),
         ],
       ),
     );

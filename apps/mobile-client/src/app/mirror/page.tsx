@@ -117,7 +117,7 @@ function MirrorView() {
               width: w,
               height: h,
               dpr: window.devicePixelRatio || 1,
-            }, 20000) as {
+            }, 45000) as {
               sessionId: string;
               width: number;
               height: number;
@@ -402,7 +402,15 @@ function MirrorView() {
         {phase === 'streaming' ? (
           <div ref={viewportRef} style={styles.viewport}>
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img ref={imgRef} alt="host screen" style={styles.frame} draggable={false} />
+            <img
+              ref={imgRef}
+              alt="host screen"
+              style={{
+                ...styles.frame,
+                objectFit: sessionId ? 'fill' : 'contain',
+              }}
+              draggable={false}
+            />
           </div>
         ) : phase === 'error' ? (
           <div style={styles.centerBox}>
@@ -465,8 +473,7 @@ export default function MirrorPage() {
 
 const styles: Record<string, React.CSSProperties> = {
   wrapper: {
-    display: 'flex',
-    flexDirection: 'column',
+    position: 'relative',
     height: '100dvh',
     background: '#000',
     color: '#e0e0e0',
@@ -474,13 +481,16 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
   },
   topBar: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    zIndex: 2,
     display: 'flex',
     alignItems: 'center',
     gap: 8,
-    padding: '6px 10px',
-    background: '#0a0a0f',
-    borderBottom: '1px solid #16162a',
-    flexShrink: 0,
+    padding: 'calc(6px + env(safe-area-inset-top)) 10px 6px',
+    background: 'rgba(10,10,15,0.55)',
   },
   barBtn: {
     width: 34,
@@ -503,7 +513,13 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
     textOverflow: 'ellipsis',
   },
-  stage: { flex: 1, display: 'flex', minHeight: 0, background: '#000' },
+  stage: {
+    position: 'absolute',
+    inset: 0,
+    display: 'flex',
+    minHeight: 0,
+    background: '#000',
+  },
   viewport: {
     position: 'relative',
     width: '100%',
@@ -556,12 +572,16 @@ const styles: Record<string, React.CSSProperties> = {
     animation: 'nl-spin 0.8s linear infinite',
   },
   kbBar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 2,
     display: 'flex',
     gap: 6,
     padding: '8px 10px calc(8px + env(safe-area-inset-bottom))',
-    background: '#0f0f1a',
+    background: 'rgba(15,15,26,0.92)',
     borderTop: '1px solid #1c1c30',
-    flexShrink: 0,
   },
   kbInput: {
     flex: 1,

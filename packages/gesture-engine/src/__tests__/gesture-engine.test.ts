@@ -17,19 +17,28 @@ describe('scaleToHost', () => {
     expect(result.y).toBe(540);
   });
 
-  it('handles wider view than host (letterbox top/bottom)', () => {
+  it('handles wider view than host (letterbox left/right)', () => {
+    // view 200×100 (aspect 2) vs host 16:9 — contain fits height.
     const result = scaleToHost(100, 50, 200, 100, 1920, 1080);
     expect(result.x).toBe(960);
-    expect(result.y).toBeGreaterThan(0);
-    expect(result.y).toBeLessThan(1080);
+    expect(result.y).toBe(540);
   });
 
-  it('handles taller view than host (letterbox left/right)', () => {
+  it('handles taller view than host (letterbox top/bottom)', () => {
+    // view 100×200 (aspect 0.5) vs host 16:9 — contain fits width.
     const result = scaleToHost(50, 100, 100, 200, 1920, 1080);
-    expect(result.x).toBeGreaterThan(0);
-    expect(result.x).toBeLessThan(1920);
-    expect(result.y).toBeGreaterThan(0);
-    expect(result.y).toBeLessThan(1080);
+    expect(result.x).toBe(960);
+    expect(result.y).toBe(540);
+  });
+
+  it('maps a tap on the painted content, not the letterbox, on a tall phone', () => {
+    // Phone stage 390×780 viewing a 16:9 capture — bars above/below the frame.
+    // The content is 390 × (390 / (1920/1080)) = 219.375 tall, offsetY ≈ 280.3.
+    const mid = scaleToHost(195, 390, 390, 780, 1920, 1080);
+    expect(mid.x).toBe(960);
+    expect(mid.y).toBe(540);
+    const topBar = scaleToHost(195, 10, 390, 780, 1920, 1080);
+    expect(topBar.y).toBe(0);
   });
 
   it('clamps output to host bounds', () => {
