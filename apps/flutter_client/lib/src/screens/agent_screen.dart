@@ -34,6 +34,7 @@ class _PendingPhoto {
 class _AgentScreenState extends ConsumerState<AgentScreen> {
   List<AgentInfo> _agents = [];
   List<AgentSessionInfo> _sessions = [];
+  List<AgentHostChat> _hostChats = [];
   AgentSessionInfo? _active;
   final _events = <AgentEvent>[];
   final _input = TextEditingController();
@@ -73,6 +74,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       final agentsRaw = await client.request('agent.list') as List<dynamic>;
       final sessionsRaw =
           await client.request('agent.listSessions') as List<dynamic>;
+      List<dynamic> hostRaw = const [];
+      try {
+        hostRaw = await client.requestList(
+          'agent.listHostChats',
+          const {},
+          const Duration(seconds: 25),
+        );
+      } catch (_) {
+        // Older hosts have no listHostChats.
+      }
       _unsub = client.subscribe('agent-event', _onPush);
       if (!mounted) return;
       setState(() {
@@ -81,6 +92,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
             .toList();
         _sessions = sessionsRaw
             .map((e) => AgentSessionInfo.fromJson(e as Map<String, dynamic>))
+            .toList();
+        _hostChats = hostRaw
+            .whereType<Map>()
+            .map((e) => AgentHostChat.fromJson(Map<String, dynamic>.from(e)))
             .toList();
         _loading = false;
       });
@@ -264,6 +279,36 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     await _loadComposerPrefs(s.agent);
     await _refreshModels(s.agent);
     _scrollToEnd();
+  }
+
+  Future<void> _openHostChat(AgentHostChat chat) async {
+    final client = _client;
+    if (client == null) return;
+    try {
+      final created = await client.request(
+        'agent.openHostChat',
+        {
+          'agent': chat.agent,
+          'hostChatId': chat.hostChatId,
+          'cwd': chat.cwd,
+          'title': chat.title,
+        },
+        const Duration(seconds: 25),
+      ) as Map<String, dynamic>;
+      final session = AgentSessionInfo.fromJson(created);
+      if (!mounted) return;
+      setState(() {
+        if (!_sessions.any((s) => s.agentSessionId == session.agentSessionId)) {
+          _sessions.insert(0, session);
+        }
+      });
+      await _openSession(session);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString())),
+      );
+    }
   }
 
   AgentInfo? get _activeAgent {
@@ -1034,6 +1079,28 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
               title: Text(s.title),
               subtitle: Text(s.cwd, maxLines: 1, overflow: TextOverflow.ellipsis),
               onTap: () => _openSession(s),
+            ),
+        ],
+        if (_hostChats.isNotEmpty) ...[
+          const SizedBox(height: 16),
+          const Text('ON THIS PC',
+              style: TextStyle(
+                  fontSize: 11, letterSpacing: 0.8, color: Color(0xFF666677))),
+          const SizedBox(height: 8),
+          for (final c in _hostChats)
+            ListTile(
+              leading: Icon(_iconFor(c.agent)),
+              title: Text(c.title),
+              subtitle: Text(
+                [
+                  c.source,
+                  if (c.cwd.isNotEmpty) c.cwd,
+                  if (!c.resumable) 'view only',
+                ].join(' · '),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              onTap: () => _openHostChat(c),
             ),
         ],
       ],

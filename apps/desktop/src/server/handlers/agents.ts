@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import type {
   AgentCapabilities,
   AgentEvent,
+  AgentHostChat,
   AgentImageAttachment,
   AgentInfo,
   AgentMode,
@@ -20,6 +21,14 @@ import type {
   AgentSessionInfo,
   WsMessage,
 } from '@nexuslink/rpc-types';
+import {
+  listAgyHostChats,
+  listCursorCliHostChats,
+  listCursorIdeHostChats,
+  listOpencodeHostChats,
+  loadHostChatHistory,
+  type HostChatDelta,
+} from './host-chats';
 
 type SpawnOpts = Parameters<typeof Bun.spawn>[1];
 type Proc = ReturnType<typeof Bun.spawn>;
@@ -564,6 +573,7 @@ interface AgentAdapter {
   cancel(): void;
   close(): void;
   permission?(requestId: string, allow: boolean): void;
+  bindHostChat?(id: string): void;
 }
 
 const agentSessions = new Map<string, AgentSession>();
@@ -579,7 +589,12 @@ function setBusy(session: AgentSession, busy: boolean): void {
   session.info.busy = busy;
 }
 
-export function createAgentSession(agentId: string, cwd?: string, title?: string): AgentSessionInfo {
+export function createAgentSession(
+  agentId: string,
+  cwd?: string,
+  title?: string,
+  opts?: { hostChatId?: string },
+): AgentSessionInfo {
   const def = AGENT_DEFS.find((d) => d.id === agentId);
   if (!def) throw new Error(`unknown agent: ${agentId}`);
   if (def.bin && !which(def.bin)) throw new Error(`${def.name} CLI not installed on the host`);
@@ -592,18 +607,88 @@ export function createAgentSession(agentId: string, cwd?: string, title?: string
     createdAt: Date.now(),
     busy: false,
     status: 'running',
+    hostChatId: opts?.hostChatId,
   };
   const session: AgentSession = {
     info, history: [], adapter: null as unknown as AgentAdapter, seq: 0,
     pendingPermissions: new Map(),
   };
   session.adapter = def.makeAdapter(session);
+  if (opts?.hostChatId) session.adapter.bindHostChat?.(opts.hostChatId);
   agentSessions.set(info.agentSessionId, session);
   return { ...info };
 }
 
 export function listAgentSessions(): AgentSessionInfo[] {
   return [...agentSessions.values()].map((s) => ({ ...s.info }));
+}
+
+function seedHistory(session: AgentSession, events: HostChatDelta[]): void {
+  for (const ev of events.slice(-HISTORY_CAP)) {
+    session.history.push({
+      ...ev,
+      seq: ++session.seq,
+      ts: ev.ts || Date.now(),
+    });
+  }
+}
+
+export function listHostChats(agent?: string): AgentHostChat[] {
+  const want = (id: string) => !agent || agent === id;
+  const out: AgentHostChat[] = [];
+  if (want('opencode')) {
+    const bin = which('opencode');
+    if (bin) out.push(...listOpencodeHostChats(bin));
+  }
+  if (want('cursor')) {
+    out.push(...listCursorCliHostChats(which('cursor-agent') !== null));
+    out.push(...listCursorIdeHostChats());
+  }
+  if (want('antigravity')) {
+    out.push(...listAgyHostChats());
+  }
+  return out.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 80);
+}
+
+export function openHostChat(params: {
+  agent: string;
+  hostChatId: string;
+  cwd?: string;
+  title?: string;
+}): AgentSessionInfo {
+  const { agent, hostChatId } = params;
+  if (!hostChatId) throw new Error('missing hostChatId');
+  const existing = [...agentSessions.values()].find(
+    (s) => s.info.agent === agent && s.info.hostChatId === hostChatId && s.info.status === 'running',
+  );
+  if (existing) return { ...existing.info };
+
+  const viewOnly = hostChatId.startsWith('ide:');
+  const cwd = params.cwd || homedir();
+  const title = params.title || 'Host chat';
+  const info = createAgentSession(agent, cwd, title, { hostChatId });
+  const session = agentSessions.get(info.agentSessionId);
+  if (!session) return info;
+  const def = AGENT_DEFS.find((d) => d.id === agent);
+  const bin = def?.bin ? which(def.bin) : null;
+  const history = loadHostChatHistory(agent, hostChatId, bin);
+  seedHistory(session, history);
+  if (!history.length) {
+    seedHistory(session, [{
+      kind: 'status',
+      text: viewOnly
+        ? 'Loaded from Cursor IDE. History is view-only — a new Cursor CLI chat starts if you send a message.'
+        : 'Opened this conversation from the PC. Send a message to continue it.',
+      ts: Date.now(),
+    }]);
+  } else if (viewOnly) {
+    seedHistory(session, [{
+      kind: 'status',
+      text: 'Cursor IDE chats cannot be continued from the CLI. Sending a message starts a new Cursor CLI chat in this project.',
+      ts: Date.now(),
+    }]);
+  }
+  return { ...session.info };
 }
 
 export function agentHistory(agentSessionId: string): AgentEvent[] {
@@ -1216,6 +1301,11 @@ class CursorAdapter implements AgentAdapter {
 
   constructor(private session: AgentSession) {}
 
+  bindHostChat(id: string): void {
+    if (id.startsWith('ide:')) return;
+    this.chatId = id;
+  }
+
   private extraEnv(): Record<string, string> {
     const env: Record<string, string> = {};
     if (this.apiKey) env.CURSOR_API_KEY = this.apiKey;
@@ -1423,6 +1513,10 @@ class OpenCodeAdapter implements AgentAdapter {
 
   constructor(private session: AgentSession) {}
 
+  bindHostChat(id: string): void {
+    this.ocSession = id;
+  }
+
   prompt(text: string, opts?: AdapterPromptOpts): void {
     this.cancel();
     this.sawResult = false;
@@ -1493,6 +1587,10 @@ class AntigravityAdapter implements AgentAdapter {
   private apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 
   constructor(private session: AgentSession) {}
+
+  bindHostChat(id: string): void {
+    this.conversationId = id;
+  }
 
   private extraEnv(): Record<string, string> {
     const env: Record<string, string> = {};
