@@ -4,6 +4,7 @@ export type RpcMethod =
   | 'fs.write'
   | 'fs.delete'
   | 'fs.move'
+  | 'fs.listProjects'
   | 'process.list'
   | 'process.kill'
   | 'process.spawn'
@@ -45,6 +46,9 @@ export type RpcMethod =
   | 'agent.cancel'
   | 'agent.close'
   | 'agent.history'
+  | 'ide.start'
+  | 'ide.stop'
+  | 'ide.status'
   | 'session.pair'
   | 'session.authenticate'
   | 'session.heartbeat'
@@ -75,6 +79,8 @@ export type Params<M extends RpcMethod> =
     ? { path: string }
     : M extends 'fs.move'
     ? { from: string; to: string }
+    : M extends 'fs.listProjects'
+    ? {}
     : M extends 'process.list'
     ? {}
     : M extends 'process.kill'
@@ -157,6 +163,12 @@ export type Params<M extends RpcMethod> =
     ? { agentSessionId: string }
     : M extends 'agent.history'
     ? { agentSessionId: string }
+    : M extends 'ide.start'
+    ? { cwd?: string }
+    : M extends 'ide.stop'
+    ? {}
+    : M extends 'ide.status'
+    ? {}
     : M extends 'session.pair'
     ? { publicKey: string }
     : M extends 'session.authenticate'
@@ -182,6 +194,8 @@ export type Result<M extends RpcMethod> =
     ? void
     : M extends 'fs.move'
     ? void
+    : M extends 'fs.listProjects'
+    ? ProjectInfo[]
     : M extends 'process.list'
     ? ProcessEntry[]
     : M extends 'process.kill'
@@ -264,6 +278,12 @@ export type Result<M extends RpcMethod> =
     ? { ok: boolean }
     : M extends 'agent.history'
     ? AgentEvent[]
+    : M extends 'ide.start'
+    ? IdeStatus
+    : M extends 'ide.stop'
+    ? { ok: boolean }
+    : M extends 'ide.status'
+    ? IdeStatus
     : M extends 'session.pair'
     ? { publicKey: string; totpIssuerUri: string }
     : M extends 'session.authenticate'
@@ -285,6 +305,20 @@ export interface FileEntry {
   isDirectory: boolean
   modifiedAt: string
   mimeType: string
+}
+
+/** A git working tree the agent/IDE can open. */
+export interface ProjectInfo {
+  name: string
+  path: string
+}
+
+export interface IdeStatus {
+  available: boolean
+  running: boolean
+  port?: number
+  cwd?: string
+  reason?: string
 }
 
 export interface ProcessEntry {

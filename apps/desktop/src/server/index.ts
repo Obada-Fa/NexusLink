@@ -1,5 +1,5 @@
 import type { WsMessage, RpcRequest, RpcResponse, RpcMethod } from '@nexuslink/rpc-types';
-import { handleFsList } from './handlers/fs';
+import { handleFsList, listProjects } from './handlers/fs';
 import { listProcesses } from './handlers/process';
 import { getSystemInfo, getPerfSnapshot } from './handlers/system';
 import { handleTerminalCreate, handleTerminalInput, handleTerminalResize, handleTerminalKill, setSend as setTerminalSend } from './handlers/terminal';
@@ -16,8 +16,9 @@ import { setSend as setWebrtcSend, startWebrtc, signalWebrtc, stopWebrtc, stopWe
 import { getClipboard, setClipboard } from './handlers/clipboard';
 import {
   listAgents, createAgentSession, listAgentSessions, promptAgent,
-  cancelAgent, closeAgentSession, agentHistory, setAgentBroadcast,
+  cancelAgent, closeAgentSession, agentHistory, resolveAgentPermission, setAgentBroadcast,
 } from './handlers/agents';
+import { startIde, stopIde, ideStatus } from './handlers/ide';
 import type { WebRtcSignal } from '@nexuslink/rpc-types';
 import { serveStatic, staticAvailable } from './static-server';
 import { printLaunchBanner } from './launch-banner';
@@ -101,6 +102,9 @@ export async function startRpcServer(port = 45678) {
     switch (method) {
       case 'fs.list':
         result = await handleFsList(params.path as string, params.showHidden as boolean | undefined);
+        break;
+      case 'fs.listProjects':
+        result = await listProjects();
         break;
       case 'process.list':
         result = await listProcesses();
@@ -249,9 +253,11 @@ export async function startRpcServer(port = 45678) {
         result = promptAgent(params.agentSessionId as string, params.text as string);
         break;
       case 'agent.permission':
-        // Reserved: adapters currently run in acceptEdits mode without
-        // interactive permission prompts.
-        result = { ok: false };
+        result = resolveAgentPermission(
+          params.agentSessionId as string,
+          params.requestId as string,
+          params.allow as boolean,
+        );
         break;
       case 'agent.cancel':
         result = cancelAgent(params.agentSessionId as string);
@@ -261,6 +267,15 @@ export async function startRpcServer(port = 45678) {
         break;
       case 'agent.history':
         result = agentHistory(params.agentSessionId as string);
+        break;
+      case 'ide.start':
+        result = startIde(params.cwd as string | undefined);
+        break;
+      case 'ide.stop':
+        result = stopIde();
+        break;
+      case 'ide.status':
+        result = ideStatus();
         break;
       case 'screen.startCapture': {
         // Virtual app session: grab the session's whole phone-shaped screen,

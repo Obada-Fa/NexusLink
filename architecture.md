@@ -81,6 +81,29 @@ delivers valid JPEG frames, and `input.mouseClick {x,y}` / `input.mouseMove {dx,
 pointer on exact host coordinates. Capture sessions are torn down on `stopCapture` and on
 socket close (no leaked `ffmpeg`).
 
+### 2.2 Shipped: Native-feel app streaming (virtual displays + WebRTC + agents)
+
+The phone launcher no longer adopts/resizes windows on the real desktop. Each app tap
+creates a **phone-shaped Xvfb** (`app-sessions.ts`) with openbox, DPI/scale env, and
+per-session PulseAudio. Chromium/Brave is launched kiosk/fullscreen with a mobile UA and
+an isolated profile. Capture and xdotool bind to `DISPLAY=:N` (1:1 with the phone).
+
+| Milestone | Implementation |
+|---|---|
+| M-A Virtual sessions | `handlers/app-sessions.ts`, `app-profiles.ts`, `apps.json` registry |
+| M-B Mobile polish | GDK/Qt/Xft DPI, `--kiosk` + `--window-size`, reattach/close, Pulse sink |
+| M-C WebRTC | `webrtc-agent.py` (vah264enc/nvh264enc/x264 + Opus), MJPEG fallback, STUN default |
+| M-D Native tier | Real PTY (`pty-host.py` + Flutter `xterm`); `ide.start` for code-server WebView |
+| M-E Agents | `handlers/agents.ts` stream-json adapters + ACP-shaped `permission-request` |
+| M-F Hardening | `clipboard.*` via xclip, session list UI, reconnect history, LAN STUN |
+
+`adoptWindow` remains only as the fallback **Desktop** dock tile (mirror an already-open
+window). Rotation of an Xvfb session letterboxes on the client unless `xrandr --fb` works.
+
+Input stays on the paired WS RPC (1:1 for virtual sessions). A WebRTC DataChannel for
+touch is optional later; video already upgrades to H.264 when GStreamer is present.
+WAN beyond LAN uses the existing relay plus `NEXUSLINK_STUN` / TURN when you leave the LAN.
+
 **How this maps to the grand design:** this path is the `direct WS (LAN)` transport in the
 topology below. When the Rust sidecar + WebRTC land, capture/input become backends behind the
 same RPC surface (`screen.*`, `input.*`), and the `rpc` DataChannel tunnels these exact

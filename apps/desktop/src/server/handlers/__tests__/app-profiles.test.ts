@@ -68,6 +68,7 @@ describe('buildChromiumArgv', () => {
     expect(argv.some((a) => a.startsWith('--user-agent='))).toBe(true);
     expect(argv).toContain('--touch-events=enabled');
     expect(argv).toContain('--start-fullscreen');
+    expect(argv).toContain('--kiosk');
     expect(argv.some((a) => a.startsWith('--window-size='))).toBe(true);
     const size = argv.find((a) => a.startsWith('--window-size='))!.slice('--window-size='.length);
     const [w, h] = size.split(',').map(Number);

@@ -77,7 +77,7 @@ export function startWebrtc(
     '--fps', String(Math.max(10, Math.min(30, Math.round(fps || 24)))),
   ];
   if (audioSource) argv.push('--audio-source', audioSource);
-  if (process.env.NEXUSLINK_STUN) argv.push('--stun', process.env.NEXUSLINK_STUN);
+  argv.push('--stun', process.env.NEXUSLINK_STUN || 'stun://stun.l.google.com:19302');
 
   const proc = Bun.spawn(argv, {
     stdin: 'pipe',

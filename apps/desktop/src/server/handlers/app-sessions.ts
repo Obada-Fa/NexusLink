@@ -201,9 +201,11 @@ function sessionEnv(session: AppSession, extra?: Record<string, string>): Record
     DISPLAY: session.info.display,
     // Finger-sized UI for toolkit apps. Chrome overrides these via its profile.
     GDK_SCALE: intScale,
+    GDK_DPI_SCALE: '1',
     QT_AUTO_SCREEN_SCALE_FACTOR: '0',
     QT_SCALE_FACTOR: intScale,
     XCURSOR_SIZE: String(24 * Math.max(1, Math.round(dpr))),
+    XFT_DPI: String(Math.round(96 * dpr)),
     // Never leak the host's real session bus targets into virtual apps.
     ...(extra ?? {}),
   };
@@ -281,6 +283,11 @@ export async function createAppSession(
 
   try {
     await waitForX(display);
+
+    const resources = `Xft.dpi: ${Math.round(96 * geo.dpr)}\n`;
+    const resPath = join(sessionDir, '.Xresources');
+    await Bun.write(resPath, resources);
+    run(['xrdb', '-merge', resPath], { DISPLAY: display });
 
     const rcPath = join(sessionDir, 'openbox-rc.xml');
     await Bun.write(rcPath, OPENBOX_RC);
@@ -393,17 +400,28 @@ export function getSessionAudioSource(sessionId: string): string | null {
 }
 
 /**
- * Xvfb framebuffers cannot be resized after creation (no RANDR mode adds), so
- * rotation is handled client-side with letterboxing. Reported here so clients
- * know the surface kept its size.
+ * Xvfb cannot add RANDR modes after creation. Try `xrandr --fb` anyway (some
+ * Xvfb builds honor it); otherwise the client letterboxes on rotation.
  */
 export function resizeAppSession(
   sessionId: string,
-  _width: number,
-  _height: number,
+  width: number,
+  height: number,
 ): { width: number; height: number; resized: boolean } {
   const s = sessions.get(sessionId);
   if (!s) throw new Error('unknown session');
+  const w = Math.max(200, Math.round(width)) & ~1;
+  const h = Math.max(200, Math.round(height)) & ~1;
+  const ok = run(
+    ['xrandr', '--fb', `${w}x${h}`],
+    { DISPLAY: s.info.display },
+  ).ok;
+  if (ok) {
+    s.info.width = w;
+    s.info.height = h;
+    broadcast({ type: 'app-session-update', session: { ...s.info } });
+    return { width: w, height: h, resized: true };
+  }
   return { width: s.info.width, height: s.info.height, resized: false };
 }
 
