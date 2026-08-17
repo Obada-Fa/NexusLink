@@ -7,7 +7,7 @@ import { validateToken, generateToken, handleSessionPair, validateSessionTOTP, i
 import { setSend as setSignalingSend } from './handlers/signaling';
 import { mouseMove, mouseClick, mouseScroll, keyEvent, typeText, buttonDown, buttonUp, mouseMoveAbs } from './handlers/input';
 import { setSend as setCaptureSend, startCapture, stopCapture, stopCapturesForSocket, getScreenMetadata } from './handlers/capture';
-import { listWindows, listApps, launchApp, adoptWindow, releaseWindow, activateWindow, getWindowGeometry } from './handlers/windows';
+import { listWindows, listApps, launchApp, adoptWindow, releaseWindow, activateWindow, getWindowGeometry, getAdoptedCaptureRegion } from './handlers/windows';
 import {
   createAppSession, listAppSessions, resizeAppSession, closeAppSession,
   getAppSession, getSessionDisplay, setSessionBroadcast,
@@ -297,13 +297,15 @@ export async function startRpcServer(port = 45678) {
         // Per-window capture: resolve the window's current on-screen rect, grab
         // only that region, and keep tracking the window if it moves.
         const windowId = params.windowId as string | undefined;
-        const region = windowId ? getWindowGeometry(windowId) ?? undefined : undefined;
+        const region = windowId
+          ? (getAdoptedCaptureRegion(windowId) ?? getWindowGeometry(windowId) ?? undefined)
+          : undefined;
         result = startCapture(
           (params.quality as 'low' | 'medium' | 'high') ?? 'medium',
           (params.fps as number) ?? 12,
           ws,
           region,
-          windowId ? () => getWindowGeometry(windowId) : undefined,
+          windowId ? () => getAdoptedCaptureRegion(windowId) ?? getWindowGeometry(windowId) : undefined,
         );
         break;
       }
