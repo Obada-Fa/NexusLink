@@ -10,6 +10,7 @@ import {
   agentHistory,
   closeAgentSession,
   resolveAgentPermission,
+  openHostChat,
   setAgentBroadcast,
   finishCliTurn,
   parseCursorStreamEvent,
@@ -107,6 +108,16 @@ describe('agent gateway', () => {
     expect(closeAgentSession(info.agentSessionId).ok).toBe(true);
     expect(listAgentSessions().some((s) => s.agentSessionId === info.agentSessionId)).toBe(false);
     setAgentBroadcast(() => {});
+  });
+
+  test('openHostChat attaches a mock conversation and seeds a status line', () => {
+    const info = openHostChat({ agent: 'mock', hostChatId: 'host-1', title: 'Old chat' });
+    expect(info.hostChatId).toBe('host-1');
+    expect(info.title).toBe('Old chat');
+    const history = agentHistory(info.agentSessionId);
+    expect(history.some((e) => e.kind === 'status')).toBe(true);
+    expect(openHostChat({ agent: 'mock', hostChatId: 'host-1' }).agentSessionId).toBe(info.agentSessionId);
+    closeAgentSession(info.agentSessionId);
   });
 
   test('rejects unknown agents and empty prompts', () => {

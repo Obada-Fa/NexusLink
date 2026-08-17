@@ -243,6 +243,36 @@ class AgentSessionInfo {
       );
 }
 
+class AgentHostChat {
+  final String agent;
+  final String hostChatId;
+  final String title;
+  final String cwd;
+  final int updatedAt;
+  final bool resumable;
+  final String source;
+
+  AgentHostChat({
+    required this.agent,
+    required this.hostChatId,
+    required this.title,
+    required this.cwd,
+    required this.updatedAt,
+    required this.resumable,
+    required this.source,
+  });
+
+  factory AgentHostChat.fromJson(Map<String, dynamic> j) => AgentHostChat(
+        agent: (j['agent'] as String?) ?? '',
+        hostChatId: (j['hostChatId'] as String?) ?? '',
+        title: (j['title'] as String?) ?? 'Chat',
+        cwd: (j['cwd'] as String?) ?? '',
+        updatedAt: (j['updatedAt'] as num?)?.toInt() ?? 0,
+        resumable: j['resumable'] as bool? ?? true,
+        source: (j['source'] as String?) ?? '',
+      );
+}
+
 /// Normalized event from the host agent gateway.
 class AgentEvent {
   final int seq;

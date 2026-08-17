@@ -75,6 +75,22 @@ void main() {
       });
       expect(user.images, ['shot.jpg']);
     });
+
+    test('parses a host chat from the PC', () {
+      final chat = AgentHostChat.fromJson({
+        'agent': 'opencode',
+        'hostChatId': 'ses_abc',
+        'title': 'Fix login',
+        'cwd': '/tmp/proj',
+        'updatedAt': 1,
+        'resumable': true,
+        'source': 'OpenCode',
+      });
+      expect(chat.agent, 'opencode');
+      expect(chat.hostChatId, 'ses_abc');
+      expect(chat.resumable, isTrue);
+      expect(chat.source, 'OpenCode');
+    });
   });
 
   group('model families', () {

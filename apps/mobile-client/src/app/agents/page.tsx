@@ -19,6 +19,16 @@ interface AgentSessionInfo {
   status: string;
 }
 
+interface AgentHostChat {
+  agent: string;
+  hostChatId: string;
+  title: string;
+  cwd: string;
+  updatedAt: number;
+  resumable: boolean;
+  source: string;
+}
+
 interface AgentEvent {
   seq: number;
   ts: number;
@@ -37,6 +47,7 @@ export default function AgentsPage() {
 
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [sessions, setSessions] = useState<AgentSessionInfo[]>([]);
+  const [hostChats, setHostChats] = useState<AgentHostChat[]>([]);
   const [active, setActive] = useState<AgentSessionInfo | null>(null);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [draft, setDraft] = useState('');
@@ -55,9 +66,16 @@ export default function AgentsPage() {
           client.request('agent.list') as Promise<AgentInfo[]>,
           client.request('agent.listSessions') as Promise<AgentSessionInfo[]>,
         ]);
+        let host: AgentHostChat[] = [];
+        try {
+          host = (await client.request('agent.listHostChats')) as AgentHostChat[];
+        } catch {
+          host = [];
+        }
         if (!cancelled) {
           setAgents(a);
           setSessions(s);
+          setHostChats(host);
         }
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Could not list agents.');
@@ -112,6 +130,21 @@ export default function AgentsPage() {
     [client],
   );
 
+  const openHostChat = useCallback(
+    async (chat: AgentHostChat) => {
+      if (!client) return;
+      const created = (await client.request('agent.openHostChat', {
+        agent: chat.agent,
+        hostChatId: chat.hostChatId,
+        cwd: chat.cwd,
+        title: chat.title,
+      })) as AgentSessionInfo;
+      setSessions((s) => (s.some((x) => x.agentSessionId === created.agentSessionId) ? s : [created, ...s]));
+      await openSession(created);
+    },
+    [client, openSession],
+  );
+
   const send = useCallback(async () => {
     const text = draft.trim();
     if (!text || !client || !active) return;
@@ -164,6 +197,17 @@ export default function AgentsPage() {
             <button key={s.agentSessionId} onClick={() => openSession(s)} style={styles.row}>
               <strong>{s.title}</strong>
               <span style={styles.muted}>{s.cwd}</span>
+            </button>
+          ))}
+          {hostChats.length > 0 && <h2 style={styles.section}>On this PC</h2>}
+          {hostChats.map((c) => (
+            <button key={`${c.agent}-${c.hostChatId}`} onClick={() => openHostChat(c)} style={styles.row}>
+              <strong>{c.title}</strong>
+              <span style={styles.muted}>
+                {[c.source, c.cwd, !c.resumable ? 'view only' : '']
+                  .filter(Boolean)
+                  .join(' · ')}
+              </span>
             </button>
           ))}
         </div>

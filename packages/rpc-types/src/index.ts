@@ -41,6 +41,8 @@ export type RpcMethod =
   | 'agent.list'
   | 'agent.createSession'
   | 'agent.listSessions'
+  | 'agent.listHostChats'
+  | 'agent.openHostChat'
   | 'agent.listModels'
   | 'agent.prompt'
   | 'agent.permission'
@@ -154,6 +156,10 @@ export type Params<M extends RpcMethod> =
     ? { agent: string; cwd?: string; title?: string }
     : M extends 'agent.listSessions'
     ? {}
+    : M extends 'agent.listHostChats'
+    ? { agent?: string }
+    : M extends 'agent.openHostChat'
+    ? { agent: string; hostChatId: string; cwd?: string; title?: string }
     : M extends 'agent.listModels'
     ? { agent: string }
     : M extends 'agent.prompt'
@@ -278,6 +284,10 @@ export type Result<M extends RpcMethod> =
     ? AgentSessionInfo
     : M extends 'agent.listSessions'
     ? AgentSessionInfo[]
+    : M extends 'agent.listHostChats'
+    ? AgentHostChat[]
+    : M extends 'agent.openHostChat'
+    ? AgentSessionInfo
     : M extends 'agent.listModels'
     ? AgentModelOption[]
     : M extends 'agent.prompt'
@@ -459,6 +469,18 @@ export interface AgentSessionInfo {
   createdAt: number
   busy: boolean
   status: 'running' | 'exited'
+  hostChatId?: string
+}
+
+/** A conversation that already exists on the PC (CLI or IDE), not started from the phone. */
+export interface AgentHostChat {
+  agent: string
+  hostChatId: string
+  title: string
+  cwd: string
+  updatedAt: number
+  resumable: boolean
+  source: string
 }
 
 /** Normalized event emitted by any agent adapter (superset of stream-json). */

@@ -4,7 +4,8 @@ Remote desktop that feels like a phone OS: the PC runs the apps, the phone is th
 screen. Tapping an app opens it in a **phone-shaped virtual display** on the host
 (your real desktop is never resized). Chrome launches with a mobile user-agent so
 sites reflow like native Chrome. Claude Code, Cursor CLI, OpenCode, and Antigravity run on the PC and
-show up as a chat UI on the phone.
+show up as a chat UI on the phone. Existing OpenCode, Antigravity, and Cursor CLI/IDE
+chats on the PC appear under **On this PC** and can be opened (CLI chats resume; Cursor IDE chats are history-only).
 
 ## Architecture
 
