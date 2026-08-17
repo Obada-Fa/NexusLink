@@ -53,7 +53,10 @@ export async function listProjects(): Promise<ProjectInfo[]> {
     out.push({ name, path: dir });
   }
 
-  await consider(home, 'Home');
+  if (!seen.has(home)) {
+    seen.add(home);
+    out.push({ name: 'Home', path: home });
+  }
   for (const root of roots) {
     if (!existsSync(root)) continue;
     let entries: string[] = [];

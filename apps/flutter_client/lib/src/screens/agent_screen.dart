@@ -16,6 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
+import 'cwd_picker.dart';
 
 class AgentScreen extends ConsumerStatefulWidget {
   const AgentScreen({super.key});
@@ -203,43 +204,20 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
 
   Future<String?> _pickProject() async {
     final client = _client;
-    if (client == null) return null;
-    List<dynamic> raw = const [];
-    try {
-      raw = await client.requestList('fs.listProjects');
-    } catch (_) {
-      return null;
-    }
-    if (!mounted || raw.isEmpty) return null;
-    return showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: const Color(0xFF151522),
-      builder: (ctx) => ListView(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        children: [
-          const ListTile(title: Text('Working directory')),
-          for (final e in raw)
-            if (e is Map)
-              ListTile(
-                title: Text('${e['name'] ?? ''}'),
-                subtitle: Text('${e['path'] ?? ''}',
-                    maxLines: 1, overflow: TextOverflow.ellipsis),
-                onTap: () => Navigator.pop(ctx, e['path'] as String?),
-              ),
-        ],
-      ),
-    );
+    if (client == null || !mounted) return null;
+    return pickWorkingDirectory(context: context, client: client);
   }
 
   Future<void> _newChat(AgentInfo agent) async {
     final client = _client;
     if (client == null) return;
     final cwd = await _pickProject();
+    if (cwd == null) return;
     try {
       final created = await client.request('agent.createSession', {
         'agent': agent.id,
         'title': agent.name,
-        'cwd': ?cwd,
+        'cwd': cwd,
       }) as Map<String, dynamic>;
       final session = AgentSessionInfo.fromJson(created);
       setState(() {

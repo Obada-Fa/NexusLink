@@ -1,6 +1,7 @@
 // Agent gateway: session lifecycle, CLI stream parsers, and the mock adapter.
 
 import { describe, expect, test } from 'bun:test';
+import { homedir } from 'node:os';
 import type { AgentEvent, WsMessage } from '@nexuslink/rpc-types';
 import {
   listAgents,
@@ -11,6 +12,7 @@ import {
   closeAgentSession,
   resolveAgentPermission,
   openHostChat,
+  resolveAgentCwd,
   setAgentBroadcast,
   finishCliTurn,
   parseCursorStreamEvent,
@@ -126,6 +128,14 @@ describe('agent gateway', () => {
     expect(promptAgent(info.agentSessionId, '   ').ok).toBe(false);
     expect(promptAgent('missing-session', 'hi').ok).toBe(false);
     closeAgentSession(info.agentSessionId);
+  });
+
+  test('resolves ~ and rejects missing working directories', () => {
+    expect(resolveAgentCwd('~')).toBe(homedir());
+    expect(resolveAgentCwd()).toBe(homedir());
+    expect(resolveAgentCwd('/tmp')).toBe('/tmp');
+    expect(() => resolveAgentCwd('/this/path/does-not-exist-nexuslink')).toThrow(/directory not found/);
+    expect(resolveAgentCwd('/this/path/does-not-exist-nexuslink', { fallbackHome: true })).toBe(homedir());
   });
 });
 

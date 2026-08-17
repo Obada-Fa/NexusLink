@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useConnectionStore } from '@/store/connection';
+import type { RpcClient } from '@/lib/rpc-client';
 
 interface AgentInfo {
   id: string;
@@ -40,6 +41,24 @@ interface AgentEvent {
   refId?: string;
 }
 
+interface ProjectInfo {
+  name: string;
+  path: string;
+}
+
+interface DirEntry {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+}
+
+function parentUnixPath(path: string): string {
+  if (!path || path === '/') return '/';
+  const trimmed = path.endsWith('/') && path !== '/' ? path.slice(0, -1) : path;
+  const i = trimmed.lastIndexOf('/');
+  return i <= 0 ? '/' : trimmed.slice(0, i);
+}
+
 export default function AgentsPage() {
   const client = useConnectionStore((s) => s.client);
   const status = useConnectionStore((s) => s.status);
@@ -52,6 +71,7 @@ export default function AgentsPage() {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
+  const [picking, setPicking] = useState<AgentInfo | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const unsubRef = useRef<(() => void) | null>(null);
   const activeIdRef = useRef<string | null>(null);
@@ -104,18 +124,25 @@ export default function AgentsPage() {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
   }, [events.length]);
 
-  const newChat = useCallback(
-    async (agent: AgentInfo) => {
-      if (!client) return;
+  const newChat = useCallback((agent: AgentInfo) => {
+    setPicking(agent);
+  }, []);
+
+  const createWithCwd = useCallback(
+    async (cwd: string) => {
+      const agent = picking;
+      if (!client || !agent) return;
+      setPicking(null);
       const created = (await client.request('agent.createSession', {
         agent: agent.id,
         title: agent.name,
+        cwd,
       })) as AgentSessionInfo;
       setSessions((s) => [created, ...s]);
       setActive(created);
       setEvents([]);
     },
-    [client],
+    [client, picking],
   );
 
   const openSession = useCallback(
@@ -237,6 +264,184 @@ export default function AgentsPage() {
           </form>
         </>
       )}
+
+      {picking && client && (
+        <CwdPicker
+          client={client}
+          onCancel={() => setPicking(null)}
+          onPick={(cwd) => void createWithCwd(cwd)}
+        />
+      )}
+    </div>
+  );
+}
+
+function CwdPicker({
+  client,
+  onPick,
+  onCancel,
+}: {
+  client: RpcClient;
+  onPick: (cwd: string) => void;
+  onCancel: () => void;
+}) {
+  const [browse, setBrowse] = useState(false);
+  const [home, setHome] = useState('/');
+  const [cwd, setCwd] = useState('/');
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
+  const [dirs, setDirs] = useState<DirEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [typed, setTyped] = useState('');
+  const [entering, setEntering] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let homeDir = '/';
+      try {
+        const info = (await client.request('system.getInfo')) as { homeDir?: string };
+        if (info.homeDir) homeDir = info.homeDir;
+      } catch { /* keep / */ }
+      const hints: ProjectInfo[] = [{ name: 'Home', path: homeDir }];
+      try {
+        const listed = (await client.request('fs.listProjects')) as ProjectInfo[];
+        for (const p of listed) {
+          if (!hints.some((h) => h.path === p.path)) hints.push(p);
+        }
+      } catch { /* suggestions optional */ }
+      if (!cancelled) {
+        setHome(homeDir);
+        setCwd(homeDir);
+        setProjects(hints);
+        setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
+
+  const listDir = useCallback(
+    async (path: string) => {
+      setLoading(true);
+      setError('');
+      setCwd(path);
+      try {
+        const entries = (await client.request('fs.list', { path })) as DirEntry[];
+        setDirs(entries.filter((e) => e.isDirectory));
+      } catch (e) {
+        setDirs([]);
+        setError(e instanceof Error ? e.message : 'Could not list folder');
+      } finally {
+        setLoading(false);
+      }
+    },
+    [client],
+  );
+
+  const openBrowse = () => {
+    setBrowse(true);
+    void listDir(home);
+  };
+
+  return (
+    <div style={styles.overlay} onClick={onCancel}>
+      <div style={styles.sheet} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.sheetHead}>
+          {browse ? (
+            <button type="button" onClick={() => { setBrowse(false); setError(''); }} style={styles.barBtn}>
+              ←
+            </button>
+          ) : (
+            <span style={{ width: 34 }} />
+          )}
+          <strong>{browse ? 'Browse folders' : 'Working directory'}</strong>
+          {browse ? (
+            <button type="button" onClick={() => onPick(cwd)} style={styles.selectBtn}>
+              Use this folder
+            </button>
+          ) : (
+            <button type="button" onClick={onCancel} style={styles.barBtn}>
+              ✕
+            </button>
+          )}
+        </div>
+        {browse && (
+          <div style={styles.pathRow}>
+            <button
+              type="button"
+              disabled={cwd === '/'}
+              onClick={() => void listDir(parentUnixPath(cwd))}
+              style={styles.barBtn}
+            >
+              ↑
+            </button>
+            <span style={styles.pathText}>{cwd}</span>
+          </div>
+        )}
+        <div style={styles.sheetBody}>
+          {loading ? (
+            <p style={styles.center}>Loading…</p>
+          ) : error ? (
+            <p style={styles.center}>{error}</p>
+          ) : browse ? (
+            dirs.length === 0 ? (
+              <p style={styles.center}>No subfolders — use this folder, or go up.</p>
+            ) : (
+              dirs.map((d) => (
+                <button key={d.path} type="button" onClick={() => void listDir(d.path)} style={styles.row}>
+                  <strong>{d.name}</strong>
+                </button>
+              ))
+            )
+          ) : entering ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const path = typed.trim();
+                if (path) onPick(path);
+              }}
+            >
+              <input
+                autoFocus
+                value={typed}
+                onChange={(e) => setTyped(e.target.value)}
+                placeholder="/home/you/project or ~/code"
+                style={{ ...styles.input, width: '100%', marginBottom: 8 }}
+              />
+              <button type="submit" style={styles.send}>
+                Use folder
+              </button>
+            </form>
+          ) : (
+            <>
+              <button type="button" onClick={openBrowse} style={styles.row}>
+                <strong>Browse folders</strong>
+                <span style={styles.muted}>Any directory on the PC</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setEntering(true);
+                  setTyped(home);
+                }}
+                style={styles.row}
+              >
+                <strong>Enter path</strong>
+                <span style={styles.muted}>Type or paste a folder path</span>
+              </button>
+              <h2 style={styles.section}>Suggestions</h2>
+              {projects.map((p) => (
+                <button key={p.path} type="button" onClick={() => onPick(p.path)} style={styles.row}>
+                  <strong>{p.name}</strong>
+                  <span style={styles.muted}>{p.path}</span>
+                </button>
+              ))}
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -379,4 +584,45 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     cursor: 'pointer',
   },
+  overlay: {
+    position: 'fixed',
+    inset: 0,
+    background: 'rgba(0,0,0,0.55)',
+    display: 'flex',
+    alignItems: 'flex-end',
+    zIndex: 20,
+  },
+  sheet: {
+    width: '100%',
+    maxHeight: '78dvh',
+    background: '#151522',
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  sheetHead: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    padding: '10px 12px',
+    borderBottom: '1px solid #22223a',
+  },
+  pathRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '6px 12px',
+    borderBottom: '1px solid #1c1c30',
+  },
+  pathText: {
+    fontSize: 12,
+    fontFamily: 'ui-monospace, monospace',
+    color: '#89a',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  sheetBody: { overflowY: 'auto', padding: 12 },
 };
