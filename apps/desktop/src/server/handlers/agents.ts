@@ -79,7 +79,17 @@ function spawnEnv(): Record<string, string> {
     if (typeof v === 'string') env[k] = v;
   }
   env.PATH = `${extraBinDirs().join(':')}:${env.PATH ?? ''}`;
+  // Headless: never wait on a TTY login/trust prompt.
+  env.CI = env.CI || '1';
+  env.TERM = 'dumb';
+  env.NO_COLOR = '1';
   return env;
+}
+
+/** How long to wait for the first JSON event before declaring Cursor CLI hung. */
+export function cursorSilenceTimeoutMs(): number {
+  const n = Number(process.env.NEXUS_AGENT_SILENCE_MS);
+  return Number.isFinite(n) && n > 0 ? n : 20_000;
 }
 
 const AGENT_DEFS: AgentDef[] = [
@@ -320,6 +330,7 @@ export function parseCursorToolCall(msg: Record<string, unknown>): {
  * Headless Cursor CLI argv. `--trust` and `--force` are required: without them
  * `cursor-agent --print` blocks on a TTY workspace/permission prompt, stdout
  * stays empty, and the phone chat looks frozen after the user's bubble.
+ * `--stream-partial-output` makes tokens appear on the phone as they arrive.
  */
 export function buildCursorCliArgs(
   bin: string,
@@ -330,6 +341,7 @@ export function buildCursorCliArgs(
     bin,
     '--print',
     '--output-format', 'stream-json',
+    '--stream-partial-output',
     '--trust',
     '--force',
     '--approve-mcps',
@@ -338,6 +350,30 @@ export function buildCursorCliArgs(
   if (opts.sessionId) argv.push('--resume', opts.sessionId);
   argv.push(prompt);
   return argv;
+}
+
+export type CursorAssistantEmit = 'text' | 'text-delta' | 'skip';
+
+/**
+ * Classify a Cursor CLI `assistant` event.
+ *
+ * Without `--stream-partial-output`, each event is a complete message (several
+ * per turn, between tool calls). With it:
+ * - `timestamp_ms` present, `model_call_id` absent → streaming delta
+ * - both present → duplicate flush before a tool call
+ * - both absent after deltas → duplicate final flush
+ */
+export function classifyCursorAssistant(
+  msg: Record<string, unknown>,
+  opts: { streamedDeltas: boolean },
+): CursorAssistantEmit {
+  const hasTs = typeof msg.timestamp_ms === 'number';
+  const hasMc = Boolean(msg.model_call_id);
+  if (hasTs && !hasMc) return 'text-delta';
+  if (hasTs && hasMc) return 'skip';
+  // Complete message (no partial streaming), or the duplicate end-of-turn flush.
+  if (opts.streamedDeltas) return 'skip';
+  return 'text';
 }
 
 /** OpenCode headless: `opencode run --format json --auto`. */
@@ -537,7 +573,9 @@ class CursorAdapter implements AgentAdapter {
   private chatId: string | null = null;
   private sawResult = false;
   private sawAssistantText = false;
+  private streamedDeltas = false;
   private stderr = '';
+  private silenceTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private session: AgentSession, private bin = 'cursor-agent') {}
 
@@ -545,6 +583,7 @@ class CursorAdapter implements AgentAdapter {
     this.cancel();
     this.sawResult = false;
     this.sawAssistantText = false;
+    this.streamedDeltas = false;
     this.stderr = '';
     emit(this.session, { kind: 'thinking', text: 'Waiting for Cursor CLI…' });
 
@@ -572,12 +611,14 @@ class CursorAdapter implements AgentAdapter {
     }
 
     this.proc = proc;
+    this.armSilenceWatchdog(proc);
     const stderrP = collectStream(proc.stderr as unknown as ReadableStream<Uint8Array>);
     void pumpJsonLines(proc, (msg) => {
       if (this.proc === proc) this.onEvent(msg);
     }).catch(() => {});
     proc.exited.then(async (code) => {
       const errText = await stderrP.catch(() => '');
+      this.clearSilenceWatchdog();
       if (this.proc !== proc) return;
       this.proc = null;
       this.stderr = errText;
@@ -585,6 +626,27 @@ class CursorAdapter implements AgentAdapter {
       setBusy(this.session, false);
       emit(this.session, { kind: 'error', text: this.failMessage(code) });
     }).catch(() => {});
+  }
+
+  private armSilenceWatchdog(proc: Proc): void {
+    this.clearSilenceWatchdog();
+    this.silenceTimer = setTimeout(() => {
+      if (this.proc !== proc || this.sawResult || this.sawAssistantText) return;
+      this.clearSilenceWatchdog();
+      setBusy(this.session, false);
+      emit(this.session, {
+        kind: 'error',
+        text: 'Cursor CLI did not respond. On the PC run `cursor-agent login` (or set CURSOR_API_KEY), then try again.',
+      });
+      this.cancel();
+    }, cursorSilenceTimeoutMs());
+  }
+
+  private clearSilenceWatchdog(): void {
+    if (this.silenceTimer) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+    }
   }
 
   private failMessage(code: number | null): string {
@@ -598,6 +660,7 @@ class CursorAdapter implements AgentAdapter {
   }
 
   private onEvent(msg: Record<string, unknown>): void {
+    this.clearSilenceWatchdog();
     const s = this.session;
     for (const key of ['chatId', 'chat_id', 'sessionId', 'session_id']) {
       if (typeof msg[key] === 'string' && (msg[key] as string).length > 0) {
@@ -606,25 +669,21 @@ class CursorAdapter implements AgentAdapter {
     }
     const type = msg.type;
     if (type === 'assistant') {
-      // Skip duplicate flushes from --stream-partial-output (model_call_id, or
-      // final flush with no timestamp after we already showed text).
-      if (msg.model_call_id) return;
       const message = msg.message as Record<string, unknown> | undefined;
       const text = contentToText(message?.content);
       if (!text.trim()) return;
-      const isDelta = typeof msg.timestamp_ms === 'number';
-      if (isDelta) {
+      const action = classifyCursorAssistant(msg, { streamedDeltas: this.streamedDeltas });
+      if (action === 'skip') return;
+      if (action === 'text-delta') {
         emit(s, { kind: 'text-delta', text });
         this.sawAssistantText = true;
-      } else if (!this.sawAssistantText || !msg.timestamp_ms) {
-        // Complete assistant message (no --stream-partial-output). Skip the
-        // trailing duplicate flush that has neither timestamp nor new content
-        // after deltas — handled above via sawAssistantText + empty skip.
-        if (this.sawAssistantText) return;
+        this.streamedDeltas = true;
+      } else {
         emit(s, { kind: 'text', text });
         this.sawAssistantText = true;
       }
     } else if (type === 'tool_call') {
+      this.streamedDeltas = false;
       const sub = msg.subtype;
       const parsed = parseCursorToolCall(msg);
       const refId = String(msg.call_id ?? msg.id ?? '');
@@ -666,6 +725,7 @@ class CursorAdapter implements AgentAdapter {
   }
 
   cancel(): void {
+    this.clearSilenceWatchdog();
     const proc = this.proc;
     this.proc = null;
     try {
