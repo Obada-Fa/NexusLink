@@ -22,6 +22,15 @@ import {
   extractAuthUrl,
   isCliAuthError,
   rewriteCliAuthError,
+  cursorModelFlag,
+  withImageMentions,
+  materializeAgentImages,
+  buildCursorArgv,
+  buildOpencodeArgv,
+  buildAgyArgv,
+  claudeSpawnArgs,
+  claudeUserContent,
+  thinkingToEffort,
 } from '../agents';
 
 describe('agent gateway', () => {
@@ -34,6 +43,11 @@ describe('agent gateway', () => {
     expect(ids).toContain('antigravity');
     expect(ids).toContain('mock');
     expect(agents.find((a) => a.id === 'mock')!.available).toBe(true);
+    const cursor = agents.find((a) => a.id === 'cursor')!;
+    expect(cursor.capabilities.modes).toEqual(['agent', 'plan', 'ask']);
+    expect(cursor.capabilities.images).toBe(true);
+    expect(cursor.capabilities.thinkingLevels).toContain('extra-high');
+    expect(cursor.capabilities.models.some((m) => m.id === 'auto')).toBe(true);
   });
 
   test('mock conversation streams normalized events and keeps history', async () => {
@@ -90,6 +104,111 @@ describe('agent gateway', () => {
     expect(promptAgent(info.agentSessionId, '   ').ok).toBe(false);
     expect(promptAgent('missing-session', 'hi').ok).toBe(false);
     closeAgentSession(info.agentSessionId);
+  });
+});
+
+describe('composer flags and attachments', () => {
+  test('maps thinking levels onto Cursor --model effort brackets', () => {
+    expect(thinkingToEffort('extra-high')).toBe('high');
+    expect(cursorModelFlag('auto', 'high')).toBeUndefined();
+    expect(cursorModelFlag('gpt-5', 'medium')).toBe('gpt-5');
+    expect(cursorModelFlag('claude-opus-4-8', 'high')).toBe('claude-opus-4-8[effort=high]');
+    expect(cursorModelFlag('gpt-5', 'extra-high')).toBe('gpt-5[effort=high,fast=false]');
+  });
+
+  test('builds Cursor / OpenCode / Claude / Antigravity argv from composer opts', () => {
+    const cursor = buildCursorArgv({
+      bin: 'cursor-agent',
+      cwd: '/tmp/proj',
+      chatId: 'abc',
+      text: 'fix the bug',
+      model: 'gpt-5',
+      mode: 'plan',
+      thinking: 'high',
+      imagePaths: ['/tmp/shot.jpg'],
+    });
+    expect(cursor).toContain('--mode');
+    expect(cursor).toContain('plan');
+    expect(cursor).toContain('--model');
+    expect(cursor).toContain('gpt-5[effort=high]');
+    expect(cursor).toContain('--resume');
+    expect(cursor.at(-1)).toContain('@/tmp/shot.jpg');
+
+    const oc = buildOpencodeArgv({
+      bin: 'opencode',
+      cwd: '/tmp/proj',
+      text: 'hi',
+      mode: 'plan',
+      thinking: 'max',
+      imagePaths: ['/tmp/a.png'],
+    });
+    expect(oc).toContain('--agent');
+    expect(oc).toContain('--variant');
+    expect(oc).toContain('max');
+    expect(oc).toContain('--file');
+    expect(oc).toContain('/tmp/a.png');
+
+    const agy = buildAgyArgv({
+      bin: 'agy',
+      text: 'plan this',
+      mode: 'plan',
+      thinking: 'low',
+    });
+    expect(agy).toContain('--mode');
+    expect(agy).toContain('--effort');
+    expect(agy).toContain('low');
+
+    const claude = claudeSpawnArgs({ bin: 'claude', mode: 'plan', model: 'opus', thinking: 'high' });
+    expect(claude).toContain('--permission-mode');
+    expect(claude).toContain('plan');
+    expect(claude).toContain('--model');
+    expect(claude).toContain('opus');
+    expect(claude).toContain('--effort');
+    expect(claudeUserContent('look', [{ mime: 'image/jpeg', data: 'abc' }])).toEqual([
+      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'abc' } },
+      { type: 'text', text: 'look' },
+    ]);
+    expect(withImageMentions('hi', ['/a.jpg'])).toBe('hi\n\n@/a.jpg');
+  });
+
+  test('writes phone photos to a host inbox and forwards them to the mock agent', async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString('base64');
+    const staged = materializeAgentImages('test-session', [
+      { name: 'shot.jpg', mime: 'image/jpeg', data: jpeg },
+    ]);
+    expect(staged.paths).toHaveLength(1);
+    expect(staged.files[0]!.name).toBe('shot.jpg');
+    expect(await Bun.file(staged.paths[0]!).exists()).toBe(true);
+
+    const pushed: AgentEvent[] = [];
+    setAgentBroadcast((msg: WsMessage) => {
+      if (msg.type === 'agent-event') pushed.push(msg.event);
+    });
+    const info = createAgentSession('mock', '/tmp', 'Photos');
+    expect(promptAgent(info.agentSessionId, '  ', {}).ok).toBe(false);
+    expect(promptAgent(info.agentSessionId, '', {
+      mode: 'plan',
+      thinking: 'high',
+      model: 'demo',
+      images: [{ name: 'shot.jpg', mime: 'image/jpeg', data: jpeg }],
+    }).ok).toBe(true);
+
+    const deadline = Date.now() + 5000;
+    while (!pushed.some((e) => e.kind === 'permission-request') && Date.now() < deadline) {
+      await Bun.sleep(50);
+    }
+    expect(pushed[0]?.kind).toBe('user');
+    expect(pushed[0]?.images).toEqual(['shot.jpg']);
+    expect(resolveAgentPermission(info.agentSessionId, 'mock-perm', true).ok).toBe(true);
+    while (!pushed.some((e) => e.kind === 'result') && Date.now() < deadline) {
+      await Bun.sleep(50);
+    }
+    const reply = pushed.find((e) => e.kind === 'text')?.text ?? '';
+    expect(reply).toContain('mode=plan');
+    expect(reply).toContain('thinking=high');
+    expect(reply).toContain('1 photo(s)');
+    closeAgentSession(info.agentSessionId);
+    setAgentBroadcast(() => {});
   });
 });
 

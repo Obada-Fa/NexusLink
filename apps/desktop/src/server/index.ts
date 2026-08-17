@@ -19,7 +19,7 @@ import {
   cancelAgent, closeAgentSession, agentHistory, resolveAgentPermission, setAgentBroadcast,
 } from './handlers/agents';
 import { startIde, stopIde, ideStatus } from './handlers/ide';
-import type { WebRtcSignal } from '@nexuslink/rpc-types';
+import type { WebRtcSignal, AgentImageAttachment } from '@nexuslink/rpc-types';
 import { serveStatic, staticAvailable } from './static-server';
 import { printLaunchBanner } from './launch-banner';
 import { startSidecarReader } from './sidecar-reader';
@@ -250,7 +250,20 @@ export async function startRpcServer(port = 45678) {
         result = listAgentSessions();
         break;
       case 'agent.prompt':
-        result = promptAgent(params.agentSessionId as string, params.text as string);
+        result = promptAgent(
+          params.agentSessionId as string,
+          (params.text as string) ?? '',
+          {
+            model: typeof params.model === 'string' ? params.model : undefined,
+            mode: params.mode === 'plan' || params.mode === 'ask' || params.mode === 'agent'
+              ? params.mode
+              : undefined,
+            thinking: typeof params.thinking === 'string' ? params.thinking : undefined,
+            images: Array.isArray(params.images)
+              ? params.images as AgentImageAttachment[]
+              : undefined,
+          },
+        );
         break;
       case 'agent.permission':
         result = resolveAgentPermission(

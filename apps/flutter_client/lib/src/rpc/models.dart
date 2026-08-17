@@ -109,17 +109,79 @@ class AppSessionInfo {
 }
 
 /// An AI agent CLI on the PC (Claude Code, Cursor CLI, demo agent).
+class AgentModelOption {
+  final String id;
+  final String name;
+  AgentModelOption({required this.id, required this.name});
+  factory AgentModelOption.fromJson(Map<String, dynamic> j) => AgentModelOption(
+        id: j['id'] as String,
+        name: (j['name'] as String?) ?? j['id'] as String,
+      );
+}
+
+class AgentCapabilities {
+  final List<String> modes;
+  final List<String> thinkingLevels;
+  final List<AgentModelOption> models;
+  final bool images;
+
+  const AgentCapabilities({
+    required this.modes,
+    required this.thinkingLevels,
+    required this.models,
+    required this.images,
+  });
+
+  static const empty = AgentCapabilities(
+    modes: ['agent'],
+    thinkingLevels: [],
+    models: [],
+    images: false,
+  );
+
+  factory AgentCapabilities.fromJson(dynamic raw) {
+    if (raw is! Map) return AgentCapabilities.empty;
+    final j = Map<String, dynamic>.from(raw);
+    final modes = (j['modes'] as List?)
+            ?.map((e) => '$e')
+            .where((e) => e == 'agent' || e == 'plan' || e == 'ask')
+            .toList() ??
+        const ['agent'];
+    return AgentCapabilities(
+      modes: modes.isEmpty ? const ['agent'] : modes,
+      thinkingLevels: (j['thinkingLevels'] as List?)
+              ?.map((e) => '$e')
+              .where((e) => e.isNotEmpty)
+              .toList() ??
+          const [],
+      models: (j['models'] as List?)
+              ?.whereType<Map>()
+              .map((e) => AgentModelOption.fromJson(Map<String, dynamic>.from(e)))
+              .toList() ??
+          const [],
+      images: j['images'] as bool? ?? false,
+    );
+  }
+}
+
 class AgentInfo {
   final String id;
   final String name;
   final bool available;
+  final AgentCapabilities capabilities;
 
-  AgentInfo({required this.id, required this.name, required this.available});
+  AgentInfo({
+    required this.id,
+    required this.name,
+    required this.available,
+    this.capabilities = AgentCapabilities.empty,
+  });
 
   factory AgentInfo.fromJson(Map<String, dynamic> j) => AgentInfo(
         id: j['id'] as String,
         name: (j['name'] as String?) ?? j['id'] as String,
         available: j['available'] as bool? ?? false,
+        capabilities: AgentCapabilities.fromJson(j['capabilities']),
       );
 }
 
@@ -160,6 +222,7 @@ class AgentEvent {
   final String? toolInput;
   final String? toolOutput;
   final String? refId;
+  final List<String> images;
 
   AgentEvent({
     required this.seq,
@@ -170,6 +233,7 @@ class AgentEvent {
     this.toolInput,
     this.toolOutput,
     this.refId,
+    this.images = const [],
   });
 
   factory AgentEvent.fromJson(Map<String, dynamic> j) => AgentEvent(
@@ -181,6 +245,7 @@ class AgentEvent {
         toolInput: j['toolInput'] as String?,
         toolOutput: j['toolOutput'] as String?,
         refId: j['refId'] as String?,
+        images: (j['images'] as List?)?.map((e) => '$e').toList() ?? const [],
       );
 }
 
