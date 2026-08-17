@@ -1,4 +1,5 @@
-// Agent gateway: run AI coding agents (Claude Code, Cursor CLI) on the host
+// Agent gateway: run AI coding agents (Claude Code, Cursor CLI, OpenCode,
+// Antigravity) on the host and expose them to the phone as chat sessions.
 // and expose them to the phone as chat sessions with a normalized event
 // stream — the phone renders a native chat UI, never a terminal.
 //
@@ -41,6 +42,12 @@ function extraBinDirs(): string[] {
     `${home}/.local/bin`,
     `${home}/.cursor/bin`,
     `${home}/.cursor/cli`,
+    `${home}/.opencode/bin`,
+    `${home}/.local/share/opencode/bin`,
+    `${home}/.local/share/agy/bin`,
+    `${home}/.gemini/antigravity-cli`,
+    '/opt/Antigravity/bin',
+    '/opt/antigravity/bin',
     '/usr/local/bin',
     '/opt/cursor/bin',
   ];
@@ -87,6 +94,18 @@ const AGENT_DEFS: AgentDef[] = [
     name: 'Cursor CLI',
     bins: ['cursor-agent', 'agent'],
     makeAdapter: (s, bin) => new CursorAdapter(s, bin ?? 'cursor-agent'),
+  },
+  {
+    id: 'opencode',
+    name: 'OpenCode',
+    bins: ['opencode'],
+    makeAdapter: (s, bin) => new OpenCodeAdapter(s, bin ?? 'opencode'),
+  },
+  {
+    id: 'antigravity',
+    name: 'Antigravity',
+    bins: ['agy', 'antigravity'],
+    makeAdapter: (s, bin) => new AntigravityAdapter(s, bin ?? 'agy'),
   },
   {
     id: 'mock',
@@ -317,6 +336,36 @@ export function buildCursorCliArgs(
     '--workspace', opts.cwd,
   ];
   if (opts.sessionId) argv.push('--resume', opts.sessionId);
+  argv.push(prompt);
+  return argv;
+}
+
+/** OpenCode headless: `opencode run --format json --auto`. */
+export function buildOpenCodeArgs(
+  bin: string,
+  prompt: string,
+  opts: { sessionId?: string | null; cwd: string },
+): string[] {
+  const argv = [bin, 'run', '--format', 'json', '--auto', '--dir', opts.cwd];
+  if (opts.sessionId) argv.push('--session', opts.sessionId);
+  argv.push(prompt);
+  return argv;
+}
+
+/** Antigravity CLI headless: `agy -p --output-format stream-json`. */
+export function buildAntigravityArgs(
+  bin: string,
+  prompt: string,
+  opts: { sessionId?: string | null; cwd: string },
+): string[] {
+  const argv = [
+    bin,
+    '--print',
+    '--output-format', 'stream-json',
+    '--dangerously-skip-permissions',
+    '--print-timeout', '15m',
+  ];
+  if (opts.sessionId) argv.push('--conversation', opts.sessionId);
   argv.push(prompt);
   return argv;
 }
@@ -628,6 +677,246 @@ class CursorAdapter implements AgentAdapter {
 
   close(): void {
     this.cancel();
+  }
+}
+
+abstract class JsonLineCliAdapter implements AgentAdapter {
+  protected proc: Proc | null = null;
+  protected chatId: string | null = null;
+  protected sawResult = false;
+  protected sawAssistantText = false;
+  protected stderr = '';
+
+  constructor(
+    protected session: AgentSession,
+    protected bin: string,
+    private meta: { label: string; waitingText: string; loginCmd: string },
+  ) {}
+
+  protected abstract buildArgv(prompt: string): string[];
+  protected abstract handleEvent(msg: Record<string, unknown>): void;
+
+  prompt(text: string): void {
+    this.cancel();
+    this.sawResult = false;
+    this.sawAssistantText = false;
+    this.stderr = '';
+    emit(this.session, { kind: 'thinking', text: this.meta.waitingText });
+
+    let proc: Proc;
+    try {
+      proc = Bun.spawn(this.buildArgv(text), {
+        cwd: this.session.info.cwd,
+        stdin: 'ignore',
+        stdout: 'pipe',
+        stderr: 'pipe',
+        env: spawnEnv(),
+      } as unknown as SpawnOpts);
+    } catch (err) {
+      setBusy(this.session, false);
+      emit(this.session, {
+        kind: 'error',
+        text: `Could not start ${this.meta.label} (${this.bin}): ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+
+    this.proc = proc;
+    const stderrP = collectStream(proc.stderr as unknown as ReadableStream<Uint8Array>);
+    void pumpJsonLines(proc, (msg) => {
+      if (this.proc === proc) this.handleEvent(msg);
+    }).catch(() => {});
+    proc.exited.then(async (code) => {
+      const errText = await stderrP.catch(() => '');
+      if (this.proc !== proc) return;
+      this.proc = null;
+      this.stderr = errText;
+      if (this.sawResult) return;
+      if (this.sawAssistantText && (code === 0 || code === null)) {
+        setBusy(this.session, false);
+        emit(this.session, { kind: 'result', text: '' });
+        return;
+      }
+      setBusy(this.session, false);
+      emit(this.session, { kind: 'error', text: this.failMessage(code) });
+    }).catch(() => {});
+  }
+
+  protected finishTurn(errorText?: string): void {
+    this.sawResult = true;
+    setBusy(this.session, false);
+    if (errorText) emit(this.session, { kind: 'error', text: errorText });
+    else emit(this.session, { kind: 'result', text: '' });
+    try {
+      this.proc?.kill();
+    } catch {
+      // already exiting
+    }
+  }
+
+  protected failMessage(code: number | null): string {
+    const err = this.stderr.replace(/\s+/g, ' ').trim();
+    const loginHint = ` On the PC run \`${this.meta.loginCmd}\`.`;
+    if (/log ?in|auth|api[- ]key|unauthorized|not signed|authentication required/i.test(err)) {
+      return (err || `${this.meta.label} is not signed in.`) + loginHint;
+    }
+    if (err) return err.slice(0, 1500);
+    return `${this.meta.label} exited without a reply (code ${code ?? 'unknown'}).${loginHint}`;
+  }
+
+  cancel(): void {
+    const proc = this.proc;
+    this.proc = null;
+    try {
+      proc?.kill();
+    } catch {
+      // already gone
+    }
+  }
+
+  close(): void {
+    this.cancel();
+  }
+}
+
+class OpenCodeAdapter extends JsonLineCliAdapter {
+  constructor(session: AgentSession, bin = 'opencode') {
+    super(session, bin, {
+      label: 'OpenCode',
+      waitingText: 'Waiting for OpenCode…',
+      loginCmd: 'opencode auth login',
+    });
+  }
+
+  protected buildArgv(prompt: string): string[] {
+    return buildOpenCodeArgs(this.bin, prompt, {
+      sessionId: this.chatId,
+      cwd: this.session.info.cwd,
+    });
+  }
+
+  protected handleEvent(msg: Record<string, unknown>): void {
+    if (typeof msg.sessionID === 'string' && msg.sessionID) this.chatId = msg.sessionID;
+    const type = msg.type;
+    const part = msg.part as Record<string, unknown> | undefined;
+    if (type === 'text') {
+      const text = String(part?.text ?? msg.text ?? '');
+      if (!text.trim()) return;
+      emit(this.session, { kind: 'text', text });
+      this.sawAssistantText = true;
+    } else if (type === 'reasoning') {
+      const text = String(part?.text ?? '');
+      if (text.trim()) emit(this.session, { kind: 'thinking', text });
+    } else if (type === 'tool_use') {
+      const state = (part?.state as Record<string, unknown> | undefined) ?? {};
+      const refId = String(part?.callID ?? part?.id ?? '');
+      emit(this.session, {
+        kind: 'tool-start',
+        toolName: String(part?.tool ?? 'tool'),
+        toolInput: JSON.stringify(state.input ?? {}, null, 2).slice(0, 4000),
+        refId,
+      });
+      emit(this.session, {
+        kind: 'tool-end',
+        toolName: String(part?.tool ?? 'tool'),
+        refId,
+        toolOutput: String(state.output ?? '').slice(0, 4000),
+      });
+    } else if (type === 'error') {
+      const err = msg.error as Record<string, unknown> | string | undefined;
+      const data = err && typeof err === 'object' ? (err.data as Record<string, unknown> | undefined) : undefined;
+      const text = typeof err === 'string'
+        ? err
+        : String(data?.message ?? (err && typeof err === 'object' ? err.name : '') ?? 'OpenCode error');
+      this.finishTurn(text);
+    } else if (type === 'step_finish') {
+      const reason = part?.reason;
+      if (reason === 'tool-calls') return;
+      this.finishTurn();
+    }
+  }
+}
+
+class AntigravityAdapter extends JsonLineCliAdapter {
+  constructor(session: AgentSession, bin = 'agy') {
+    super(session, bin, {
+      label: 'Antigravity',
+      waitingText: 'Waiting for Antigravity…',
+      loginCmd: 'agy',
+    });
+  }
+
+  protected buildArgv(prompt: string): string[] {
+    return buildAntigravityArgs(this.bin, prompt, {
+      sessionId: this.chatId,
+      cwd: this.session.info.cwd,
+    });
+  }
+
+  protected handleEvent(msg: Record<string, unknown>): void {
+    const event = String(msg.event ?? msg.type ?? '');
+    if (event === 'init') {
+      const init = (msg.init as Record<string, unknown> | undefined) ?? msg;
+      const id = String(msg.conversation_id ?? init.conversation_id ?? '');
+      if (id) this.chatId = id;
+      emit(this.session, { kind: 'status', text: 'ready' });
+      return;
+    }
+    if (event === 'step_update') {
+      const step = (msg.step_update as Record<string, unknown> | undefined) ?? msg;
+      const conv = String(step.conversation_id ?? '');
+      if (conv) this.chatId = conv;
+      const stepType = String(step.step_type ?? '');
+      const state = String(step.state ?? '');
+      if (stepType === 'agent_response') {
+        const delta = String(step.text_delta ?? '');
+        if (!delta.trim()) return;
+        if (state === 'ACTIVE') {
+          emit(this.session, { kind: 'text-delta', text: delta });
+          this.sawAssistantText = true;
+        } else if (!this.sawAssistantText) {
+          emit(this.session, { kind: 'text', text: delta });
+          this.sawAssistantText = true;
+        }
+      } else if (stepType === 'tool') {
+        const info = (step.tool_info as Record<string, unknown> | undefined) ?? {};
+        const name = String(step.tool_name ?? info.name ?? 'tool');
+        const refId = `${step.step_index ?? name}`;
+        if (state === 'ACTIVE') {
+          emit(this.session, {
+            kind: 'tool-start',
+            toolName: name,
+            toolInput: JSON.stringify(info.parameters ?? {}, null, 2).slice(0, 4000),
+            refId,
+          });
+        } else {
+          emit(this.session, {
+            kind: 'tool-end',
+            toolName: name,
+            refId,
+            toolOutput: String(info.output ?? info.error ?? '').slice(0, 4000),
+          });
+        }
+      }
+      return;
+    }
+    if (event === 'result') {
+      const result = (msg.result as Record<string, unknown> | undefined) ?? msg;
+      const conv = String(result.conversation_id ?? '');
+      if (conv) this.chatId = conv;
+      const status = String(result.status ?? '');
+      const text = String(result.response ?? '');
+      if (status && status !== 'SUCCESS') {
+        const err = String(result.error ?? '');
+        this.finishTurn(err || text || `Antigravity status: ${status}`);
+        return;
+      }
+      if (text && !this.sawAssistantText) {
+        emit(this.session, { kind: 'text', text });
+        this.sawAssistantText = true;
+      }
+      this.finishTurn();
+    }
   }
 }
 
