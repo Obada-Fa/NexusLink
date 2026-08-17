@@ -226,43 +226,38 @@ describe('GestureEngine v2 (direct mode)', () => {
     return { el, events, engine };
   }
 
-  it('one-finger vertical pan emits mouse-scroll (not mouse-move)', () => {
+  it('one-finger vertical pan emits a left drag (not cursor-move or scroll)', () => {
     const { el, events, engine } = setup();
     el.dispatchEvent(new MockTouchEvent('touchstart', [touch(200, 600)]));
     el.dispatchEvent(new MockTouchEvent('touchmove', [touch(200, 540)]));
     el.dispatchEvent(new MockTouchEvent('touchmove', [touch(200, 480)]));
     el.dispatchEvent(new MockTouchEvent('touchend', []));
 
-    const scrolls = events.filter((e) => e.type === 'mouse-scroll');
-    const moves = events.filter((e) => e.type === 'mouse-move');
-    expect(scrolls.length).toBeGreaterThan(0);
-    expect(moves.length).toBe(0);
-    // Vertical pan locks to the vertical axis: no horizontal scroll component.
-    for (const s of scrolls) {
-      if (s.type === 'mouse-scroll') expect(s.deltaX).toBe(0);
-    }
+    expect(events.some((e) => e.type === 'drag-start')).toBe(true);
+    expect(events.some((e) => e.type === 'drag-move')).toBe(true);
+    expect(events.some((e) => e.type === 'drag-end')).toBe(true);
+    expect(events.some((e) => e.type === 'mouse-move')).toBe(false);
+    expect(events.some((e) => e.type === 'mouse-scroll')).toBe(false);
     engine.detach();
   });
 
-  it('produces a momentum fling after a fast flick, cancelled by a new touch', () => {
+  it('two-finger flick produces a momentum fling, cancelled by a new touch', () => {
     const sched = new ManualScheduler();
     const { el, events, engine } = setup(sched);
 
-    el.dispatchEvent(new MockTouchEvent('touchstart', [touch(200, 600)]));
+    el.dispatchEvent(new MockTouchEvent('touchstart', [touch(180, 600), touch(220, 600, 1)]));
     let y = 600;
     for (let i = 0; i < 5; i++) {
       sched.tick(16);
       y -= 40;
-      el.dispatchEvent(new MockTouchEvent('touchmove', [touch(200, y)]));
+      el.dispatchEvent(new MockTouchEvent('touchmove', [touch(180, y), touch(220, y, 1)]));
     }
     el.dispatchEvent(new MockTouchEvent('touchend', []));
 
-    // Pump animation frames: inertial scroll events should be produced.
     for (let i = 0; i < 20; i++) sched.frame(16);
     const inertial = events.filter((e) => e.type === 'mouse-scroll' && e.inertial === true);
     expect(inertial.length).toBeGreaterThan(0);
 
-    // Finger-catch: a new touch cancels the fling immediately.
     const countBefore = events.length;
     el.dispatchEvent(new MockTouchEvent('touchstart', [touch(200, 600)]));
     for (let i = 0; i < 20; i++) sched.frame(16);
@@ -274,16 +269,16 @@ describe('GestureEngine v2 (direct mode)', () => {
     engine.detach();
   });
 
-  it('slow drag below the fling threshold does not start inertia', () => {
+  it('slow two-finger pan below the fling threshold does not start inertia', () => {
     const sched = new ManualScheduler();
     const { el, events, engine } = setup(sched);
 
-    el.dispatchEvent(new MockTouchEvent('touchstart', [touch(200, 600)]));
+    el.dispatchEvent(new MockTouchEvent('touchstart', [touch(180, 600), touch(220, 600, 1)]));
     let y = 600;
     for (let i = 0; i < 4; i++) {
-      sched.tick(200); // very slow: ~large dt => low velocity
+      sched.tick(200);
       y -= 5;
-      el.dispatchEvent(new MockTouchEvent('touchmove', [touch(200, y)]));
+      el.dispatchEvent(new MockTouchEvent('touchmove', [touch(180, y), touch(220, y, 1)]));
     }
     el.dispatchEvent(new MockTouchEvent('touchend', []));
     for (let i = 0; i < 20; i++) sched.frame(16);

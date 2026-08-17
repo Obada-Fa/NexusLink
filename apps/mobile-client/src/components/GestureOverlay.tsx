@@ -122,9 +122,10 @@ export default function GestureOverlay({
     if (!el) return;
 
     const callbacks = { onGesture: handleGesture };
-    // Direct manipulation is the default paradigm: one-finger pan = momentum scroll.
+    // Native touch: tap/drag at the finger. Trackpad is the Precision toggle.
     const engine = new GestureEngine(el, callbacks, { mode: 'direct' });
     engine.attach();
+    if (sessionId) engine.setFit('fill');
     engineRef.current = engine;
 
     // Adopted-window mode: touch space IS the captured region. Otherwise fall
@@ -149,7 +150,7 @@ export default function GestureOverlay({
       engine.detach();
       engineRef.current = null;
     };
-  }, [viewportRef, handleGesture, client, status, region]);
+  }, [viewportRef, handleGesture, client, status, region, sessionId]);
 
   useEffect(() => {
     const engine = engineRef.current;
@@ -177,7 +178,7 @@ export default function GestureOverlay({
         }}
         aria-label={`Precision mode: ${precision}`}
       >
-        {precision === 'precision' ? 'Precision: ON' : 'Precision: OFF'}
+        {precision === 'precision' ? 'Mouse' : 'Touch'}
       </button>
 
       {lastGesture ? (

@@ -119,7 +119,7 @@ export function mouseClick(
   const b = MOUSE_BUTTON[button] ?? '1';
   const lines =
     typeof x === 'number' && typeof y === 'number'
-      ? [`mousemove ${r(x)} ${r(y)}`, `click ${b}`]
+      ? [`mousemove --sync ${r(x)} ${r(y)}`, `click ${b}`]
       : [`click ${b}`];
   return { ok: forDisplay(display).send(...lines) };
 }
@@ -133,7 +133,7 @@ export function buttonDown(
 ): { ok: boolean } {
   const b = MOUSE_BUTTON[button] ?? '1';
   const lines: string[] = [];
-  if (typeof x === 'number' && typeof y === 'number') lines.push(`mousemove ${r(x)} ${r(y)}`);
+  if (typeof x === 'number' && typeof y === 'number') lines.push(`mousemove --sync ${r(x)} ${r(y)}`);
   lines.push(`mousedown ${b}`);
   return { ok: forDisplay(display).send(...lines) };
 }
@@ -147,14 +147,14 @@ export function buttonUp(
 ): { ok: boolean } {
   const b = MOUSE_BUTTON[button] ?? '1';
   const lines: string[] = [];
-  if (typeof x === 'number' && typeof y === 'number') lines.push(`mousemove ${r(x)} ${r(y)}`);
+  if (typeof x === 'number' && typeof y === 'number') lines.push(`mousemove --sync ${r(x)} ${r(y)}`);
   lines.push(`mouseup ${b}`);
   return { ok: forDisplay(display).send(...lines) };
 }
 
 /** Absolute pointer move (drag motion). */
 export function mouseMoveAbs(x: number, y: number, display?: string): { ok: boolean } {
-  return { ok: forDisplay(display).send(`mousemove ${r(x)} ${r(y)}`) };
+  return { ok: forDisplay(display).send(`mousemove --sync ${r(x)} ${r(y)}`) };
 }
 
 function takeClicks(inj: DisplayInjector, axis: 'x' | 'y', delta: number): number {
@@ -187,7 +187,7 @@ export function mouseScroll(
   const inj = forDisplay(display);
   const lines: string[] = [];
   if (typeof x === 'number' && typeof y === 'number' && (x !== 0 || y !== 0)) {
-    lines.push(`mousemove ${r(x)} ${r(y)}`);
+    lines.push(`mousemove --sync ${r(x)} ${r(y)}`);
   }
   const mods = (modifiers ?? []).filter(safeCombo);
   for (const m of mods) lines.push(`keydown ${m}`);
