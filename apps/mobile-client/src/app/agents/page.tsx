@@ -41,6 +41,8 @@ export default function AgentsPage() {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [sendError, setSendError] = useState('');
   const listRef = useRef<HTMLDivElement | null>(null);
   const unsubRef = useRef<(() => void) | null>(null);
   const activeIdRef = useRef<string | null>(null);
@@ -66,6 +68,10 @@ export default function AgentsPage() {
     unsubRef.current = client.subscribe('agent-event', (msg: unknown) => {
       const m = msg as { agentSessionId?: string; event?: AgentEvent };
       if (!m.event || m.agentSessionId !== activeIdRef.current) return;
+      if (m.event.kind === 'user') setBusy(true);
+      if (m.event.kind === 'result' || m.event.kind === 'error') setBusy(false);
+      if (m.event.kind === 'result' && !(m.event.text || '').trim()) return;
+      if (m.event.kind === 'status') return;
       setEvents((prev) => [...prev, m.event!]);
       if (m.event.kind === 'permission-request' && m.event.refId) {
         const allow = window.confirm(m.event.text || `Allow ${m.event.toolName || 'this tool'}?`);
@@ -89,13 +95,20 @@ export default function AgentsPage() {
   const newChat = useCallback(
     async (agent: AgentInfo) => {
       if (!client) return;
-      const created = (await client.request('agent.createSession', {
-        agent: agent.id,
-        title: agent.name,
-      })) as AgentSessionInfo;
-      setSessions((s) => [created, ...s]);
-      setActive(created);
-      setEvents([]);
+      try {
+        const created = (await client.request('agent.createSession', {
+          agent: agent.id,
+          title: agent.name,
+        })) as AgentSessionInfo;
+        setSessions((s) => [created, ...s]);
+        setActive(created);
+        setEvents([]);
+        setBusy(false);
+        setSendError('');
+        setError('');
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Could not start that agent.');
+      }
     },
     [client],
   );
@@ -108,19 +121,28 @@ export default function AgentsPage() {
       })) as AgentEvent[];
       setActive(s);
       setEvents(history);
+      setBusy(false);
+      setSendError('');
     },
     [client],
   );
 
   const send = useCallback(async () => {
     const text = draft.trim();
-    if (!text || !client || !active) return;
+    if (!text || !client || !active || busy) return;
     setDraft('');
-    await client.request('agent.prompt', {
-      agentSessionId: active.agentSessionId,
-      text,
-    });
-  }, [draft, client, active]);
+    setBusy(true);
+    setSendError('');
+    try {
+      await client.request('agent.prompt', {
+        agentSessionId: active.agentSessionId,
+        text,
+      });
+    } catch (e) {
+      setBusy(false);
+      setSendError(e instanceof Error ? e.message : 'Failed to send.');
+    }
+  }, [draft, client, active, busy]);
 
   return (
     <div style={styles.wrapper}>
@@ -165,6 +187,7 @@ export default function AgentsPage() {
             {events.map((e, i) => (
               <Bubble key={`${e.seq}-${i}`} e={e} />
             ))}
+            {busy && <div style={styles.thinking}>Working…</div>}
           </div>
           <form
             style={styles.composer}
@@ -179,10 +202,11 @@ export default function AgentsPage() {
               placeholder="Message the agent…"
               style={styles.input}
             />
-            <button type="submit" style={styles.send}>
-              Send
+            <button type="submit" style={styles.send} disabled={busy}>
+              {busy ? '…' : 'Send'}
             </button>
           </form>
+          {sendError && <div style={styles.err}>{sendError}</div>}
         </>
       )}
     </div>
