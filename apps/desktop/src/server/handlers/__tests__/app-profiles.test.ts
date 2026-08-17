@@ -23,6 +23,8 @@ import {
   persistentProfileDir,
   prepareChromiumProfile,
   seedChromiumProfile,
+  copyEssentialProfile,
+  checkoutSessionProfile,
   shouldSkipProfileEntry,
   pickBinForHostProfiles,
 } from '../app-profiles';
@@ -259,6 +261,55 @@ describe('seedChromiumProfile', () => {
       expect(readFileSync(join(result.destDir, 'Default', 'Cookies'), 'utf8')).toBe(
         'host-cookies',
       );
+    } finally {
+      if (prevHost === undefined) delete process.env.NEXUSLINK_HOST_USER_DATA_DIR;
+      else process.env.NEXUSLINK_HOST_USER_DATA_DIR = prevHost;
+      if (prevProfiles === undefined) delete process.env.NEXUSLINK_BROWSER_PROFILES;
+      else process.env.NEXUSLINK_BROWSER_PROFILES = prevProfiles;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('copyEssentialProfile skips caches and lock files', () => {
+    const root = scratch();
+    const src = join(root, 'host');
+    const dest = join(root, 'phone');
+    mkdirSync(join(src, 'Default', 'Cache'), { recursive: true });
+    writeFileSync(join(src, 'Local State'), '{}');
+    writeFileSync(join(src, 'Default', 'Cookies'), 'cookies');
+    writeFileSync(join(src, 'Default', 'Cache', 'big'), 'nope');
+    writeFileSync(join(src, 'SingletonLock'), 'pid');
+    const n = copyEssentialProfile(src, dest);
+    expect(n).toBeGreaterThanOrEqual(2);
+    expect(existsSync(join(dest, 'Default', 'Cache', 'big'))).toBe(false);
+    expect(existsSync(join(dest, 'SingletonLock'))).toBe(false);
+    expect(readFileSync(join(dest, 'Default', 'Cookies'), 'utf8')).toBe('cookies');
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test('checkoutSessionProfile gives each session its own profile dir', () => {
+    const root = scratch();
+    const host = join(root, 'BraveSoftware', 'Brave-Browser');
+    const profiles = join(root, 'phone-profiles');
+    mkdirSync(join(host, 'Default'), { recursive: true });
+    writeFileSync(join(host, 'Local State'), '{}');
+    writeFileSync(join(host, 'Default', 'Cookies'), 'host-cookies');
+    writeFileSync(join(host, 'SingletonLock'), 'desktop-lock');
+
+    const prevHost = process.env.NEXUSLINK_HOST_USER_DATA_DIR;
+    const prevProfiles = process.env.NEXUSLINK_BROWSER_PROFILES;
+    process.env.NEXUSLINK_HOST_USER_DATA_DIR = host;
+    process.env.NEXUSLINK_BROWSER_PROFILES = profiles;
+    try {
+      const a = join(root, 'sess-a');
+      const b = join(root, 'sess-b');
+      const dirA = checkoutSessionProfile('/usr/bin/brave-browser', a, root);
+      const dirB = checkoutSessionProfile('/usr/bin/brave-browser', b, root);
+      expect(dirA).not.toBe(dirB);
+      expect(dirA).toBe(join(a, 'chrome-profile'));
+      expect(readFileSync(join(dirA, 'Default', 'Cookies'), 'utf8')).toBe('host-cookies');
+      expect(existsSync(join(dirA, 'SingletonLock'))).toBe(false);
+      expect(existsSync(join(dirB, 'SingletonLock'))).toBe(false);
     } finally {
       if (prevHost === undefined) delete process.env.NEXUSLINK_HOST_USER_DATA_DIR;
       else process.env.NEXUSLINK_HOST_USER_DATA_DIR = prevHost;

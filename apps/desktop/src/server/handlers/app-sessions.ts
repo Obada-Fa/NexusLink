@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import type { AppSessionInfo, WsMessage } from '@nexuslink/rpc-types';
 import {
   getProfile, listProfiles, resolveChromiumBin, buildChromiumArgv,
-  findPreferredBrowserBin, isChromiumFamily, prepareChromiumProfile,
+  findPreferredBrowserBin, isChromiumFamily, checkoutSessionProfile,
   type LaunchContext,
 } from './app-profiles';
 import { getDesktopEntry, resolveIconPublic } from './windows';
@@ -43,6 +43,8 @@ interface AppSession {
   pulseModule: number | null;
   /** Name of the pulse sink whose .monitor the WebRTC pipeline captures. */
   pulseSink: string | null;
+  /** Private session bus PID (dbus-launch), killed on teardown. */
+  dbusPid: number | null;
   /** Keep re-fitting Chrome after it remaps (first paint often undoes size). */
   fitTimer: ReturnType<typeof setInterval> | null;
 }
@@ -194,10 +196,44 @@ export function computeSessionGeometry(
   return { width, height, dpr: Math.round((width / logicalW) * 100) / 100 };
 }
 
+/**
+ * Keys that pin a process to the host desktop session. Leaving these set is
+ * why "new apps" never appeared on Xvfb: GTK/Qt single-instance activation
+ * reused the already-open window on :0 and the virtual display stayed empty.
+ */
+export const HOST_SESSION_ENV_KEYS = [
+  'WAYLAND_DISPLAY',
+  'WAYLAND_SOCKET',
+  'DBUS_SESSION_BUS_ADDRESS',
+  'DBUS_STARTER_ADDRESS',
+  'DBUS_STARTER_BUS_TYPE',
+  'SESSION_MANAGER',
+  'GNOME_DESKTOP_SESSION_ID',
+  'AT_SPI_BUS_ADDRESS',
+] as const;
+
+/** Drop host-session targeting and force X11 so the app maps on this Xvfb. */
+export function stripHostSessionEnv(env: Record<string, string>): Record<string, string> {
+  const out = { ...env };
+  for (const key of HOST_SESSION_ENV_KEYS) delete out[key];
+  out.GDK_BACKEND = 'x11';
+  out.QT_QPA_PLATFORM = 'xcb';
+  return out;
+}
+
+function launchPrivateBus(): { address: string; pid: number } | null {
+  const res = run(['dbus-launch']);
+  if (!res.ok) return null;
+  const address = res.stdout.match(/DBUS_SESSION_BUS_ADDRESS=(.+)/)?.[1]?.trim();
+  const pid = parseInt(res.stdout.match(/DBUS_SESSION_BUS_PID=(\d+)/)?.[1] ?? '', 10);
+  if (!address || !Number.isFinite(pid)) return null;
+  return { address, pid };
+}
+
 function sessionEnv(session: AppSession, extra?: Record<string, string>): Record<string, string> {
   const { dpr } = session.info;
   const intScale = String(Math.max(1, Math.round(dpr)));
-  const env: Record<string, string> = {
+  const env = stripHostSessionEnv({
     ...process.env as Record<string, string>,
     DISPLAY: session.info.display,
     // Finger-sized UI for toolkit apps. Chrome overrides these via its profile.
@@ -207,9 +243,8 @@ function sessionEnv(session: AppSession, extra?: Record<string, string>): Record
     QT_SCALE_FACTOR: intScale,
     XCURSOR_SIZE: String(24 * Math.max(1, Math.round(dpr))),
     XFT_DPI: String(Math.round(96 * dpr)),
-    // Never leak the host's real session bus targets into virtual apps.
-    ...(extra ?? {}),
-  };
+  });
+  if (extra) Object.assign(env, extra);
   if (session.pulseSink) env.PULSE_SINK = session.pulseSink;
   return env;
 }
@@ -258,7 +293,7 @@ export async function createAppSession(
   const chromiumBin = profile
     ? (isChromiumFamily(profile.appId) ? findPreferredBrowserBin() : null)
     : resolveChromiumBin(appId, desktopEntry?.exec);
-  const profileDir = chromiumBin ? prepareChromiumProfile(chromiumBin).destDir : undefined;
+  const profileDir = chromiumBin ? checkoutSessionProfile(chromiumBin, sessionDir) : undefined;
 
   const xvfb = Bun.spawn(
     [
@@ -287,7 +322,7 @@ export async function createAppSession(
   };
   const session: AppSession = {
     info, displayNum, xvfb, wm: null, app: null, sessionDir,
-    pulseModule: null, pulseSink: null, fitTimer: null,
+    pulseModule: null, pulseSink: null, dbusPid: null, fitTimer: null,
   };
   sessions.set(sessionId, session);
 
@@ -309,6 +344,11 @@ export async function createAppSession(
 
     setupAudio(session);
 
+    const bus = launchPrivateBus();
+    if (bus) {
+      session.dbusPid = bus.pid;
+    }
+
     const ctx: LaunchContext = {
       width: geo.width, height: geo.height, dpr: geo.dpr, sessionDir, profileDir,
     };
@@ -318,14 +358,17 @@ export async function createAppSession(
       argv = profile.buildArgv(ctx);
       extraEnv = profile.buildEnv?.(ctx);
     } else if (chromiumBin) {
-      // Own user-data-dir so a running desktop browser is not reused, but
-      // that dir is a persistent clone of the host profile (see prepare).
+      // Per-session user-data-dir (checkout from the persistent clone) so a
+      // second phone app does not collide with Chromium's singleton lock.
       argv = buildChromiumArgv(chromiumBin, ctx);
       extraEnv = { GDK_SCALE: '1', QT_SCALE_FACTOR: '1' };
     } else {
       // .desktop Exec with field codes stripped, run through sh for quoting.
       const exec = (desktopEntry!.exec ?? '').replace(/%[fFuUdDnNickvm]/g, '').trim();
       argv = ['sh', '-c', exec];
+    }
+    if (bus) {
+      extraEnv = { ...(extraEnv ?? {}), DBUS_SESSION_BUS_ADDRESS: bus.address };
     }
 
     session.app = Bun.spawn(argv, {
@@ -335,23 +378,28 @@ export async function createAppSession(
       env: sessionEnv(session, extraEnv),
     } as unknown as SpawnOpts);
 
-    session.app.exited.then(() => {
+    session.app.exited.then(async () => {
       if (!sessions.has(sessionId) || info.status === 'exited') return;
+      // Some .desktop Exec lines fork and exit; only tear down if nothing mapped.
+      await Bun.sleep(2500);
+      if (!sessions.has(sessionId) || info.status === 'exited') return;
+      if (listSessionWindowIds(session.info.display).length > 0) return;
       markExited(sessionId);
     }).catch(() => {});
 
+    // Return as soon as the display is up so the phone can start streaming.
+    // Window fit continues in the background — waiting here was a 5s stall
+    // that made new-app sessions miss the client timeout.
+    info.status = 'running';
+    broadcast({ type: 'app-session-update', session: { ...info } });
     const fillMode = profile || chromiumBin ? 'fullscreen' : 'maximize';
-    await fillSessionWindows(
+    void fillSessionWindows(
       display,
       geo.width,
       geo.height,
       fillMode,
       fillMode === 'fullscreen' ? 5000 : 2500,
-    );
-    scheduleRefit(session, geo.width, geo.height, fillMode);
-
-    info.status = 'running';
-    broadcast({ type: 'app-session-update', session: { ...info } });
+    ).then(() => scheduleRefit(session, geo.width, geo.height, fillMode));
     return { ...info };
   } catch (err) {
     teardown(session);
@@ -384,6 +432,14 @@ function teardown(session: AppSession): void {
   if (session.pulseModule !== null) {
     run(['pactl', 'unload-module', String(session.pulseModule)]);
     session.pulseModule = null;
+  }
+  if (session.dbusPid !== null) {
+    try {
+      process.kill(session.dbusPid);
+    } catch {
+      // already gone
+    }
+    session.dbusPid = null;
   }
   rmSync(session.sessionDir, { recursive: true, force: true });
 }

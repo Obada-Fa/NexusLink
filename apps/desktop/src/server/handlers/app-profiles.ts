@@ -13,7 +13,7 @@ import {
   statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 export interface LaunchContext {
   /** Physical pixel size of the virtual display. */
@@ -348,8 +348,59 @@ function copyProfileTree(
 }
 
 /**
+ * Identity files copied on the blocking launch path. A full Brave/Chrome
+ * profile walk can take tens of seconds and miss the phone's RPC timeout,
+ * so cookies/logins land immediately and the rest refreshes in the background.
+ */
+export const ESSENTIAL_PROFILE_RELATIVE = [
+  'Local State',
+  'First Run',
+  'Default/Preferences',
+  'Default/Secure Preferences',
+  'Default/Cookies',
+  'Default/Network/Cookies',
+  'Default/Login Data',
+  'Default/Login Data For Account',
+  'Default/Bookmarks',
+  'Default/Web Data',
+  'Default/History',
+  'Default/Favicons',
+];
+
+/** Copy just the login/bookmark files so a phone session can start in milliseconds. */
+export function copyEssentialProfile(sourceDir: string, destDir: string): number {
+  if (!existsSync(sourceDir)) return 0;
+  mkdirSync(destDir, { recursive: true });
+  let copied = 0;
+  for (const rel of ESSENTIAL_PROFILE_RELATIVE) {
+    const from = join(sourceDir, rel);
+    if (!existsSync(from)) continue;
+    const to = join(destDir, rel);
+    try {
+      mkdirSync(dirname(to), { recursive: true });
+      copyFileSync(from, to);
+      copied++;
+    } catch {
+      // locked / unreadable — skip
+    }
+  }
+  return copied;
+}
+
+function scheduleFullSeed(sourceDir: string, destDir: string): void {
+  setTimeout(() => {
+    try {
+      seedChromiumProfile(sourceDir, destDir);
+    } catch {
+      // background refresh must never take down a session
+    }
+  }, 0);
+}
+
+/**
  * Persistent phone profile for `bin`, seeded from the matching desktop
- * user-data-dir when one exists. Safe to call on every launch (incremental).
+ * user-data-dir when one exists. The blocking path only copies identity
+ * files; a full incremental refresh runs in the background.
  */
 export function prepareChromiumProfile(bin: string, home = homedir()): SeedResult {
   const kind = browserKindFromBin(bin);
@@ -357,13 +408,37 @@ export function prepareChromiumProfile(bin: string, home = homedir()): SeedResul
   mkdirSync(destDir, { recursive: true });
   const sourceDir = findHostUserDataDir(kind, home);
   if (!sourceDir) return { destDir, sourceDir: null, copied: 0, skipped: 0 };
-  const { copied, skipped } = seedChromiumProfile(sourceDir, destDir);
+
+  const already = existsSync(join(destDir, 'Local State'));
+  const copied = already ? 0 : copyEssentialProfile(sourceDir, destDir);
+  scheduleFullSeed(sourceDir, destDir);
   if (copied > 0) {
     console.log(
-      `[nexuslink] seeded ${kind} phone profile from ${sourceDir} (${copied} files)`,
+      `[nexuslink] seeded ${kind} phone profile from ${sourceDir} (${copied} essential files)`,
     );
   }
-  return { destDir, sourceDir, copied, skipped };
+  return { destDir, sourceDir, copied, skipped: 0 };
+}
+
+/**
+ * Per-session Chromium user-data-dir. Chromium refuses two processes on one
+ * profile, so a second "new app" must not reuse the persistent dir (or the
+ * process exits immediately and the stream never starts).
+ */
+export function checkoutSessionProfile(
+  bin: string,
+  sessionDir: string,
+  home = homedir(),
+): string {
+  const seeded = prepareChromiumProfile(bin, home);
+  const destDir = join(sessionDir, 'chrome-profile');
+  mkdirSync(destDir, { recursive: true });
+  if (existsSync(join(seeded.destDir, 'Local State'))) {
+    copyEssentialProfile(seeded.destDir, destDir);
+  } else if (seeded.sourceDir) {
+    copyEssentialProfile(seeded.sourceDir, destDir);
+  }
+  return destDir;
 }
 
 /**

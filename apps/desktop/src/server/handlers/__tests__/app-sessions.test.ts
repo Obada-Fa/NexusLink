@@ -11,6 +11,8 @@ import {
   listAppSessions,
   closeAppSession,
   ensurePortrait,
+  stripHostSessionEnv,
+  HOST_SESSION_ENV_KEYS,
 } from '../app-sessions';
 import { startCapture, stopCapture, FRAME_MAGIC } from '../capture';
 import { typeText } from '../input';
@@ -52,6 +54,25 @@ describe('ensurePortrait', () => {
 
   test('swaps landscape so the virtual monitor is phone-shaped', () => {
     expect(ensurePortrait(844, 390)).toEqual({ width: 390, height: 844 });
+  });
+});
+
+describe('stripHostSessionEnv', () => {
+  test('drops dbus/wayland so a new app cannot attach to the desktop session', () => {
+    const stripped = stripHostSessionEnv({
+      DISPLAY: ':0',
+      WAYLAND_DISPLAY: 'wayland-0',
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+      SESSION_MANAGER: 'local/unix:@/tmp/.ICE-unix/1',
+      PATH: '/usr/bin',
+    });
+    for (const key of HOST_SESSION_ENV_KEYS) {
+      expect(stripped[key]).toBeUndefined();
+    }
+    expect(stripped.DISPLAY).toBe(':0');
+    expect(stripped.PATH).toBe('/usr/bin');
+    expect(stripped.GDK_BACKEND).toBe('x11');
+    expect(stripped.QT_QPA_PLATFORM).toBe('xcb');
   });
 });
 
