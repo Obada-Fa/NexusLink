@@ -5,6 +5,7 @@ export type RpcMethod =
   | 'fs.delete'
   | 'fs.move'
   | 'fs.listProjects'
+  | 'fs.gitStatus'
   | 'process.list'
   | 'process.kill'
   | 'process.spawn'
@@ -87,6 +88,8 @@ export type Params<M extends RpcMethod> =
     ? { from: string; to: string }
     : M extends 'fs.listProjects'
     ? {}
+    : M extends 'fs.gitStatus'
+    ? { cwd: string }
     : M extends 'process.list'
     ? {}
     : M extends 'process.kill'
@@ -221,6 +224,8 @@ export type Result<M extends RpcMethod> =
     ? void
     : M extends 'fs.listProjects'
     ? ProjectInfo[]
+    : M extends 'fs.gitStatus'
+    ? GitWorkingTree | null
     : M extends 'process.list'
     ? ProcessEntry[]
     : M extends 'process.kill'
@@ -348,6 +353,16 @@ export interface FileEntry {
 export interface ProjectInfo {
   name: string
   path: string
+}
+
+/** Live `git status` for the agent's current folder, or null if it is not a repo. */
+export interface GitWorkingTree {
+  cwd: string
+  branch: string
+  ahead: number
+  behind: number
+  changed: number
+  files: string[]
 }
 
 export interface IdeStatus {

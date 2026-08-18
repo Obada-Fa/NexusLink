@@ -52,7 +52,7 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
   bool _browse = false;
   String _home = '/';
   String _cwd = '/';
-  String? _recentPath;
+  List<String> _recentPaths = const [];
   List<_ProjectHint> _projects = const [];
   List<FileEntry> _dirs = const [];
   bool _loading = true;
@@ -74,11 +74,9 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
           : '/';
     } catch (_) {}
 
-    final recent = await loadLastAgentCwd();
-    final seen = <String>{};
-    var projects = <_ProjectHint>[_ProjectHint('Home', home)];
-    seen.add(home);
-    if (recent != null && recent.isNotEmpty) seen.add(recent);
+    final recent = await loadRecentAgentCwds();
+    final seen = <String>{home, ...recent};
+    var projects = <_ProjectHint>[];
     try {
       final raw = await widget.client.requestList('fs.listProjects');
       for (final e in raw) {
@@ -90,17 +88,14 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
         projects.add(_ProjectHint(name.isEmpty ? path : name, path));
       }
     } catch (_) {}
-    projects = [
-      projects.first,
-      ...projects.skip(1).toList()
-        ..sort((a, b) => comparePathNames(a.name, b.name)),
-    ];
+    projects.sort((a, b) => comparePathNames(a.name, b.name));
+    projects.add(_ProjectHint('Home', home));
 
     if (!mounted) return;
     setState(() {
       _home = home;
       _cwd = home;
-      _recentPath = recent;
+      _recentPaths = recent;
       _projects = projects;
       _loading = false;
     });
@@ -276,6 +271,27 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
           subtitle: const Text('Type or paste a folder path'),
           onTap: _enterPath,
         ),
+        if (_recentPaths.isNotEmpty) ...[
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
+            child: Text(
+              'RECENT',
+              style: TextStyle(
+                  fontSize: 11, letterSpacing: 0.8, color: Color(0xFF666677)),
+            ),
+          ),
+          for (final path in _recentPaths)
+            ListTile(
+              leading: const Icon(Icons.history, color: Color(0xFF6B8CFF)),
+              title: Text(folderDisplayName(path)),
+              subtitle: Text(
+                path,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              onTap: () => _use(path),
+            ),
+        ],
         const Padding(
           padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
           child: Text(
@@ -284,24 +300,19 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
                 fontSize: 11, letterSpacing: 0.8, color: Color(0xFF666677)),
           ),
         ),
-        if (_recentPath != null)
-          ListTile(
-            leading: const Icon(Icons.history, color: Color(0xFF6B8CFF)),
-            title: Text(folderDisplayName(_recentPath!)),
-            subtitle: Text(
-              _recentPath!,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            onTap: () => _use(_recentPath!),
-          ),
         for (final p in _projects)
-          if (p.path != _recentPath)
+          if (!_recentPaths.contains(p.path))
             ListTile(
-              leading: const Icon(Icons.folder, color: Color(0xFF6B8CFF)),
+              leading: Icon(
+                p.path == _home ? Icons.home_outlined : Icons.folder,
+                color: const Color(0xFF6B8CFF),
+              ),
               title: Text(p.name),
-              subtitle:
-                  Text(p.path, maxLines: 1, overflow: TextOverflow.ellipsis),
+              subtitle: Text(
+                p.path == _home ? 'Your user folder — not a project' : p.path,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
               onTap: () => _use(p.path),
             ),
       ],

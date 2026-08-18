@@ -1,21 +1,41 @@
-// Persists the last working directory chosen for a new agent chat.
+// Persists recent working directories chosen for new agent chats.
 
 import 'package:shared_preferences/shared_preferences.dart';
 
 const lastAgentCwdKey = 'nexuslink-last-agent-cwd';
+const recentAgentCwdsKey = 'nexuslink-recent-agent-cwds';
+const recentAgentCwdCap = 8;
 
-Future<String?> loadLastAgentCwd() async {
+List<String> mergeRecentAgentCwd(String path, List<String> existing) {
+  final trimmed = path.trim();
+  if (trimmed.isEmpty) return existing;
+  return [
+    trimmed,
+    ...existing.where((p) => p != trimmed),
+  ].take(recentAgentCwdCap).toList();
+}
+
+Future<List<String>> loadRecentAgentCwds() async {
   final prefs = await SharedPreferences.getInstance();
-  final path = prefs.getString(lastAgentCwdKey);
-  if (path == null || path.trim().isEmpty) return null;
-  return path.trim();
+  final list = prefs.getStringList(recentAgentCwdsKey);
+  if (list != null && list.isNotEmpty) {
+    return list
+        .where((p) => p.trim().isNotEmpty)
+        .map((p) => p.trim())
+        .take(recentAgentCwdCap)
+        .toList();
+  }
+  final legacy = prefs.getString(lastAgentCwdKey);
+  if (legacy == null || legacy.trim().isEmpty) return [];
+  return [legacy.trim()];
 }
 
 Future<void> saveLastAgentCwd(String path) async {
-  final trimmed = path.trim();
-  if (trimmed.isEmpty) return;
+  final next = mergeRecentAgentCwd(path, await loadRecentAgentCwds());
+  if (next.isEmpty) return;
   final prefs = await SharedPreferences.getInstance();
-  await prefs.setString(lastAgentCwdKey, trimmed);
+  await prefs.setStringList(recentAgentCwdsKey, next);
+  await prefs.setString(lastAgentCwdKey, next.first);
 }
 
 /// Last segment of a Unix path for display (e.g. `/home/you/project` → `project`).

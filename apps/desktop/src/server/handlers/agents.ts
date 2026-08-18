@@ -7,7 +7,7 @@
 // phone can replay history via agent.history) and pushed live as
 // `agent-event` WebSocket messages.
 
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -22,6 +22,7 @@ import type {
   WsMessage,
 } from '@nexuslink/rpc-types';
 import {
+  agyProjectIdForCwd,
   clipTitle,
   getAgyChatTitle,
   listAgyHostChats,
@@ -30,6 +31,7 @@ import {
   listCursorIdeHostChats,
   listOpencodeHostChats,
   loadHostChatHistory,
+  normalizeHostChat,
   type HostChatDelta,
 } from './host-chats';
 
@@ -404,6 +406,17 @@ export function thinkingToEffort(thinking?: string): 'low' | 'medium' | 'high' |
   return 'medium';
 }
 
+/** Antigravity `--effort` is Gemini-only; Claude/GPT models reject it. */
+export function agyEffortFlag(model?: string, thinking?: string): 'low' | 'medium' | 'high' | undefined {
+  const effort = thinkingToEffort(thinking);
+  if (!effort) return undefined;
+  const m = (model || '').toLowerCase();
+  if (m.includes('claude') || m.includes('gpt-') || m.includes('grok') || m.includes('composer')) {
+    return undefined;
+  }
+  return effort;
+}
+
 /** Cursor `--model` value, including `[effort=…]` when thinking is set. */
 export function cursorModelFlag(model?: string, thinking?: string): string | undefined {
   const m = (model || '').trim();
@@ -503,6 +516,8 @@ export function buildAgyArgv(opts: {
   bin: string;
   cwd?: string;
   conversationId?: string | null;
+  projectId?: string | null;
+  newProject?: boolean;
   text: string;
   model?: string;
   mode?: AgentMode;
@@ -517,10 +532,14 @@ export function buildAgyArgv(opts: {
     '--print-timeout', '15m',
   ];
   if (opts.cwd) argv.push('--add-dir', opts.cwd);
+  if (opts.newProject && !opts.conversationId) argv.push('--new-project');
+  if (opts.projectId && opts.projectId !== 'default-cli-project') {
+    argv.push('--project', opts.projectId);
+  }
   if (opts.mode === 'plan') argv.push('--mode', 'plan');
   const resolved = pickModelVariant(opts.model, opts.thinking, opts.catalog ?? []);
   if (resolved && resolved !== 'default') argv.push('--model', resolved);
-  const effort = thinkingToEffort(opts.thinking);
+  const effort = agyEffortFlag(resolved || opts.model, opts.thinking);
   if (effort) argv.push('--effort', effort);
   if (opts.conversationId) argv.push('--conversation', opts.conversationId);
   argv.push('-p', withImageMentions(opts.text, opts.imagePaths));
@@ -645,6 +664,7 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
 
 function setBusy(session: AgentSession, busy: boolean): void {
   session.info.busy = busy;
+  broadcast({ type: 'agent-session-update', session: { ...session.info } });
 }
 
 /** Expand ~ and require an existing directory. Any path is allowed for now. */
@@ -652,7 +672,13 @@ export function resolveAgentCwd(cwd?: string, opts?: { fallbackHome?: boolean })
   const home = homedir();
   const raw = (cwd ?? '').trim();
   const path = !raw || raw === '~' ? home : raw.startsWith('~/') ? join(home, raw.slice(2)) : raw;
-  if (existsSync(path) && statSync(path).isDirectory()) return path;
+  if (existsSync(path) && statSync(path).isDirectory()) {
+    try {
+      return realpathSync(path);
+    } catch {
+      return path;
+    }
+  }
   if (opts?.fallbackHome) return home;
   throw new Error(existsSync(path) ? `not a directory: ${path}` : `directory not found: ${path}`);
 }
@@ -741,7 +767,12 @@ export function listHostChats(agent?: string): AgentHostChat[] {
   if (want('claude')) {
     out.push(...listClaudeHostChats());
   }
-  return out.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 80);
+  // New agents: append their list*HostChats() here. normalizeHostChat fills
+  // source + cwd so the phone always shows `Source · /folder`.
+  return out
+    .map(normalizeHostChat)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 80);
 }
 
 export function openHostChat(params: {
@@ -768,9 +799,14 @@ export function openHostChat(params: {
   }
 
   const viewOnly = hostChatId.startsWith('ide:');
+  const inferred = params.cwd?.trim()
+    ? ''
+    : (listHostChats(agent).find((c) => c.hostChatId === hostChatId)?.cwd ?? '');
   const cwd = params.cwd?.trim()
     ? resolveAgentCwd(params.cwd)
-    : resolveAgentCwd(params.cwd, { fallbackHome: true });
+    : inferred.trim()
+      ? resolveAgentCwd(inferred)
+      : resolveAgentCwd(params.cwd, { fallbackHome: true });
   const title = params.title || 'Host chat';
   const info = createAgentSession(agent, cwd, title, { hostChatId });
   const session = agentSessions.get(info.agentSessionId);
@@ -1041,7 +1077,7 @@ export function extractAuthUrl(text: string): string | undefined {
 }
 
 export function isCliAuthError(text: string): boolean {
-  return /authentication required|not authenticated|not logged in|please run ['`]?agent login/i.test(text);
+  return /authentication required|not authenticated|not logged in|not logged into|please run ['`]?agent login|authentication failed|auth timed out|token exchange failed|you are not logged into antigravity/i.test(text);
 }
 
 export function rewriteCliAuthError(stderr: string, agentName: string): string {
@@ -1054,7 +1090,8 @@ export function rewriteCliAuthError(stderr: string, agentName: string): string {
   if (agentName === 'Antigravity') {
     return [
       "Antigravity isn't signed in on the PC.",
-      'Run `agy` once on the PC to sign in, or paste `GEMINI_API_KEY=…` here.',
+      'A Google sign-in window should open on the PC. Finish it there, then send your task again.',
+      'If no window appears, run `agy` once in a terminal on the PC, or paste `GEMINI_API_KEY=…` here.',
     ].join('\n\n');
   }
   return stderr.trim();
@@ -1209,8 +1246,14 @@ export function describeCursorToolCall(toolCall: unknown): {
   };
 }
 
+/** Cursor sometimes embeds newlines in call_id; that breaks start/end pairing. */
+export function normalizeToolRefId(id: string): string {
+  return (id || '').replace(/\s+/g, '');
+}
+
 export function parseCursorStreamEvent(msg: Record<string, unknown>): AgentDelta[] {
-  const type = msg.type;
+  const type = String(msg.type ?? msg.event ?? '');
+  const subtype = String(msg.subtype ?? '');
   if (type === 'assistant') {
     const message = msg.message as Record<string, unknown> | undefined;
     const text = contentToText(message?.content);
@@ -1219,8 +1262,8 @@ export function parseCursorStreamEvent(msg: Record<string, unknown>): AgentDelta
   }
   if (type === 'tool_call') {
     const meta = describeCursorToolCall(msg.tool_call ?? msg);
-    const refId = String(msg.call_id ?? msg.id ?? '');
-    if (msg.subtype === 'started') {
+    const refId = normalizeToolRefId(String(msg.call_id ?? msg.id ?? ''));
+    if (subtype === 'started' || subtype === 'start') {
       return [{
         kind: 'tool-start',
         toolName: meta.name,
@@ -1228,7 +1271,7 @@ export function parseCursorStreamEvent(msg: Record<string, unknown>): AgentDelta
         refId,
       }];
     }
-    if (msg.subtype === 'completed') {
+    if (subtype === 'completed' || subtype === 'end' || subtype === 'finished') {
       return [{
         kind: 'tool-end',
         toolName: meta.name,
@@ -1238,20 +1281,56 @@ export function parseCursorStreamEvent(msg: Record<string, unknown>): AgentDelta
     }
     return [];
   }
-  if (type === 'result') {
-    const text = typeof msg.result === 'string' ? msg.result : '';
-    if (msg.is_error === true || msg.subtype === 'error') {
+  if (type === 'result' || type === 'done' || type === 'complete'
+    || (type === 'system' && (subtype === 'completed' || subtype === 'turn_complete'))) {
+    const raw = msg.result ?? msg.message ?? msg.text;
+    const text = typeof raw === 'string' ? raw : contentToText(raw);
+    if (msg.is_error === true || subtype === 'error') {
       return [{ kind: 'error', text: text || 'Cursor CLI reported an error' }];
     }
+    if (type === 'system') return [{ kind: 'result', text: '' }];
     return [{ kind: 'result', text }];
   }
-  if (type === 'system' && msg.subtype === 'init') {
+  if (type === 'system' && subtype === 'init') {
     return [];
   }
   return [];
 }
 
-/** Phone paints `result` as a chat bubble — blank it if the reply already streamed. */
+/** End a CLI turn shortly after the last event when no tool is in flight.
+ *  Cursor often streams the final answer before the `result` line, so the
+ *  phone would otherwise keep showing Working… until the process exits. */
+class TurnIdle {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  inflight = 0;
+  constructor(private readonly onIdle: () => void, private readonly ms = 1600) {}
+
+  note(ev: AgentDelta): void {
+    if (ev.kind === 'tool-start') this.inflight += 1;
+    if (ev.kind === 'tool-end') this.inflight = Math.max(0, this.inflight - 1);
+    if (ev.kind === 'result' || ev.kind === 'error') {
+      this.clear();
+      this.inflight = 0;
+      return;
+    }
+    this.arm();
+  }
+
+  arm(): void {
+    this.clear();
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (this.inflight > 0) return;
+      this.onIdle();
+    }, this.ms);
+  }
+
+  clear(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
+}
+
 export function withoutDuplicateResult(
   ev: AgentDelta,
   streamedText: boolean,
@@ -1351,6 +1430,7 @@ function spawnJsonCli(
   cwd: string,
   onEvent: (msg: Record<string, unknown>) => void,
   extraEnv?: Record<string, string>,
+  onStderr?: (chunk: string) => void,
 ): { proc: Proc; stderr: Promise<string> } {
   const proc = Bun.spawn(argv, {
     cwd,
@@ -1360,7 +1440,10 @@ function spawnJsonCli(
     env: hostEnv(extraEnv),
   } as unknown as SpawnOpts);
   void pumpJsonLines(proc, onEvent).catch(() => {});
-  return { proc, stderr: collectText(proc.stderr) };
+  const stderr = onStderr
+    ? pumpTextStream(proc.stderr, onStderr)
+    : collectText(proc.stderr);
+  return { proc, stderr };
 }
 
 async function pumpTextStream(
@@ -1595,6 +1678,7 @@ class CursorAdapter implements AgentAdapter {
   private loggingIn = false;
   private autoLoginAttempted = false;
   private loginTimer: ReturnType<typeof setTimeout> | null = null;
+  private idle = new TurnIdle(() => this.finishIdle());
 
   constructor(private session: AgentSession) {}
 
@@ -1633,6 +1717,7 @@ class CursorAdapter implements AgentAdapter {
     this.sawResult = false;
     this.streamedText = false;
     this.lastText = '';
+    this.idle.clear();
     const bin = resolveBin('cursor-agent') ?? 'cursor-agent';
     const argv = buildCursorArgv({
       bin,
@@ -1784,15 +1869,32 @@ class CursorAdapter implements AgentAdapter {
         this.lastText = ev.text ?? '';
         this.streamedText = true;
       }
+      if (
+        !this.session.info.busy
+        && (ev.kind === 'tool-start' || ev.kind === 'text' || ev.kind === 'text-delta')
+      ) {
+        this.sawResult = false;
+        setBusy(this.session, true);
+      }
       if (ev.kind === 'result' || ev.kind === 'error') {
         this.sawResult = true;
         setBusy(this.session, false);
       }
       emit(this.session, withoutDuplicateResult(ev, this.streamedText));
+      this.idle.note(ev);
     }
   }
 
+  private finishIdle(): void {
+    if (!this.session.info.busy || this.sawResult) return;
+    if (!this.streamedText) return;
+    this.sawResult = true;
+    setBusy(this.session, false);
+    emit(this.session, { kind: 'result', text: '' });
+  }
+
   cancel(): void {
+    this.idle.clear();
     if (this.loginTimer) {
       clearTimeout(this.loginTimer);
       this.loginTimer = null;
@@ -1912,6 +2014,10 @@ class AntigravityAdapter implements AgentAdapter {
   private conversationId: string | null = null;
   private sawResult = false;
   private streamedText = false;
+  private newProjectAttempted = false;
+  private authUrlEmitted = false;
+  private authHintEmitted = false;
+  private loggingIn = false;
   private apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 
   constructor(private session: AgentSession) {}
@@ -1942,24 +2048,25 @@ class AntigravityAdapter implements AgentAdapter {
       return;
     }
     if (looksLikeAgentLogin(text)) {
-      setBusy(this.session, false);
-      emit(this.session, {
-        kind: 'text',
-        text: [
-          'Antigravity has no headless login command.',
-          'Run `agy` once in a terminal on the PC to sign in, or paste `GEMINI_API_KEY=…` here.',
-        ].join('\n\n'),
-      });
+      this.startLogin();
       return;
     }
     this.cancel();
     this.sawResult = false;
     this.streamedText = false;
+    this.authUrlEmitted = false;
+    this.authHintEmitted = false;
     const bin = resolveBin('agy') ?? 'agy';
+    const cwd = this.session.info.cwd;
+    const projectId = cwd ? agyProjectIdForCwd(cwd) : undefined;
+    const newProject = !this.conversationId && !projectId && !this.newProjectAttempted;
+    if (newProject) this.newProjectAttempted = true;
     const argv = buildAgyArgv({
       bin,
-      cwd: this.session.info.cwd,
+      cwd,
       conversationId: this.conversationId,
+      projectId,
+      newProject,
       text,
       model: opts?.model,
       mode: opts?.mode,
@@ -1967,11 +2074,16 @@ class AntigravityAdapter implements AgentAdapter {
       imagePaths: opts?.imagePaths,
       catalog: listAgentModels('antigravity'),
     });
+    let stderrCombined = '';
     const { proc, stderr } = spawnJsonCli(
       argv,
       this.session.info.cwd,
       (msg) => this.onEvent(msg),
       this.extraEnv(),
+      (chunk) => {
+        stderrCombined += chunk;
+        this.onAuthNoise(stderrCombined);
+      },
     );
     this.proc = proc;
     proc.exited.then(async (code) => {
@@ -2043,11 +2155,110 @@ class AntigravityAdapter implements AgentAdapter {
         this.sawResult = true;
         setBusy(this.session, false);
       }
-      emit(this.session, withoutDuplicateResult(ev, this.streamedText));
+      const out = ev.kind === 'error' && isCliAuthError(ev.text ?? '')
+        ? { kind: 'error' as const, text: rewriteCliAuthError(ev.text ?? '', 'Antigravity') }
+        : ev;
+      emit(this.session, withoutDuplicateResult(out, this.streamedText));
     }
   }
 
+  private onAuthNoise(combined: string): void {
+    const url = extractAuthUrl(combined);
+    if (url && !this.authUrlEmitted) {
+      this.authUrlEmitted = true;
+      this.authHintEmitted = true;
+      openUrlOnHost(url);
+      setBusy(this.session, false);
+      emit(this.session, {
+        kind: 'text',
+        text: [
+          'Open this link to sign in to Antigravity (a browser may also open on the PC):',
+          '',
+          url,
+          '',
+          'Then send your task again. Or paste `GEMINI_API_KEY=…`.',
+        ].join('\n'),
+      });
+      return;
+    }
+    if (this.authHintEmitted) return;
+    if (!/not logged into|not authenticated|interactive oauth|starting oauth/i.test(combined)) {
+      return;
+    }
+    this.authHintEmitted = true;
+    emit(this.session, {
+      kind: 'status',
+      text: 'Antigravity needs a Google sign-in on the PC. A browser may open — finish it there.',
+    });
+  }
+
+  private startLogin(): void {
+    if (this.loggingIn && this.proc && this.proc.exitCode === null) {
+      setBusy(this.session, false);
+      emit(this.session, {
+        kind: 'status',
+        text: 'Sign-in is already waiting — finish it in the PC browser, or paste `GEMINI_API_KEY=…`.',
+      });
+      return;
+    }
+    this.cancel();
+    this.loggingIn = true;
+    this.authUrlEmitted = false;
+    this.authHintEmitted = false;
+    setBusy(this.session, true);
+    const bin = resolveBin('agy') ?? 'agy';
+    const proc = Bun.spawn(
+      [bin, '--output-format', 'text', '--print-timeout', '3m', '-p', 'ping'],
+      {
+        cwd: this.session.info.cwd,
+        stdin: 'ignore',
+        stdout: 'pipe',
+        stderr: 'pipe',
+        env: hostEnv({
+          NO_OPEN_BROWSER: '1',
+          DISPLAY: process.env.DISPLAY || ':0',
+          ...this.extraEnv(),
+        }),
+      } as unknown as SpawnOpts,
+    );
+    this.proc = proc;
+    emit(this.session, {
+      kind: 'status',
+      text: 'Starting Antigravity sign-in on the PC…',
+    });
+    let combined = '';
+    const onChunk = (chunk: string) => {
+      combined += chunk;
+      this.onAuthNoise(combined);
+    };
+    void Promise.all([
+      pumpTextStream(proc.stdout, onChunk),
+      pumpTextStream(proc.stderr, onChunk),
+      proc.exited,
+    ]).then(([, , code]) => {
+      if (this.proc !== proc) return;
+      this.loggingIn = false;
+      setBusy(this.session, false);
+      if (this.authUrlEmitted) return;
+      if (code === 0) {
+        emit(this.session, {
+          kind: 'result',
+          text: 'Signed in to Antigravity. Send your task again.',
+        });
+        return;
+      }
+      emit(this.session, {
+        kind: 'error',
+        text: rewriteCliAuthError(combined || 'authentication failed or timed out', 'Antigravity'),
+      });
+    }).catch(() => {
+      this.loggingIn = false;
+      setBusy(this.session, false);
+    });
+  }
+
   cancel(): void {
+    this.loggingIn = false;
     try {
       this.proc?.kill();
     } catch {

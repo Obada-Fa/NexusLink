@@ -26,4 +26,14 @@ void main() {
     await tester.pump(const Duration(milliseconds: 700));
     await tester.pump(const Duration(milliseconds: 700));
   });
+
+  test('chatListSubtitle matches Cursor-style source · folder', () {
+    expect(chatListSubtitle(agent: 'opencode', cwd: '/tmp/proj'),
+        'OpenCode · /tmp/proj');
+    expect(
+      chatListSubtitle(agent: 'claude', cwd: '/home/me', resumable: false),
+      'Claude Code · /home/me · view only',
+    );
+    expect(agentSourceLabel('future-bot'), 'Future Bot');
+  });
 }

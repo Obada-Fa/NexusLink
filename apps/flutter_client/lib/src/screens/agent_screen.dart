@@ -15,7 +15,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
+import '../state/agent_history.dart';
 import '../state/connection.dart';
+import '../state/last_cwd.dart';
 import '../widgets/agent_activity_icon.dart';
 import '../widgets/code_block_builder.dart';
 import '../widgets/link_actions.dart';
@@ -36,7 +38,8 @@ class _PendingPhoto {
   _PendingPhoto({required this.name, required this.mime, required this.bytes});
 }
 
-class _AgentScreenState extends ConsumerState<AgentScreen> {
+class _AgentScreenState extends ConsumerState<AgentScreen>
+    with WidgetsBindingObserver {
   List<AgentInfo> _agents = [];
   List<AgentSessionInfo> _sessions = [];
   List<AgentHostChat> _hostChats = [];
@@ -58,13 +61,37 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   int _menuTab = 0;
   String? _error;
   final _unsubs = <void Function()>[];
+  RpcClient? _boundClient;
+  int _syncGen = 0;
+  GitWorkingTree? _gitTree;
 
   RpcClient? get _client => ref.read(activeClientProvider);
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _load();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_onForeground());
+    }
+  }
+
+  /// Socket events are dropped while the phone is backgrounded, so pull a
+  /// fresh host snapshot when the user comes back — same as reopening the chat.
+  Future<void> _onForeground() async {
+    await ref.read(connectionProvider.notifier).ensureConnected();
+    if (!mounted) return;
+    final client = _client;
+    if (client == null || client.status != RpcStatus.connected) return;
+    if (!identical(client, _boundClient)) {
+      await _load();
+    }
+    await _refreshSnapshot();
   }
 
   Future<void> _load() async {
@@ -97,6 +124,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       _unsubs.add(client.subscribe('agent-event', _onPush));
       _unsubs.add(client.subscribe('agent-session-update', _onSessionUpdate));
       _unsubs.add(client.subscribe('agent-session-deleted', _onSessionDelete));
+      _boundClient = client;
       if (!mounted) return;
       setState(() {
         _agents = agentsRaw
@@ -110,6 +138,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
             .map((e) => AgentHostChat.fromJson(Map<String, dynamic>.from(e)))
             .toList();
         _loading = false;
+        _error = null;
       });
     } catch (e) {
       if (mounted) {
@@ -118,6 +147,66 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
           _error = e.toString();
         });
       }
+    }
+  }
+
+  Future<void> _refreshSnapshot() async {
+    final client = _client;
+    if (client == null || client.status != RpcStatus.connected) return;
+    final gen = ++_syncGen;
+    final activeId = _active?.agentSessionId;
+    try {
+      final sessionsRaw =
+          await client.request('agent.listSessions') as List<dynamic>;
+      List<dynamic> hostRaw = const [];
+      try {
+        hostRaw = await client.requestList(
+          'agent.listHostChats',
+          const {},
+          const Duration(seconds: 25),
+        );
+      } catch (_) {}
+      List<AgentEvent> history = const [];
+      if (activeId != null) {
+        final raw = await client.request(
+          'agent.history',
+          {'agentSessionId': activeId},
+        ) as List<dynamic>;
+        history = raw
+            .map((e) => AgentEvent.fromJson(e as Map<String, dynamic>))
+            .toList();
+      }
+      if (!mounted || gen != _syncGen) return;
+      setState(() {
+        _sessions = sessionsRaw
+            .map((e) => AgentSessionInfo.fromJson(e as Map<String, dynamic>))
+            .toList();
+        _hostChats = hostRaw
+            .whereType<Map>()
+            .map((e) => AgentHostChat.fromJson(Map<String, dynamic>.from(e)))
+            .toList();
+        if (activeId != null) {
+          AgentSessionInfo? match;
+          for (final s in _sessions) {
+            if (s.agentSessionId == activeId) {
+              match = s;
+              break;
+            }
+          }
+          if (match != null) {
+            _active = match;
+            _busy = match.busy;
+          }
+          final merged = mergeAgentHistory(history, _events);
+          _events
+            ..clear()
+            ..addAll(merged);
+        }
+      });
+      if (activeId != null) _scrollToEnd();
+      unawaited(_refreshGitTree());
+    } catch (_) {
+      // Stay on the last known transcript; the next resume will try again.
     }
   }
 
@@ -136,6 +225,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       }
       if (_active?.agentSessionId == updated.agentSessionId) {
         _active = updated;
+        // Never resurrect Working from a stale busy:true packet after
+        // the turn already finished on the phone.
+        if (!updated.busy) _busy = false;
       }
     });
   }
@@ -280,10 +372,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     return pickWorkingDirectory(context: context, client: client);
   }
 
-  Future<void> _newChat(AgentInfo agent) async {
+  Future<void> _newChat(AgentInfo agent, {String? cwd}) async {
     final client = _client;
     if (client == null) return;
-    final cwd = await _pickProject();
+    cwd ??= await _pickProject();
     if (cwd == null) return;
     try {
       final created = await client.request('agent.createSession', {
@@ -300,9 +392,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         _busy = false;
         _photos.clear();
         _liveModels = [];
+        _gitTree = null;
       });
       await _loadComposerPrefs(agent.id);
       await _refreshModels(agent.id);
+      await _refreshGitTree();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -331,6 +425,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     });
     await _loadComposerPrefs(s.agent);
     await _refreshModels(s.agent);
+    await _refreshGitTree();
     _scrollToEnd();
   }
 
@@ -758,7 +853,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       if (e.kind == 'error' || e.kind == 'status' || e.kind == 'text') {
         if (t.contains("isn't signed in") ||
             t.contains('authentication required') ||
+            t.contains('authentication failed') ||
+            t.contains('not logged into') ||
             t.contains('starting cursor sign-in') ||
+            t.contains('starting antigravity sign-in') ||
             t.contains('sign-in is already') ||
             t.contains('no headless login')) {
           return true;
@@ -788,6 +886,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
           _active = updated;
         }
       });
+      await _refreshGitTree();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -887,6 +986,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       _busy = false;
       _photos.clear();
       _liveModels = [];
+      _gitTree = null;
     });
   }
 
@@ -929,12 +1029,216 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     return fam;
   }
 
-  void _cycleMode() {
+  Future<void> _refreshGitTree() async {
+    final client = _client;
+    final cwd = _active?.cwd.trim() ?? '';
+    if (client == null || cwd.isEmpty) {
+      if (mounted) setState(() => _gitTree = null);
+      return;
+    }
+    try {
+      final raw = await client.request('fs.gitStatus', {'cwd': cwd});
+      if (!mounted) return;
+      if (raw is Map) {
+        setState(() =>
+            _gitTree = GitWorkingTree.fromJson(Map<String, dynamic>.from(raw)));
+      } else {
+        setState(() => _gitTree = null);
+      }
+    } catch (_) {
+      if (mounted) setState(() => _gitTree = null);
+    }
+  }
+
+  Future<void> _pickMode() async {
     final modes = _caps.modes;
-    if (modes.length < 2) return;
-    final i = modes.indexOf(_mode);
-    setState(() => _mode = modes[(i + 1) % modes.length]);
-    unawaited(_saveComposerPrefs());
+    if (modes.length < 2 || !mounted) return;
+    final chosen = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFF151522),
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(8, 8, 8, 24),
+          children: [
+            const ListTile(
+              title: Text('Mode',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              subtitle: Text('How this agent spends the next turn'),
+            ),
+            for (final mode in modes)
+              ListTile(
+                leading: Icon(
+                  mode == 'plan'
+                      ? Icons.checklist_outlined
+                      : mode == 'ask'
+                          ? Icons.help_outline
+                          : Icons.smart_toy_outlined,
+                ),
+                title: Text(_modeLabel(mode)),
+                trailing: mode == _mode
+                    ? const Icon(Icons.check, color: Color(0xFF2A6AFF))
+                    : null,
+                onTap: () => Navigator.pop(ctx, mode),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (chosen == null || !mounted) return;
+    setState(() => _mode = chosen);
+    await _saveComposerPrefs();
+  }
+
+  Future<void> _openComposerMenu() async {
+    await _refreshGitTree();
+    if (!mounted) return;
+    final cwd = _active?.cwd.trim() ?? '';
+    final git = _gitTree;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF151522),
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(8, 8, 8, 24),
+          children: [
+            const ListTile(
+              title: Text('Add to this turn',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+            ),
+            ListTile(
+              leading: const Icon(Icons.add_photo_alternate_outlined),
+              title: const Text('Photo'),
+              enabled: !_busy,
+              onTap: () {
+                Navigator.pop(ctx);
+                unawaited(_attachPhoto());
+              },
+            ),
+            if (cwd.isNotEmpty)
+              ListTile(
+                leading: const Icon(Icons.account_tree_outlined),
+                title: Text(
+                  git != null
+                      ? 'Working tree · ${folderDisplayName(cwd)}'
+                      : folderDisplayName(cwd),
+                ),
+                subtitle: Text(
+                  git != null ? workingTreeSubtitle(git) : cwd,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  final s = _active;
+                  if (s != null) unawaited(_changeSessionCwd(s));
+                },
+              ),
+            if (git != null)
+              for (final file in git.files.take(4))
+                Padding(
+                  padding: const EdgeInsets.only(left: 56),
+                  child: Text(
+                    file,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF8A8A9A),
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                ),
+            if (git != null && git.files.isNotEmpty) const SizedBox(height: 8),
+            ListTile(
+              leading: const Icon(Icons.memory_outlined),
+              title: const Text('Model'),
+              subtitle: Text(_modelLabel),
+              enabled: !_busy,
+              onTap: () {
+                Navigator.pop(ctx);
+                unawaited(_pickModel());
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.psychology_outlined),
+              title: const Text('Thinking'),
+              subtitle: Text(_thinkingLabel(_thinking)),
+              enabled: !_busy,
+              onTap: () {
+                Navigator.pop(ctx);
+                unawaited(_pickThinking());
+              },
+            ),
+            if (_caps.modes.length > 1)
+              ListTile(
+                leading: Icon(
+                  _mode == 'plan'
+                      ? Icons.checklist_outlined
+                      : _mode == 'ask'
+                          ? Icons.help_outline
+                          : Icons.smart_toy_outlined,
+                ),
+                title: const Text('Mode'),
+                subtitle: Text(_modeLabel(_mode)),
+                enabled: !_busy,
+                onTap: () {
+                  Navigator.pop(ctx);
+                  unawaited(_pickMode());
+                },
+              ),
+            ListTile(
+              leading: Icon(_iconFor(_active?.agent ?? '')),
+              title: const Text('Agent'),
+              subtitle: Text(_activeAgent?.name ?? 'Switch agent'),
+              onTap: () {
+                Navigator.pop(ctx);
+                unawaited(_pickOtherAgent());
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickOtherAgent() async {
+    if (!mounted) return;
+    final chosen = await showModalBottomSheet<AgentInfo>(
+      context: context,
+      backgroundColor: const Color(0xFF151522),
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          padding: const EdgeInsets.fromLTRB(8, 8, 8, 24),
+          children: [
+            const ListTile(
+              title: Text('Agent',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              subtitle: Text('Starts a new chat in this folder'),
+            ),
+            for (final a in _agents)
+              ListTile(
+                leading: Icon(
+                  _iconFor(a.id),
+                  color: a.available
+                      ? const Color(0xFF2A6AFF)
+                      : Colors.white24,
+                ),
+                title: Text(a.name),
+                enabled: a.available,
+                trailing: a.id == _active?.agent
+                    ? const Icon(Icons.check, color: Color(0xFF2A6AFF))
+                    : null,
+                onTap: a.available ? () => Navigator.pop(ctx, a) : null,
+              ),
+          ],
+        ),
+      ),
+    );
+    if (chosen == null || chosen.id == _active?.agent) return;
+    await _newChat(chosen, cwd: _active?.cwd);
   }
 
   Future<void> _pickThinking() async {
@@ -1136,50 +1440,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     });
   }
 
-  Future<void> _selectAgent() async {
-    if (!mounted) return;
-    final chosen = await showModalBottomSheet<AgentInfo>(
-      context: context,
-      backgroundColor: const Color(0xFF151522),
-      builder: (ctx) => SafeArea(
-        child: ListView(
-          shrinkWrap: true,
-          padding: const EdgeInsets.fromLTRB(8, 8, 8, 24),
-          children: [
-            const ListTile(
-              title: Text('Select agent',
-                  style: TextStyle(fontWeight: FontWeight.w600)),
-            ),
-            for (final a in _agents)
-              ListTile(
-                leading: Icon(
-                  _iconFor(a.id),
-                  color: a.available
-                      ? const Color(0xFF2A6AFF)
-                      : Colors.white24,
-                ),
-                title: Text(a.name),
-                subtitle: Text(a.available
-                    ? 'Runs on the PC — chat here'
-                    : 'CLI not installed on the PC'),
-                enabled: a.available,
-                trailing: a.available
-                    ? FilledButton(
-                        onPressed: () => Navigator.pop(ctx, a),
-                        child: const Text('Select'),
-                      )
-                    : null,
-                onTap: a.available ? () => Navigator.pop(ctx, a) : null,
-              ),
-          ],
-        ),
-      ),
-    );
-    if (chosen != null) await _newChat(chosen);
-  }
-
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     for (final u in _unsubs) {
       u();
     }
@@ -1191,6 +1454,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<RpcStatus>(connectionStatusProvider, (prev, next) {
+      if (next == RpcStatus.connected && prev != RpcStatus.connected) {
+        unawaited(_onForeground());
+      }
+    });
     return PopScope(
       canPop: _active == null,
       onPopInvokedWithResult: (didPop, _) {
@@ -1233,23 +1501,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                   ),
                 ),
           actions: [
-            if (_active != null)
-              IconButton(
-                tooltip: 'Change folder',
-                icon: const Icon(Icons.folder_open),
-                onPressed: () => _changeSessionCwd(_active!),
-              ),
-            if (_active != null)
-              IconButton(
-                tooltip: 'Rename chat',
-                icon: const Icon(Icons.edit_outlined),
-                onPressed: () => _renameSessionDialog(_active!),
-              ),
-            IconButton(
-              tooltip: 'Select agent',
-              icon: const Icon(Icons.smart_toy_outlined),
-              onPressed: _selectAgent,
-            ),
             if (_active != null)
               IconButton(
                 tooltip: 'End chat',
@@ -1335,8 +1586,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                       (_active?.agentSessionId == s.agentSessionId && _busy),
                 ),
                 title: Text(s.title),
-                subtitle:
-                    Text(s.cwd, maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: Text(
+                  chatListSubtitle(agent: s.agent, cwd: s.cwd),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
                 trailing: PopupMenuButton<String>(
                   icon: const Icon(Icons.more_vert,
                       size: 18, color: Colors.white38),
@@ -1402,14 +1656,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
           else
             for (final c in _hostChats)
               ListTile(
-                leading: Icon(_iconFor(c.agent)),
+                leading: AgentActivityIcon(agentId: c.agent),
                 title: Text(c.title),
                 subtitle: Text(
-                  [
-                    c.source,
-                    if (c.cwd.isNotEmpty) c.cwd,
-                    if (!c.resumable) 'view only',
-                  ].join(' · '),
+                  chatListSubtitle(
+                    agent: c.agent,
+                    source: c.source,
+                    cwd: c.cwd,
+                    resumable: c.resumable,
+                  ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -1902,45 +2157,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                   Row(
                     children: [
                       IconButton(
-                        tooltip: 'Add photo',
-                        onPressed: _busy ? null : _attachPhoto,
-                        icon: const Icon(Icons.add_photo_alternate_outlined),
+                        tooltip: 'Photo, model, thinking, folder…',
+                        onPressed: _openComposerMenu,
+                        icon: const Icon(Icons.add),
                       ),
-                      Expanded(
-                        child: SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Row(
-                            children: [
-                              _composerChip(
-                                _modelLabel,
-                                onTap: _busy ? null : _pickModel,
-                                icon: Icons.memory_outlined,
-                                active: _model != null &&
-                                    _model != 'auto' &&
-                                    _model != 'default',
-                              ),
-                              _composerChip(
-                                _thinkingLabel(_thinking),
-                                onTap: _busy ? null : _pickThinking,
-                                icon: Icons.psychology_outlined,
-                                active: _thinking != 'medium',
-                              ),
-                              if (_caps.modes.length > 1)
-                                _composerChip(
-                                  _modeLabel(_mode),
-                                  onTap: _busy ? null : _cycleMode,
-                                  icon: _mode == 'plan'
-                                      ? Icons.checklist_outlined
-                                      : _mode == 'ask'
-                                          ? Icons.help_outline
-                                          : Icons.smart_toy_outlined,
-                                  active: _mode != 'agent',
-                                ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 4),
+                      const Spacer(),
                       IconButton.filled(
                         tooltip: _busy ? 'Stop' : 'Send',
                         onPressed: _busy ? _cancel : _send,
@@ -1952,35 +2173,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
               ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  Widget _composerChip(
-    String label, {
-    required VoidCallback? onTap,
-    IconData? icon,
-    bool active = false,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 6),
-      child: ActionChip(
-        onPressed: onTap,
-        avatar: icon == null
-            ? null
-            : Icon(icon, size: 16, color: const Color(0xFFB8B8CC)),
-        label: Text(label),
-        labelStyle: TextStyle(
-          fontSize: 12,
-          color: active ? const Color(0xFF2A6AFF) : Colors.white70,
-        ),
-        visualDensity: VisualDensity.compact,
-        backgroundColor: active
-            ? const Color(0xFF2A6AFF).withValues(alpha: 0.12)
-            : const Color(0xFF1C1C2A),
-        side: BorderSide(
-          color: active ? const Color(0xFF2A6AFF) : const Color(0xFF2A2A40),
         ),
       ),
     );
