@@ -22,6 +22,7 @@ import type {
   WsMessage,
 } from '@nexuslink/rpc-types';
 import {
+  clipTitle,
   listAgyHostChats,
   listCursorCliHostChats,
   listCursorIdeHostChats,
@@ -792,6 +793,29 @@ export function promptAgent(
   const display = (key ? `${key.name}=••••` : text.trim())
     || (materialized.files.length ? 'Attached photo(s)' : '');
   if (!display) return { ok: false };
+
+  // Auto-name the session if it still has the default/generic name
+  const currentTitle = (session.info.title || '').trim();
+  const def = AGENT_DEFS.find((d) => d.id === session.info.agent);
+  const isDefaultTitle =
+    !currentTitle ||
+    currentTitle === 'Agent' ||
+    currentTitle === 'Host chat' ||
+    currentTitle === (def?.name ?? '') ||
+    currentTitle === 'Antigravity' ||
+    currentTitle === 'OpenCode' ||
+    currentTitle === 'Cursor CLI' ||
+    currentTitle === 'Claude Code' ||
+    currentTitle === 'Demo Agent';
+
+  if (isDefaultTitle) {
+    const newTitle = clipTitle(display);
+    if (newTitle) {
+      session.info.title = newTitle;
+      saveAgentSessionsToDisk();
+    }
+  }
+
   emit(session, {
     kind: 'user',
     text: display,
@@ -806,6 +830,19 @@ export function promptAgent(
     images: materialized.files,
   });
   return { ok: true };
+}
+
+export function renameAgentSession(
+  agentSessionId: string,
+  title: string,
+): { ok: boolean; title: string } {
+  loadAgentSessionsFromDisk();
+  const session = agentSessions.get(agentSessionId);
+  if (!session) return { ok: false, title: '' };
+  const cleaned = clipTitle(title) || session.info.title;
+  session.info.title = cleaned;
+  saveAgentSessionsToDisk();
+  return { ok: true, title: cleaned };
 }
 
 export function cancelAgent(agentSessionId: string): { ok: boolean } {
@@ -1855,12 +1892,18 @@ class AntigravityAdapter implements AgentAdapter {
       const errText = await stderr.catch(() => '');
       if (!this.session.info.busy) return;
       setBusy(this.session, false);
+      const isSuccess = (code === 0 && this.streamedText) || this.sawResult;
       const fail = finishCliTurn({
-        sawResult: this.sawResult,
+        sawResult: isSuccess,
         exitCode: code,
-        stderr: errText,
+        stderr: isSuccess ? '' : errText,
       });
-      if (!fail) return;
+      if (!fail) {
+        if (!this.sawResult) {
+          emit(this.session, { kind: 'result', text: '' });
+        }
+        return;
+      }
       emit(this.session, isCliAuthError(fail.text ?? '')
         ? { kind: 'error', text: rewriteCliAuthError(fail.text ?? '', 'Antigravity') }
         : fail);

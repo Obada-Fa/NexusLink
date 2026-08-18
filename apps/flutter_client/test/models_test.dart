@@ -134,6 +134,19 @@ void main() {
       expect(toolGroupRunning(items[0].tools!), isTrue);
       expect(toolGroupTitle(items[0].tools!), 'Working… 2 steps');
     });
+
+    test('merges consecutive text deltas into a single unified assistant message', () {
+      final items = groupAgentDisplay([
+        AgentEvent(seq: 1, ts: 1, kind: 'user', text: 'hello'),
+        AgentEvent(seq: 2, ts: 2, kind: 'text-delta', text: 'Part 1: Hello '),
+        AgentEvent(seq: 3, ts: 3, kind: 'text-delta', text: 'Part 2: world! '),
+        AgentEvent(seq: 4, ts: 4, kind: 'text', text: 'Part 3: Done.'),
+      ]);
+      expect(items.length, 2);
+      expect(items[0].event?.kind, 'user');
+      expect(items[1].event?.kind, 'text');
+      expect(items[1].event?.text, 'Part 1: Hello Part 2: world! Part 3: Done.');
+    });
   });
 
   group('model families', () {
