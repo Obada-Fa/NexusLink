@@ -7,7 +7,7 @@
 // phone can replay history via agent.history) and pushed live as
 // `agent-event` WebSocket messages.
 
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -578,11 +578,64 @@ interface AgentAdapter {
 
 const agentSessions = new Map<string, AgentSession>();
 
+function getSessionsStorePath(): string {
+  const dir = join(homedir(), '.cache', 'nexuslink');
+  if (!existsSync(dir)) {
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch (_) {}
+  }
+  return join(dir, 'agent_sessions.json');
+}
+
+function saveAgentSessionsToDisk(): void {
+  try {
+    const list = [...agentSessions.values()]
+      .sort((a, b) => b.info.createdAt - a.info.createdAt)
+      .slice(0, 60)
+      .map((s) => ({
+        info: s.info,
+        history: s.history.slice(-100),
+      }));
+    writeFileSync(getSessionsStorePath(), JSON.stringify(list, null, 2), 'utf-8');
+  } catch (_) {}
+}
+
+let agentSessionsLoaded = false;
+function loadAgentSessionsFromDisk(): void {
+  if (agentSessionsLoaded) return;
+  agentSessionsLoaded = true;
+  try {
+    const p = getSessionsStorePath();
+    if (!existsSync(p)) return;
+    const raw = readFileSync(p, 'utf-8');
+    const list = JSON.parse(raw);
+    if (!Array.isArray(list)) return;
+    for (const item of list) {
+      if (!item?.info?.agentSessionId || agentSessions.has(item.info.agentSessionId)) continue;
+      const info: AgentSessionInfo = item.info;
+      const def = AGENT_DEFS.find((d) => d.id === info.agent);
+      if (!def) continue;
+      const session: AgentSession = {
+        info: { ...info, busy: false, status: 'running' },
+        history: Array.isArray(item.history) ? item.history : [],
+        adapter: null as unknown as AgentAdapter,
+        seq: Array.isArray(item.history) && item.history.length > 0 ? (item.history[item.history.length - 1].seq ?? 0) : 0,
+        pendingPermissions: new Map(),
+      };
+      session.adapter = def.makeAdapter(session);
+      if (info.hostChatId) session.adapter.bindHostChat?.(info.hostChatId);
+      agentSessions.set(info.agentSessionId, session);
+    }
+  } catch (_) {}
+}
+
 function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): void {
   const full: AgentEvent = { ...event, seq: ++session.seq, ts: Date.now() };
   session.history.push(full);
   if (session.history.length > HISTORY_CAP) session.history.splice(0, 100);
   broadcast({ type: 'agent-event', agentSessionId: session.info.agentSessionId, event: full });
+  saveAgentSessionsToDisk();
 }
 
 function setBusy(session: AgentSession, busy: boolean): void {
@@ -605,6 +658,7 @@ export function createAgentSession(
   title?: string,
   opts?: { hostChatId?: string },
 ): AgentSessionInfo {
+  loadAgentSessionsFromDisk();
   const def = AGENT_DEFS.find((d) => d.id === agentId);
   if (!def) throw new Error(`unknown agent: ${agentId}`);
   if (def.bin && !which(def.bin)) throw new Error(`${def.name} CLI not installed on the host`);
@@ -626,11 +680,15 @@ export function createAgentSession(
   session.adapter = def.makeAdapter(session);
   if (opts?.hostChatId) session.adapter.bindHostChat?.(opts.hostChatId);
   agentSessions.set(info.agentSessionId, session);
+  saveAgentSessionsToDisk();
   return { ...info };
 }
 
 export function listAgentSessions(): AgentSessionInfo[] {
-  return [...agentSessions.values()].map((s) => ({ ...s.info }));
+  loadAgentSessionsFromDisk();
+  return [...agentSessions.values()]
+    .map((s) => ({ ...s.info }))
+    .sort((a, b) => b.createdAt - a.createdAt);
 }
 
 function seedHistory(session: AgentSession, events: HostChatDelta[]): void {
@@ -666,12 +724,18 @@ export function openHostChat(params: {
   cwd?: string;
   title?: string;
 }): AgentSessionInfo {
+  loadAgentSessionsFromDisk();
   const { agent, hostChatId } = params;
   if (!hostChatId) throw new Error('missing hostChatId');
   const existing = [...agentSessions.values()].find(
-    (s) => s.info.agent === agent && s.info.hostChatId === hostChatId && s.info.status === 'running',
+    (s) => s.info.agent === agent && s.info.hostChatId === hostChatId,
   );
-  if (existing) return { ...existing.info };
+  if (existing) {
+    existing.info.createdAt = Date.now();
+    existing.info.status = 'running';
+    saveAgentSessionsToDisk();
+    return { ...existing.info };
+  }
 
   const viewOnly = hostChatId.startsWith('ide:');
   const cwd = resolveAgentCwd(params.cwd, { fallbackHome: true });
@@ -698,11 +762,21 @@ export function openHostChat(params: {
       ts: Date.now(),
     }]);
   }
+  saveAgentSessionsToDisk();
   return { ...session.info };
 }
 
 export function agentHistory(agentSessionId: string): AgentEvent[] {
-  return agentSessions.get(agentSessionId)?.history.slice() ?? [];
+  loadAgentSessionsFromDisk();
+  const session = agentSessions.get(agentSessionId);
+  if (!session) return [];
+  if (session.history.length === 0 && session.info.hostChatId) {
+    const def = AGENT_DEFS.find((d) => d.id === session.info.agent);
+    const bin = def?.bin ? which(def.bin) : null;
+    const history = loadHostChatHistory(session.info.agent, session.info.hostChatId, bin);
+    seedHistory(session, history);
+  }
+  return session.history.slice();
 }
 
 export function promptAgent(
@@ -710,6 +784,7 @@ export function promptAgent(
   text: string,
   opts: AgentPromptOpts = {},
 ): { ok: boolean } {
+  loadAgentSessionsFromDisk();
   const session = agentSessions.get(agentSessionId);
   if (!session || session.info.status !== 'running') return { ok: false };
   const materialized = materializeAgentImages(session.info.agentSessionId, opts.images);
@@ -745,9 +820,10 @@ export function cancelAgent(agentSessionId: string): { ok: boolean } {
 export function closeAgentSession(agentSessionId: string): { ok: boolean } {
   const session = agentSessions.get(agentSessionId);
   if (!session) return { ok: false };
-  session.adapter.close();
+  session.adapter?.close?.();
   session.info.status = 'exited';
   agentSessions.delete(agentSessionId);
+  saveAgentSessionsToDisk();
   return { ok: true };
 }
 

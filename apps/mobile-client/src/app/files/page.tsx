@@ -29,6 +29,32 @@ function formatDate(iso: string): string {
   }
 }
 
+type SortOption = 'name-asc' | 'name-desc' | 'date-desc' | 'date-asc' | 'size-desc' | 'size-asc';
+
+function sortFileEntries(list: FileEntry[], sort: SortOption): FileEntry[] {
+  return [...list].sort((a, b) => {
+    if (a.isDirectory !== b.isDirectory) {
+      return a.isDirectory ? -1 : 1;
+    }
+    switch (sort) {
+      case 'name-asc':
+        return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+      case 'name-desc':
+        return b.name.localeCompare(a.name, undefined, { numeric: true, sensitivity: 'base' });
+      case 'date-desc':
+        return b.modifiedAt.localeCompare(a.modifiedAt);
+      case 'date-asc':
+        return a.modifiedAt.localeCompare(b.modifiedAt);
+      case 'size-desc':
+        return b.size - a.size;
+      case 'size-asc':
+        return a.size - b.size;
+      default:
+        return 0;
+    }
+  });
+}
+
 export default function FilesPage() {
   const client = useConnectionStore((s) => s.client);
   const status = useConnectionStore((s) => s.status);
@@ -46,6 +72,7 @@ export default function FilesPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
+  const [sortBy, setSortBy] = useState<SortOption>('name-asc');
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -57,9 +84,7 @@ export default function FilesPage() {
       setError('');
       try {
         const result = (await client.request('fs.list', { path })) as FileEntry[];
-        const dirs = result.filter((e) => e.isDirectory);
-        const files = result.filter((e) => !e.isDirectory);
-        setEntries([...dirs, ...files]);
+        setEntries(sortFileEntries(result, sortBy));
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to list files');
         setEntries([]);
@@ -68,7 +93,7 @@ export default function FilesPage() {
         setRefreshing(false);
       }
     },
-    [client, status]
+    [client, status, sortBy]
   );
 
   useEffect(() => {
@@ -161,6 +186,22 @@ export default function FilesPage() {
         </button>
         <span style={styles.title}>Files</span>
         <div style={styles.headerActions}>
+          <select
+            value={sortBy}
+            onChange={(e) => {
+              const s = e.target.value as SortOption;
+              setSortBy(s);
+              setEntries((prev) => sortFileEntries(prev, s));
+            }}
+            style={styles.sortSelect}
+          >
+            <option value="name-asc">A → Z</option>
+            <option value="name-desc">Z → A</option>
+            <option value="date-desc">Newest</option>
+            <option value="date-asc">Oldest</option>
+            <option value="size-desc">Largest</option>
+            <option value="size-asc">Smallest</option>
+          </select>
           <button
             style={{
               ...styles.actionBtn,
@@ -417,6 +458,16 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#888',
     fontSize: '11px',
     fontWeight: 500,
+    cursor: 'pointer',
+  },
+  sortSelect: {
+    padding: '4px 8px',
+    borderRadius: '6px',
+    border: '1px solid #333',
+    background: '#141420',
+    color: '#ccc',
+    fontSize: '11px',
+    outline: 'none',
     cursor: 'pointer',
   },
   navRow: {

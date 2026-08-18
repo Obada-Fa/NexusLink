@@ -205,6 +205,7 @@ export default function AgentsPage() {
       })) as AgentEvent[];
       setActive(s);
       setEvents(history);
+      setSessions((prev) => [s, ...prev.filter((x) => x.agentSessionId !== s.agentSessionId)]);
     },
     [client],
   );
@@ -218,7 +219,7 @@ export default function AgentsPage() {
         cwd: chat.cwd,
         title: chat.title,
       })) as AgentSessionInfo;
-      setSessions((s) => (s.some((x) => x.agentSessionId === created.agentSessionId) ? s : [created, ...s]));
+      setSessions((prev) => [created, ...prev.filter((x) => x.agentSessionId !== created.agentSessionId)]);
       await openSession(created);
     },
     [client, openSession],

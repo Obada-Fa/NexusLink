@@ -29,7 +29,12 @@ export async function handleFsList(path: string, showHidden = false): Promise<Fi
       mimeType: entry.isDirectory() ? 'directory' : 'application/octet-stream',
     });
   }
-  return out.sort((a, b) => (a.isDirectory === b.isDirectory ? 0 : a.isDirectory ? -1 : 1));
+  return out.sort((a, b) => {
+    if (a.isDirectory !== b.isDirectory) {
+      return a.isDirectory ? -1 : 1;
+    }
+    return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+  });
 }
 
 /** Working-directory picker for agent chats: git roots under common folders. */

@@ -25,7 +25,7 @@ import {
 import { startIde, stopIde, ideStatus } from './handlers/ide';
 import type { WebRtcSignal, AgentImageAttachment } from '@nexuslink/rpc-types';
 import { serveStatic, staticAvailable } from './static-server';
-import { printLaunchBanner } from './launch-banner';
+import { printLaunchBanner, tailscaleIpv4FromCli } from './launch-banner';
 import { startSidecarReader } from './sidecar-reader';
 import { startMdns } from './mdns';
 import { handleFileDownload, handleFileUpload } from './handlers/files-http';
@@ -47,8 +47,23 @@ const AUTH_METHODS = new Set<string>([
   'session.disconnect',
 ]);
 
-export async function startRpcServer(port = 45678) {
+export async function startRpcServer(port = 45678, hostname?: string) {
   const sessions = new Map<string, Session>();
+
+  let bindHost = hostname ?? process.env.NEXUSLINK_HOST ?? process.env.HOST;
+  const tailscaleOnly = process.env.NEXUSLINK_TAILSCALE_ONLY === '1' || process.env.TAILSCALE_ONLY === '1';
+
+  if (!bindHost && tailscaleOnly) {
+    const tsIps = tailscaleIpv4FromCli();
+    if (tsIps.length > 0) {
+      bindHost = tsIps[0];
+      console.log(`[rpc-server] Tailscale-only mode active: binding exclusively to ${bindHost}`);
+    } else {
+      console.warn('[rpc-server] Tailscale-only requested but no Tailscale IPv4 found; defaulting to 0.0.0.0');
+    }
+  }
+
+  bindHost = bindHost ?? '0.0.0.0';
 
   function send(ws: WebSocket, msg: WsMessage) {
     if (ws.readyState === 1) ws.send(JSON.stringify(msg));
@@ -419,7 +434,7 @@ export async function startRpcServer(port = 45678) {
   }
 
   const server = Bun.serve({
-    hostname: '0.0.0.0',
+    hostname: bindHost,
     port,
     async fetch(req, srv) {
       const url = new URL(req.url);
@@ -474,11 +489,13 @@ export async function startRpcServer(port = 45678) {
   });
 
   startSidecarReader(send, getPerfSnapshot, getAuthenticatedSessions);
-  startMdns(port);
+  if (!tailscaleOnly && bindHost === '0.0.0.0') {
+    startMdns(port);
+  }
 
   const servesClient = await staticAvailable();
   printLaunchBanner(port, servesClient);
-  console.log(`[rpc-server] listening on port ${port}`);
+  console.log(`[rpc-server] listening on ${bindHost}:${port}`);
   return { port };
 }
 

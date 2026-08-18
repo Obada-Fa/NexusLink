@@ -6,3 +6,4 @@ target/
 *.lockb
 *.apk
 tsconfig.tsbuildinfo
+.tools/

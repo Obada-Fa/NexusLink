@@ -12,8 +12,44 @@ export type HostChatDelta = Omit<AgentEvent, 'seq'>;
 const LIST_CAP = 40;
 const EVENT_CAP = 400;
 
+export function cleanMessageText(raw: string): string {
+  if (!raw || typeof raw !== 'string') return '';
+  let text = raw;
+
+  // 1. Strip entire auxiliary metadata and prompt wrapper blocks
+  text = text
+    .replace(/<timestamp>[\s\S]*?<\/timestamp>/gi, '')
+    .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/gi, '')
+    .replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/gi, '')
+    .replace(/<SYSTEM_MESSAGE>[\s\S]*?<\/SYSTEM_MESSAGE>/gi, '')
+    .replace(/<system_prompt>[\s\S]*?<\/system_prompt>/gi, '')
+    .replace(/<skill-instruction>[\s\S]*?<\/skill-instruction>/gi, '')
+    .replace(/<auto-slash-command>[\s\S]*?<\/auto-slash-command>/gi, '')
+    .replace(/\[REDACTED\]/gi, '');
+
+  // 2. Extract inner content from user query / request tags if present
+  const userQueryMatch = text.match(/<user_query>([\s\S]*?)<\/user_query>/i)
+    ?? text.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/i)
+    ?? text.match(/<user-request>([\s\S]*?)<\/user-request>/i);
+
+  if (userQueryMatch && userQueryMatch[1]?.trim()) {
+    text = userQueryMatch[1];
+  } else {
+    text = text.replace(/<\/?(?:user_query|USER_REQUEST|user-request|context|timestamp)>/gi, '');
+  }
+
+  // 3. Trim and normalize excessive blank lines
+  text = text
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  return text;
+}
+
 function clipTitle(text: string): string {
-  const t = text.replace(/\s+/g, ' ').trim();
+  const cleaned = cleanMessageText(text);
+  const t = cleaned.replace(/\s+/g, ' ').trim();
   if (!t) return '';
   return t.length > 72 ? `${t.slice(0, 69)}…` : t;
 }
@@ -72,9 +108,10 @@ export function parseOpencodeExport(raw: unknown): HostChatDelta[] {
       const p = part as Record<string, unknown>;
       const type = String(p.type ?? '');
       if (type === 'text' && typeof p.text === 'string' && p.text.trim()) {
-        texts.push(p.text);
+        const cleaned = cleanMessageText(p.text);
+        if (cleaned) texts.push(cleaned);
       } else if (type === 'reasoning' || type === 'thinking') {
-        const think = typeof p.text === 'string' ? p.text : '';
+        const think = typeof p.text === 'string' ? cleanMessageText(p.text) : '';
         if (think.trim()) out.push({ kind: 'thinking', text: think, ts });
       } else if (type === 'tool' || type === 'tool_use' || type === 'tool-invocation') {
         const state = (p.state as Record<string, unknown> | undefined) ?? {};
@@ -114,13 +151,17 @@ export function parseCursorTranscriptLine(raw: unknown): HostChatDelta[] {
     const texts: string[] = [];
     for (const part of content) {
       if (!part || typeof part !== 'object') {
-        if (typeof part === 'string' && part.trim()) texts.push(part);
+        if (typeof part === 'string' && part.trim()) {
+          const cleaned = cleanMessageText(part);
+          if (cleaned) texts.push(cleaned);
+        }
         continue;
       }
       const p = part as Record<string, unknown>;
       const type = String(p.type ?? '');
       if (type === 'text' && typeof p.text === 'string' && p.text.trim()) {
-        texts.push(p.text);
+        const cleaned = cleanMessageText(p.text);
+        if (cleaned) texts.push(cleaned);
       } else if (type === 'tool_use' || type === 'tool-call') {
         const name = String(p.name ?? 'tool');
         const refId = String(p.id ?? '');
@@ -150,7 +191,7 @@ export function parseCursorTranscriptLine(raw: unknown): HostChatDelta[] {
     }
     return out;
   }
-  const text = contentToText(content).trim();
+  const text = cleanMessageText(contentToText(content));
   if (!text) return [];
   if (role === 'user' || role === 'human') return [{ kind: 'user', text, ts }];
   if (role === 'assistant' || role === 'ai' || role === 'model') return [{ kind: 'text', text, ts }];
@@ -215,9 +256,8 @@ export function extractProtobufStrings(buf: Uint8Array): string[] {
 }
 
 export function parseAgyStepStrings(strings: string[]): HostChatDelta[] {
-  const useful = strings.filter((s) => {
-    const t = s.trim();
-    if (t.length < 8 || t.length > 8000) return false;
+  const useful = strings.map(cleanMessageText).filter((t) => {
+    if (t.length < 4 || t.length > 8000) return false;
     if (/^[0-9a-f-]{20,}$/i.test(t)) return false;
     if (/^[\x00-\x1f]+$/.test(t)) return false;
     return / /.test(t) || t.length >= 16;
@@ -231,6 +271,53 @@ export function parseAgyStepStrings(strings: string[]): HostChatDelta[] {
       ts: Date.now(),
     });
   });
+  return out.slice(-EVENT_CAP);
+}
+
+export function parseAgyJsonl(text: string): HostChatDelta[] {
+  const out: HostChatDelta[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const rec = JSON.parse(t) as Record<string, unknown>;
+      const type = String(rec.type ?? '');
+      const createdAt = typeof rec.created_at === 'string' ? Date.parse(rec.created_at) : Date.now();
+      const ts = Number.isFinite(createdAt) ? createdAt : Date.now();
+
+      if (type === 'USER_INPUT') {
+        const raw = String(rec.content ?? '');
+        const cleaned = cleanMessageText(raw);
+        if (cleaned) {
+          out.push({ kind: 'user', text: cleaned, ts });
+        }
+      } else if (type === 'PLANNER_RESPONSE' || type === 'MODEL_RESPONSE') {
+        if (typeof rec.content === 'string' && rec.content.trim()) {
+          const cleaned = cleanMessageText(rec.content);
+          if (cleaned) {
+            out.push({ kind: 'text', text: cleaned, ts });
+          }
+        }
+        if (Array.isArray(rec.tool_calls)) {
+          for (const tc of rec.tool_calls) {
+            if (!tc || typeof tc !== 'object') continue;
+            const name = String(tc.name ?? 'tool');
+            const input = typeof tc.args === 'string'
+              ? tc.args
+              : JSON.stringify(tc.args ?? {}, null, 2);
+            out.push({
+              kind: 'tool-start',
+              toolName: name,
+              toolInput: input.slice(0, 4000),
+              ts,
+            });
+          }
+        }
+      }
+    } catch {
+      // skip malformed lines
+    }
+  }
   return out.slice(-EVENT_CAP);
 }
 
@@ -362,6 +449,7 @@ export function listCursorIdeHostChats(): AgentHostChat[] {
   const root = join(homedir(), '.cursor', 'projects');
   if (!existsSync(root)) return [];
   const out: AgentHostChat[] = [];
+  const seen = new Set<string>();
   try {
     for (const slug of readdirSync(root)) {
       const transcripts = join(root, slug, 'agent-transcripts');
@@ -372,7 +460,37 @@ export function listCursorIdeHostChats(): AgentHostChat[] {
       } catch {
         continue;
       }
+
+      // Infer project cwd from slug if possible
+      let cwd = '';
+      if (slug.startsWith('home-')) {
+        const candidate = '/' + slug.replace(/-/g, '/');
+        if (existsSync(candidate)) {
+          cwd = candidate;
+        } else {
+          const parts = slug.split('-');
+          let testPath = '/' + parts[0];
+          for (let i = 1; i < parts.length; i++) {
+            if (existsSync(`${testPath}/${parts[i]}`)) {
+              testPath = `${testPath}/${parts[i]}`;
+            } else if (existsSync(`${testPath}-${parts[i]}`)) {
+              testPath = `${testPath}-${parts[i]}`;
+            } else {
+              testPath = `${testPath}/${parts[i]}`;
+            }
+          }
+          if (existsSync(testPath)) cwd = testPath;
+        }
+      }
+
       for (const id of chats) {
+        if (seen.has(id)) {
+          const existing = out.find((x) => x.hostChatId === `ide:${id}`);
+          if (existing && !existing.cwd && cwd) {
+            existing.cwd = cwd;
+          }
+          continue;
+        }
         const file = join(transcripts, id, `${id}.jsonl`);
         if (!existsSync(file)) continue;
         let updatedAt = Date.now();
@@ -388,11 +506,12 @@ export function listCursorIdeHostChats(): AgentHostChat[] {
         } catch {
           // keep fallback
         }
+        seen.add(id);
         out.push({
           agent: 'cursor',
           hostChatId: `ide:${id}`,
           title,
-          cwd: '',
+          cwd,
           updatedAt,
           resumable: false,
           source: 'Cursor IDE',
@@ -424,39 +543,87 @@ export function loadCursorIdeHistory(hostChatId: string): HostChatDelta[] {
 }
 
 export function listAgyHostChats(): AgentHostChat[] {
-  const dir = join(homedir(), '.gemini', 'antigravity-cli', 'conversations');
-  if (!existsSync(dir)) return [];
+  const brainDir = join(homedir(), '.gemini', 'antigravity-cli', 'brain');
+  const convDir = join(homedir(), '.gemini', 'antigravity-cli', 'conversations');
   const out: AgentHostChat[] = [];
-  try {
-    for (const name of readdirSync(dir)) {
-      if (!name.endsWith('.db') || name.includes('-wal') || name.includes('-shm')) continue;
-      const id = name.replace(/\.db$/, '');
-      const path = join(dir, name);
-      let updatedAt = Date.now();
-      try {
-        updatedAt = statSync(path).mtimeMs;
-      } catch {
-        // keep now
+  const seen = new Set<string>();
+
+  if (existsSync(brainDir)) {
+    try {
+      for (const id of readdirSync(brainDir)) {
+        const transcriptPath = join(brainDir, id, '.system_generated', 'logs', 'transcript.jsonl');
+        if (!existsSync(transcriptPath)) continue;
+        let updatedAt = Date.now();
+        try {
+          updatedAt = statSync(transcriptPath).mtimeMs;
+        } catch {
+          // keep now
+        }
+        let title = 'Antigravity conversation';
+        try {
+          const head = readFileSync(transcriptPath, 'utf8').split('\n').slice(0, 20).join('\n');
+          title = titleFromEvents(parseAgyJsonl(head), title);
+        } catch {
+          // keep fallback
+        }
+        seen.add(id);
+        out.push({
+          agent: 'antigravity',
+          hostChatId: id,
+          title,
+          cwd: '',
+          updatedAt,
+          resumable: true,
+          source: 'Antigravity',
+        });
       }
-      out.push({
-        agent: 'antigravity',
-        hostChatId: id,
-        title: 'Antigravity conversation',
-        cwd: '',
-        updatedAt,
-        resumable: true,
-        source: 'Antigravity',
-      });
+    } catch {
+      // ignore
     }
-  } catch {
-    return [];
   }
+
+  if (existsSync(convDir)) {
+    try {
+      for (const name of readdirSync(convDir)) {
+        if (!name.endsWith('.db') || name.includes('-wal') || name.includes('-shm')) continue;
+        const id = name.replace(/\.db$/, '');
+        if (seen.has(id)) continue;
+        const path = join(convDir, name);
+        let updatedAt = Date.now();
+        try {
+          updatedAt = statSync(path).mtimeMs;
+        } catch {
+          // keep now
+        }
+        out.push({
+          agent: 'antigravity',
+          hostChatId: id,
+          title: 'Antigravity conversation',
+          cwd: '',
+          updatedAt,
+          resumable: true,
+          source: 'Antigravity',
+        });
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   return out
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .slice(0, LIST_CAP);
 }
 
 export function loadAgyHistory(hostChatId: string): HostChatDelta[] {
+  const transcriptPath = join(homedir(), '.gemini', 'antigravity-cli', 'brain', hostChatId, '.system_generated', 'logs', 'transcript.jsonl');
+  if (existsSync(transcriptPath)) {
+    try {
+      return parseAgyJsonl(readFileSync(transcriptPath, 'utf8'));
+    } catch {
+      // fallback to sqlite
+    }
+  }
   const path = join(homedir(), '.gemini', 'antigravity-cli', 'conversations', `${hostChatId}.db`);
   if (!existsSync(path)) return [];
   const db = openReadonlyDb(path);

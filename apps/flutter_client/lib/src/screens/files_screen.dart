@@ -15,6 +15,15 @@ import '../rpc/models.dart';
 import '../state/connection.dart';
 import '../widgets/not_connected_view.dart';
 
+enum FileSortOption {
+  nameAsc,
+  nameDesc,
+  dateDesc,
+  dateAsc,
+  sizeDesc,
+  sizeAsc,
+}
+
 class FilesScreen extends ConsumerStatefulWidget {
   const FilesScreen({super.key});
 
@@ -29,6 +38,7 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
   String? _error;
   double? _transfer; // 0..1 while a transfer is in flight, null otherwise
   String _transferLabel = '';
+  FileSortOption _sortOption = FileSortOption.nameAsc;
 
   @override
   void initState() {
@@ -57,6 +67,30 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
     }
   }
 
+  List<FileEntry> _sortEntries(List<FileEntry> list, FileSortOption sort) {
+    final copy = List<FileEntry>.from(list);
+    copy.sort((a, b) {
+      if (a.isDirectory != b.isDirectory) {
+        return a.isDirectory ? -1 : 1;
+      }
+      switch (sort) {
+        case FileSortOption.nameAsc:
+          return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+        case FileSortOption.nameDesc:
+          return b.name.toLowerCase().compareTo(a.name.toLowerCase());
+        case FileSortOption.dateDesc:
+          return b.modifiedAt.compareTo(a.modifiedAt);
+        case FileSortOption.dateAsc:
+          return a.modifiedAt.compareTo(b.modifiedAt);
+        case FileSortOption.sizeDesc:
+          return b.size.compareTo(a.size);
+        case FileSortOption.sizeAsc:
+          return a.size.compareTo(b.size);
+      }
+    });
+    return copy;
+  }
+
   Future<void> _navigate(String path) async {
     final client = ref.read(activeClientProvider);
     if (client == null) return;
@@ -69,8 +103,10 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
       if (!mounted) return;
       setState(() {
         _cwd = path;
-        _entries =
-            raw.map((e) => FileEntry.fromJson(e as Map<String, dynamic>)).toList();
+        _entries = _sortEntries(
+          raw.map((e) => FileEntry.fromJson(e as Map<String, dynamic>)).toList(),
+          _sortOption,
+        );
         _loading = false;
       });
     } catch (e) {
@@ -136,7 +172,48 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Files')),
+      appBar: AppBar(
+        title: const Text('Files'),
+        actions: [
+          PopupMenuButton<FileSortOption>(
+            icon: const Icon(Icons.sort),
+            tooltip: 'Sort files',
+            initialValue: _sortOption,
+            onSelected: (opt) {
+              setState(() {
+                _sortOption = opt;
+                _entries = _sortEntries(_entries, _sortOption);
+              });
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: FileSortOption.nameAsc,
+                child: Text('Name (A → Z)'),
+              ),
+              const PopupMenuItem(
+                value: FileSortOption.nameDesc,
+                child: Text('Name (Z → A)'),
+              ),
+              const PopupMenuItem(
+                value: FileSortOption.dateDesc,
+                child: Text('Date modified (Newest)'),
+              ),
+              const PopupMenuItem(
+                value: FileSortOption.dateAsc,
+                child: Text('Date modified (Oldest)'),
+              ),
+              const PopupMenuItem(
+                value: FileSortOption.sizeDesc,
+                child: Text('Size (Largest)'),
+              ),
+              const PopupMenuItem(
+                value: FileSortOption.sizeAsc,
+                child: Text('Size (Smallest)'),
+              ),
+            ],
+          ),
+        ],
+      ),
       body: Column(
         children: [
           _pathBar(),
@@ -219,7 +296,12 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
           leading: Icon(e.isDirectory ? Icons.folder : Icons.insert_drive_file,
               color: e.isDirectory ? const Color(0xFF6B8CFF) : Colors.white54),
           title: Text(e.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-          subtitle: e.isDirectory ? null : Text(_humanSize(e.size)),
+          subtitle: e.isDirectory
+              ? null
+              : Text(
+                  _fileSubtitle(e),
+                  style: const TextStyle(fontSize: 11, color: Colors.white54),
+                ),
           trailing: e.isDirectory
               ? const Icon(Icons.chevron_right, size: 18)
               : IconButton(
@@ -230,6 +312,25 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
         );
       },
     );
+  }
+
+  String _fileSubtitle(FileEntry e) {
+    final size = _humanSize(e.size);
+    if (_sortOption == FileSortOption.dateDesc || _sortOption == FileSortOption.dateAsc) {
+      final date = _formatDate(e.modifiedAt);
+      return date.isNotEmpty ? '$size · $date' : size;
+    }
+    return size;
+  }
+
+  static String _formatDate(String iso) {
+    if (iso.isEmpty) return '';
+    try {
+      final dt = DateTime.parse(iso).toLocal();
+      return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return iso;
+    }
   }
 
   static String _humanSize(int bytes) {
