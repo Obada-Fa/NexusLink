@@ -8,15 +8,51 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../rpc/models.dart';
 import 'connection.dart';
 
-/// Installed apps — one fetch per connection (apps.list is expensive: it scans
-/// .desktop dirs and resolves icons host-side).
-final appsProvider = FutureProvider<List<AppInfo>>((ref) async {
-  final client = ref.watch(activeClientProvider);
-  if (client == null) return [];
-  final raw = await client.requestList(
-      'apps.list', const {}, const Duration(seconds: 30));
-  return raw.map((e) => AppInfo.fromJson(e as Map<String, dynamic>)).toList();
-});
+/// Installed apps — fetched on connect, updated seamlessly on apps-update pushes
+/// when new apps are added to the PC.
+final appsProvider =
+    NotifierProvider<AppsNotifier, AsyncValue<List<AppInfo>>>(
+        AppsNotifier.new);
+
+class AppsNotifier extends Notifier<AsyncValue<List<AppInfo>>> {
+  bool _disposed = false;
+  void Function()? _unsub;
+
+  @override
+  AsyncValue<List<AppInfo>> build() {
+    final client = ref.watch(activeClientProvider);
+    ref.onDispose(() {
+      _disposed = true;
+      _unsub?.call();
+    });
+    if (client == null) return const AsyncValue.data([]);
+    Future.microtask(refresh);
+    _unsub ??= client.subscribe('apps-update', (msg) {
+      final raw = msg['apps'];
+      if (raw is List) {
+        final list = raw
+            .map((e) => AppInfo.fromJson(e as Map<String, dynamic>))
+            .toList();
+        if (!_disposed) state = AsyncValue.data(list);
+      }
+    });
+    return const AsyncValue.loading();
+  }
+
+  Future<void> refresh() async {
+    final client = ref.read(activeClientProvider);
+    if (client == null) return;
+    try {
+      final raw = await client.requestList(
+          'apps.list', const {}, const Duration(seconds: 30));
+      final list =
+          raw.map((e) => AppInfo.fromJson(e as Map<String, dynamic>)).toList();
+      if (!_disposed) state = AsyncValue.data(list);
+    } catch (e, st) {
+      if (!_disposed && state is! AsyncData) state = AsyncValue.error(e, st);
+    }
+  }
+}
 
 /// Virtual app sessions running on the PC ("running on your phone") —
 /// polled with the windows and refreshed instantly on app-session-update

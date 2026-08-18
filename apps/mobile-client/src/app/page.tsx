@@ -187,8 +187,16 @@ function HomeScreen() {
       .catch(() => {})
       .finally(() => setAppsLoading(false));
 
+    const unsubApps = client.subscribe('apps-update', (msg: unknown) => {
+      const data = msg as { apps?: AppInfo[] };
+      if (Array.isArray(data?.apps)) {
+        setApps(data.apps);
+      }
+    });
+
     pollRef.current = setInterval(() => void refreshWindows(), 5000);
     return () => {
+      unsubApps();
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [status, client, refreshWindows]);

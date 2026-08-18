@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../rpc/models.dart';
+import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
 import '../state/launcher.dart';
 import '../widgets/app_icon.dart';
@@ -76,24 +77,36 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
           children: [
             _header(context),
             Expanded(
-              child: ListView(
-                padding: const EdgeInsets.symmetric(horizontal: 14),
-                children: [
-                  if (sessions.isNotEmpty && q.isEmpty) ...[
-                    _sectionTitle('Running on your phone'),
-                    _sessionRow(sessions),
-                    const SizedBox(height: 8),
+              child: RefreshIndicator(
+                color: const Color(0xFF2A6AFF),
+                backgroundColor: const Color(0xFF161622),
+                onRefresh: () async {
+                  await Future.wait([
+                    ref.read(appsProvider.notifier).refresh(),
+                    ref.read(windowsProvider.notifier).refresh(),
+                    ref.read(appSessionsProvider.notifier).refresh(),
+                  ]);
+                },
+                child: ListView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  children: [
+                    if (sessions.isNotEmpty && q.isEmpty) ...[
+                      _sectionTitle('Running on your phone'),
+                      _sessionRow(sessions),
+                      const SizedBox(height: 8),
+                    ],
+                    _appsHeader(),
+                    if (appsAsync.isLoading)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 40),
+                        child: Center(child: CircularProgressIndicator()),
+                      )
+                    else
+                      _appGrid(filteredApps, windows, sessions),
+                    const SizedBox(height: 12),
                   ],
-                  _appsHeader(),
-                  if (appsAsync.isLoading)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 40),
-                      child: Center(child: CircularProgressIndicator()),
-                    )
-                  else
-                    _appGrid(filteredApps, windows, sessions),
-                  const SizedBox(height: 12),
-                ],
+                ),
               ),
             ),
             if (windows.isNotEmpty) _taskbar(windows, apps),
@@ -106,12 +119,18 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
 
   Widget _header(BuildContext context) {
     final host = ref.watch(connectionProvider).hostUrl ?? '';
+    final status = ref.watch(connectionStatusProvider);
     final label = Uri.tryParse(host)?.host ?? 'PC';
+    final statusColor = switch (status) {
+      RpcStatus.connected => const Color(0xFF4ADE80),
+      RpcStatus.connecting => const Color(0xFFF0C040),
+      RpcStatus.disconnected => const Color(0xFFEE5555),
+    };
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 8, 12, 10),
       child: Row(
         children: [
-          const Icon(Icons.circle, size: 8, color: Color(0xFF4ADE80)),
+          Icon(Icons.circle, size: 8, color: statusColor),
           const SizedBox(width: 8),
           Expanded(
               child: Text(label,

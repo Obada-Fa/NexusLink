@@ -6,8 +6,10 @@ import { handleTerminalCreate, handleTerminalInput, handleTerminalResize, handle
 import { validateToken, generateToken, handleSessionPair, validateSessionTOTP, isLocalDev, generateDevToken } from './handlers/auth';
 import { setSend as setSignalingSend } from './handlers/signaling';
 import { mouseMove, mouseClick, mouseScroll, keyEvent, typeText, buttonDown, buttonUp, mouseMoveAbs } from './handlers/input';
-import { setSend as setCaptureSend, startCapture, stopCapture, stopCapturesForSocket, getScreenMetadata } from './handlers/capture';
-import { listWindows, listApps, launchApp, adoptWindow, releaseWindow, activateWindow, getWindowGeometry, getAdoptedCaptureRegion } from './handlers/windows';
+import {
+  listWindows, listApps, refreshApps, launchApp, adoptWindow, releaseWindow, activateWindow,
+  getWindowGeometry, getAdoptedCaptureRegion, setAppsBroadcast, initAppWatcher,
+} from './handlers/windows';
 import {
   createAppSession, listAppSessions, resizeAppSession, closeAppSession,
   getAppSession, getSessionDisplay, setSessionBroadcast,
@@ -81,6 +83,8 @@ export async function startRpcServer(port = 45678) {
   };
   setSessionBroadcast(broadcastAll);
   setAgentBroadcast(broadcastAll);
+  setAppsBroadcast(broadcastAll);
+  initAppWatcher();
 
   async function dispatch(method: RpcMethod, params: Params, req: RpcRequest<RpcMethod>, ws: WebSocket) {
     const sessionId = findSession(ws);
@@ -195,6 +199,9 @@ export async function startRpcServer(port = 45678) {
         break;
       case 'apps.list':
         result = await listApps();
+        break;
+      case 'apps.refresh':
+        result = await refreshApps();
         break;
       case 'apps.launch':
         result = await launchApp(params.appId as string);

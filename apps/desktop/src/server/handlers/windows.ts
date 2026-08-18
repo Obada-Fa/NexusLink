@@ -4,12 +4,13 @@
 // mobile launcher can show real names and icons. No Rust sidecar required.
 
 import { readdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, watch, type FSWatcher } from 'node:fs';
 import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
-import type { WindowInfo, AppInfo, CaptureRegion } from '@nexuslink/rpc-types';
+import type { WindowInfo, AppInfo, CaptureRegion, WsMessage } from '@nexuslink/rpc-types';
 import { getScreenMetadata, getPrimaryMonitor } from './capture';
 import { listProfiles } from './app-profiles';
+import { resolveAppIcon, invalidateIconCache } from './icon-resolver';
 import {
   aspectCorrectPlacement,
   cropToPhoneAspect,
@@ -71,7 +72,55 @@ export function normClass(s: string): string {
 }
 
 let catalogCache: { at: number; catalog: AppCatalog } | null = null;
-const iconCache = new Map<string, string | null>(); // iconName → data URI (null = unresolvable)
+type BroadcastFn = (msg: WsMessage) => void;
+let appsBroadcast: BroadcastFn | null = null;
+let appWatchers: FSWatcher[] = [];
+let appDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function setAppsBroadcast(fn: BroadcastFn): void {
+  appsBroadcast = fn;
+}
+
+/** Initialize file system watchers on application directories to detect new/modified apps. */
+export function initAppWatcher(): void {
+  for (const w of appWatchers) {
+    try {
+      w.close();
+    } catch {}
+  }
+  appWatchers = [];
+
+  for (const dir of APP_DIRS) {
+    if (existsSync(dir)) {
+      try {
+        const w = watch(dir, { recursive: false }, (_event, filename) => {
+          if (filename && !filename.endsWith('.desktop')) return;
+          if (appDebounceTimer) clearTimeout(appDebounceTimer);
+          appDebounceTimer = setTimeout(async () => {
+            catalogCache = null;
+            invalidateIconCache();
+            if (appsBroadcast) {
+              try {
+                const apps = await listApps();
+                appsBroadcast({ type: 'apps-update', apps });
+              } catch {}
+            }
+          }, 300);
+        });
+        w.unref?.();
+        appWatchers.push(w);
+      } catch {}
+    }
+  }
+
+  // Pre-warm icon resolution in the background
+  const warmTimer = setTimeout(async () => {
+    try {
+      await listApps();
+    } catch {}
+  }, 100);
+  warmTimer.unref?.();
+}
 
 function parseDesktopFile(path: string, content: string): DesktopEntry | null {
   // Only the [Desktop Entry] group matters; actions/other groups are ignored.
@@ -161,106 +210,47 @@ async function getCatalog(): Promise<AppCatalog> {
   return catalog;
 }
 
-async function fileToDataUri(path: string): Promise<string | null> {
-  try {
-    const file = Bun.file(path);
-    if (!(await file.exists())) return null;
-    if (file.size > MAX_ICON_BYTES || file.size === 0) return null;
-    const mime = path.endsWith('.svg') ? 'image/svg+xml' : 'image/png';
-    if (path.endsWith('.xpm')) return null;
-    const buf = Buffer.from(await file.arrayBuffer());
-    return `data:${mime};base64,${buf.toString('base64')}`;
-  } catch {
-    return null;
-  }
-}
-
-function iconPathRank(path: string): number {
-  if (path.includes('64x64')) return 0;
-  if (path.includes('48x48')) return 1;
-  if (path.includes('96x96')) return 2;
-  if (path.includes('128x128')) return 3;
-  if (path.endsWith('.svg')) return 4;
-  return 5;
-}
-
-/** Resolve a freedesktop icon name (or absolute path) to a data: URI. Cached. */
-async function resolveIcon(iconName: string | undefined): Promise<string | undefined> {
-  if (!iconName) return undefined;
-  const cached = iconCache.get(iconName);
-  if (cached !== undefined) return cached ?? undefined;
-
-  let uri: string | null = null;
-  if (iconName.startsWith('/')) {
-    uri = await fileToDataUri(iconName);
-  } else {
-    const iconRoots = [
-      '/usr/share/icons',
-      '/var/lib/flatpak/exports/share/icons',
-      join(homedir(), '.local/share/flatpak/exports/share/icons'),
-      join(homedir(), '.local/share/icons'),
-    ];
-    const candidates: string[] = [];
-    for (const root of iconRoots) {
-      for (const size of ICON_SIZES) {
-        for (const ext of ['png', 'svg']) {
-          candidates.push(`${root}/hicolor/${size}/apps/${iconName}.${ext}`);
-        }
-      }
-    }
-    for (const ext of ['png', 'svg']) {
-      candidates.push(`/usr/share/pixmaps/${iconName}.${ext}`);
-    }
-    for (const c of candidates) {
-      uri = await fileToDataUri(c);
-      if (uri) break;
-    }
-    if (!uri) {
-      // Last resort: one find(1) sweep across icon themes (cached, so it runs once
-      // per unique icon name per server lifetime).
-      const found = run([
-        'find', ...iconRoots.filter((r) => existsSync(r)),
-        '-name', `${iconName}.png`, '-o', '-name', `${iconName}.svg`,
-      ])
-        .split('\n')
-        .filter(Boolean)
-        // Prefer mid-size rasters (crisp at launcher size, small on the wire).
-        .sort((a, b) => Number(iconPathRank(a)) - Number(iconPathRank(b)));
-      for (const f of found) {
-        uri = await fileToDataUri(f);
-        if (uri) break;
-      }
-    }
-  }
-  iconCache.set(iconName, uri);
-  return uri ?? undefined;
-}
-
 export async function listApps(): Promise<AppInfo[]> {
   const catalog = await getCatalog();
   const visible = catalog.apps.filter((a) => !a.noDisplay && a.exec);
-  const out: AppInfo[] = [];
-  for (const app of visible) {
-    out.push({
-      appId: app.appId,
-      name: app.name,
-      icon: await resolveIcon(app.iconName),
-      wmClass: app.wmClass ?? app.appId,
-    });
-  }
-  // Built-in virtual-session profiles (e.g. the mobile browser) appear as
-  // first-class launcher apps alongside the .desktop catalog.
-  for (const p of listProfiles()) {
-    if (out.some((a) => a.appId === p.appId)) continue;
-    out.push({
+  const profiles = listProfiles();
+
+  // Resolve icons concurrently across all desktop entries and virtual profiles
+  const appPromises = visible.map(async (app) => ({
+    appId: app.appId,
+    name: app.name,
+    icon: await resolveAppIcon(app.iconName, app.appId, app.wmClass, app.exec),
+    wmClass: app.wmClass ?? app.appId,
+  }));
+
+  const profilePromises = profiles
+    .filter((p) => !visible.some((a) => a.appId === p.appId))
+    .map(async (p) => ({
       appId: p.appId,
       name: p.name,
-      icon: await resolveIcon(p.iconName),
+      icon: await resolveAppIcon(p.iconName, p.appId),
       wmClass: p.appId,
-    });
-  }
+    }));
+
+  const [apps, profs] = await Promise.all([
+    Promise.all(appPromises),
+    Promise.all(profilePromises),
+  ]);
+
+  const out = [...apps, ...profs];
   out.sort((a, b) => a.name.localeCompare(b.name));
   return out;
+}
+
+/** Explicitly invalidate catalog & icon cache and broadcast updated app list. */
+export async function refreshApps(): Promise<AppInfo[]> {
+  catalogCache = null;
+  invalidateIconCache();
+  const apps = await listApps();
+  if (appsBroadcast) {
+    appsBroadcast({ type: 'apps-update', apps });
+  }
+  return apps;
 }
 
 /** Catalog lookup for the virtual-session launcher (app-sessions.ts). */
@@ -273,8 +263,12 @@ export async function getDesktopEntry(
 }
 
 /** Icon resolution for callers outside this module. */
-export async function resolveIconPublic(iconName: string | undefined): Promise<string | undefined> {
-  return resolveIcon(iconName);
+export async function resolveIconPublic(
+  iconName: string | undefined,
+  appId?: string,
+  wmClass?: string,
+): Promise<string | undefined> {
+  return resolveAppIcon(iconName, appId, wmClass);
 }
 
 export async function launchApp(appId: string): Promise<{ ok: boolean; wmClass?: string }> {
@@ -376,7 +370,9 @@ export async function listWindows(): Promise<WindowInfo[]> {
       title: title ?? '',
       wmClass: wmClass!,
       desktop,
-      icon: entry ? await resolveIcon(entry.iconName) : undefined,
+      icon: entry
+        ? await resolveAppIcon(entry.iconName, entry.appId, wmClass)
+        : await resolveAppIcon(undefined, undefined, wmClass),
       appId: entry?.appId,
     });
   }

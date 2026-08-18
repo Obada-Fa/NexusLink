@@ -28,6 +28,7 @@ export type RpcMethod =
   | 'window.release'
   | 'window.activate'
   | 'apps.list'
+  | 'apps.refresh'
   | 'apps.launch'
   | 'appSession.create'
   | 'appSession.list'
@@ -129,6 +130,8 @@ export type Params<M extends RpcMethod> =
     : M extends 'window.activate'
     ? { windowId: string }
     : M extends 'apps.list'
+    ? {}
+    : M extends 'apps.refresh'
     ? {}
     : M extends 'apps.launch'
     ? { appId: string }
@@ -257,6 +260,8 @@ export type Result<M extends RpcMethod> =
     : M extends 'window.activate'
     ? { ok: boolean }
     : M extends 'apps.list'
+    ? AppInfo[]
+    : M extends 'apps.refresh'
     ? AppInfo[]
     : M extends 'apps.launch'
     ? { ok: boolean; wmClass?: string }
@@ -518,3 +523,4 @@ export type WsMessage =
   | { type: 'webrtc-signal'; webrtcId: string; data: WebRtcSignal }
   | { type: 'app-session-update'; session: AppSessionInfo }
   | { type: 'agent-event'; agentSessionId: string; event: AgentEvent }
+  | { type: 'apps-update'; apps: AppInfo[] }
