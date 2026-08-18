@@ -33,6 +33,7 @@ export class RpcClient {
   private maxReconnectDelay = 30000;
   private baseDelay = 1000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private wsUrl: string;
   private idCounter = 0;
   private closed = false;
@@ -60,6 +61,7 @@ export class RpcClient {
       this.ws.onopen = () => {
         clearTimeout(timer);
         this.reconnectAttempts = 0;
+        this.startHeartbeat();
         resolve();
       };
 
@@ -69,6 +71,7 @@ export class RpcClient {
 
       this.ws.onclose = () => {
         clearTimeout(timer);
+        this.stopHeartbeat();
         this.ws = null;
         this.failPending('Connection closed');
         if (!this.closed) {
@@ -87,6 +90,7 @@ export class RpcClient {
 
   disconnect(): void {
     this.closed = true;
+    this.stopHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -229,5 +233,22 @@ export class RpcClient {
         /* reconnect loop continues via onclose */
       });
     }, delay);
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      this.request('session.heartbeat', {}).catch(() => {
+        /* drop is handled by onclose */
+      });
+    }, 20000);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
   }
 }
