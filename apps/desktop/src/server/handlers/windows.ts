@@ -74,11 +74,37 @@ export function normClass(s: string): string {
 let catalogCache: { at: number; catalog: AppCatalog } | null = null;
 type BroadcastFn = (msg: WsMessage) => void;
 let appsBroadcast: BroadcastFn | null = null;
+let windowsBroadcast: BroadcastFn | null = null;
 let appWatchers: FSWatcher[] = [];
 let appDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+let windowWatcherTimer: ReturnType<typeof setInterval> | null = null;
+let lastRawWindows = '';
 
 export function setAppsBroadcast(fn: BroadcastFn): void {
   appsBroadcast = fn;
+}
+
+export function setWindowsBroadcast(fn: BroadcastFn): void {
+  windowsBroadcast = fn;
+}
+
+/** Initialize background watcher to broadcast window changes to connected phones. */
+export function initWindowWatcher(): void {
+  if (windowWatcherTimer) clearInterval(windowWatcherTimer);
+  windowWatcherTimer = setInterval(async () => {
+    if (!windowsBroadcast) return;
+    try {
+      const raw = run(['wmctrl', '-lx']);
+      if (raw !== lastRawWindows) {
+        lastRawWindows = raw;
+        const windows = await listWindows();
+        if (windowsBroadcast) {
+          windowsBroadcast({ type: 'windows-update', windows });
+        }
+      }
+    } catch {}
+  }, 2500);
+  windowWatcherTimer.unref?.();
 }
 
 /** Initialize file system watchers on application directories to detect new/modified apps. */
@@ -450,10 +476,10 @@ export async function adoptWindow(
   run(['wmctrl', '-i', '-a', windowId]);
 
   // Re-clamp loop: Chromium restore-bounds often undoes the first resize.
-  const attempts = 5;
+  const attempts = 3;
   let actual: CaptureRegion | null = null;
   for (let i = 0; i < attempts; i++) {
-    await Bun.sleep(i === 0 ? 300 : 250);
+    await Bun.sleep(i === 0 ? 200 : 150);
     actual = getWindowGeometry(windowId);
     if (actual && geometryClose(actual, target)) break;
     if (i < attempts - 1) {
@@ -472,7 +498,7 @@ export async function adoptWindow(
       stripChrome();
       place(target);
       run(['wmctrl', '-i', '-a', windowId]);
-      await Bun.sleep(280);
+      await Bun.sleep(200);
       actual = getWindowGeometry(windowId) ?? actual;
     }
   }

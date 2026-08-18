@@ -11,6 +11,7 @@ import {
   mkdirSync,
   readdirSync,
   statSync,
+  type Dirent,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -302,7 +303,7 @@ function copyProfileTree(
   acc: { copied: number; skipped: number },
 ): void {
   mkdirSync(dest, { recursive: true });
-  let entries: ReturnType<typeof readdirSync>;
+  let entries: Dirent[];
   try {
     entries = readdirSync(src, { withFileTypes: true });
   } catch {
@@ -491,7 +492,7 @@ export function buildChromiumArgv(bin: string, ctx: LaunchContext): string[] {
     '--hide-crash-restore-bubble',
     '--disable-dev-shm-usage',
     '--ozone-platform=x11',
-    '--disable-gpu',
+    '--disable-gpu-sandbox',
     'https://www.google.com',
   ];
 }

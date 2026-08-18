@@ -64,11 +64,46 @@ function MirrorView() {
   const sessionIdRef = useRef<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const unsubRef = useRef<(() => void) | null>(null);
   const frameCountRef = useRef(0);
   const startedRef = useRef(false);
   const kbRef = useRef<HTMLInputElement | null>(null);
+  const lastUrlRef = useRef<string | null>(null);
+
+  const renderFrameBuffer = useCallback((buf: ArrayBuffer) => {
+    frameCountRef.current++;
+    const slice = new Uint8Array(buf, FRAME_HEADER_BYTES);
+    const blob = new Blob([slice], { type: 'image/jpeg' });
+
+    if (typeof createImageBitmap !== 'undefined' && canvasRef.current) {
+      createImageBitmap(blob).then((bmp) => {
+        const canvas = canvasRef.current;
+        if (!canvas) {
+          bmp.close();
+          return;
+        }
+        if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+          canvas.width = bmp.width;
+          canvas.height = bmp.height;
+        }
+        const ctx = canvas.getContext('2d', { alpha: false });
+        if (ctx) {
+          ctx.drawImage(bmp, 0, 0);
+        }
+        bmp.close();
+      }).catch(() => {});
+      return;
+    }
+
+    if (imgRef.current) {
+      const url = URL.createObjectURL(blob);
+      imgRef.current.src = url;
+      if (lastUrlRef.current) URL.revokeObjectURL(lastUrlRef.current);
+      lastUrlRef.current = url;
+    }
+  }, []);
 
   useEffect(() => {
     setTarget(parseTarget());
@@ -148,21 +183,12 @@ function MirrorView() {
           streamIdRef.current = cap.streamId;
           setRegion(cap.region ?? { x: 0, y: 0, width: session.width, height: session.height });
 
-          let lastUrl: string | null = null;
           const unsubFrames = client.subscribeBinary((buf: ArrayBuffer) => {
             if (buf.byteLength <= FRAME_HEADER_BYTES) return;
             const view = new DataView(buf);
             if (view.getUint32(0, true) !== FRAME_MAGIC) return;
             if (view.getUint32(4, true) !== cap.streamKey) return;
-            frameCountRef.current++;
-            if (imgRef.current) {
-              const url = URL.createObjectURL(
-                new Blob([new Uint8Array(buf, FRAME_HEADER_BYTES)], { type: 'image/jpeg' }),
-              );
-              imgRef.current.src = url;
-              if (lastUrl) URL.revokeObjectURL(lastUrl);
-              lastUrl = url;
-            }
+            renderFrameBuffer(buf);
           });
           // If the app inside the session exits, bounce back to the launcher.
           const unsubSession = client.subscribe('app-session-update', (msg: unknown) => {
@@ -240,21 +266,12 @@ function MirrorView() {
         streamIdRef.current = cap.streamId;
         setRegion(cap.region ?? null);
 
-        let lastUrl: string | null = null;
         const unsubFrames = client.subscribeBinary((buf: ArrayBuffer) => {
           if (buf.byteLength <= FRAME_HEADER_BYTES) return;
           const view = new DataView(buf);
           if (view.getUint32(0, true) !== FRAME_MAGIC) return;
           if (view.getUint32(4, true) !== cap.streamKey) return;
-          frameCountRef.current++;
-          if (imgRef.current) {
-            const url = URL.createObjectURL(
-              new Blob([new Uint8Array(buf, FRAME_HEADER_BYTES)], { type: 'image/jpeg' }),
-            );
-            imgRef.current.src = url;
-            if (lastUrl) URL.revokeObjectURL(lastUrl);
-            lastUrl = url;
-          }
+          renderFrameBuffer(buf);
         });
         // The host re-grabs if the window moves/resizes; keep touch mapping aligned.
         const unsubRegion = client.subscribe('stream-region', (msg: unknown) => {
@@ -401,13 +418,21 @@ function MirrorView() {
       <div style={styles.stage}>
         {phase === 'streaming' ? (
           <div ref={viewportRef} style={styles.viewport}>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              ref={imgRef}
-              alt="host screen"
+            <canvas
+              ref={canvasRef}
               style={{
                 ...styles.frame,
                 objectFit: sessionId ? 'fill' : 'contain',
+              }}
+            />
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              ref={imgRef}
+              alt=""
+              style={{
+                ...styles.frame,
+                objectFit: sessionId ? 'fill' : 'contain',
+                display: 'none',
               }}
               draggable={false}
             />

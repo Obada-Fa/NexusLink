@@ -147,7 +147,7 @@ export async function gitWorkingTree(cwd: string): Promise<GitWorkingTree | null
       timeout: 4000,
     });
     if (proc.exitCode !== 0) return null;
-    const text = new TextDecoder().decode(proc.stdout ?? new Uint8Array());
+    const text = proc.stdout?.toString() ?? '';
     const parsed = parseGitStatusPorcelain(text);
     if (!parsed) return null;
     return { cwd: dir, ...parsed };

@@ -10,6 +10,7 @@ import { setSend as setCaptureSend, startCapture, stopCapture, stopCapturesForSo
 import {
   listWindows, listApps, refreshApps, launchApp, adoptWindow, releaseWindow, activateWindow,
   getWindowGeometry, getAdoptedCaptureRegion, setAppsBroadcast, initAppWatcher,
+  setWindowsBroadcast, initWindowWatcher,
 } from './handlers/windows';
 import {
   createAppSession, listAppSessions, resizeAppSession, closeAppSession,
@@ -20,7 +21,7 @@ import { getClipboard, setClipboard } from './handlers/clipboard';
 import {
   listAgents, createAgentSession, renameAgentSession, setAgentSessionCwd, listAgentSessions, listHostChats, openHostChat, promptAgent,
   cancelAgent, closeAgentSession, agentHistory, resolveAgentPermission, setAgentBroadcast,
-  listAgentModels,
+  listAgentModels, AGENT_ICON_NAMES, resolveAgentIcon,
 } from './handlers/agents';
 import { startIde, stopIde, ideStatus } from './handlers/ide';
 import type { WebRtcSignal, AgentImageAttachment } from '@nexuslink/rpc-types';
@@ -100,7 +101,12 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   setSessionBroadcast(broadcastAll);
   setAgentBroadcast(broadcastAll);
   setAppsBroadcast(broadcastAll);
+  setWindowsBroadcast(broadcastAll);
   initAppWatcher();
+  initWindowWatcher();
+
+  // Pre-warm agent icons in the background so RPC calls respond instantly
+  void Promise.all(Object.keys(AGENT_ICON_NAMES).map((id) => resolveAgentIcon(id))).catch(() => {});
 
   async function dispatch(method: RpcMethod, params: Params, req: RpcRequest<RpcMethod>, ws: WebSocket) {
     const sessionId = findSession(ws);
@@ -354,7 +360,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
           const session = getAppSession(sessionId);
           if (!session) throw new Error('unknown app session');
           result = startCapture(
-            (params.quality as 'low' | 'medium' | 'high') ?? 'medium',
+            (params.quality as 'low' | 'medium' | 'high' | 'full') ?? 'medium',
             (params.fps as number) ?? 24,
             ws,
             { x: 0, y: 0, width: session.width, height: session.height },
@@ -370,8 +376,8 @@ export async function startRpcServer(port = 45678, hostname?: string) {
           ? (getAdoptedCaptureRegion(windowId) ?? getWindowGeometry(windowId) ?? undefined)
           : undefined;
         result = startCapture(
-          (params.quality as 'low' | 'medium' | 'high') ?? 'medium',
-          (params.fps as number) ?? 12,
+          (params.quality as 'low' | 'medium' | 'high' | 'full') ?? 'medium',
+          (params.fps as number) ?? 24,
           ws,
           region,
           windowId ? () => getAdoptedCaptureRegion(windowId) ?? getWindowGeometry(windowId) : undefined,

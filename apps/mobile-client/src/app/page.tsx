@@ -194,9 +194,23 @@ function HomeScreen() {
       }
     });
 
-    pollRef.current = setInterval(() => void refreshWindows(), 5000);
+    const unsubWindows = client.subscribe('windows-update', (msg: unknown) => {
+      const data = msg as { windows?: WindowInfo[] };
+      if (Array.isArray(data?.windows)) {
+        setWindows(data.windows);
+      }
+    });
+
+    const unsubSessions = client.subscribe('app-session-update', () => {
+      void refreshWindows();
+    });
+
+    // Fallback slow poll (15s) in case of missed push
+    pollRef.current = setInterval(() => void refreshWindows(), 15000);
     return () => {
       unsubApps();
+      unsubWindows();
+      unsubSessions();
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [status, client, refreshWindows]);

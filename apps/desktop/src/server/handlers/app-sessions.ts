@@ -379,10 +379,10 @@ export async function createAppSession(
     } as unknown as SpawnOpts);
 
     session.app.exited.then(async () => {
-      if (!sessions.has(sessionId) || info.status === 'exited') return;
+      if (!sessions.has(sessionId) || (session.info.status as string) === 'exited') return;
       // Some .desktop Exec lines fork and exit; only tear down if nothing mapped.
       await Bun.sleep(2500);
-      if (!sessions.has(sessionId) || info.status === 'exited') return;
+      if (!sessions.has(sessionId) || (session.info.status as string) === 'exited') return;
       if (listSessionWindowIds(session.info.display).length > 0) return;
       markExited(sessionId);
     }).catch(() => {});

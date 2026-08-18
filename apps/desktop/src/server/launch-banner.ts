@@ -111,7 +111,7 @@ export function collectHostUrls(
 
   for (const [iface, addrs] of Object.entries(nets)) {
     for (const ni of addrs ?? []) {
-      const family = ni.family === 'IPv4' || ni.family === 4;
+      const family = String(ni.family) === 'IPv4' || String(ni.family) === '4';
       if (!family || ni.internal || !isIpv4(ni.address)) continue;
       const kind: HostUrlKind = isTailscaleIpv4(ni.address, iface) ? 'tailscale' : 'lan';
       byAddr.set(ni.address, {

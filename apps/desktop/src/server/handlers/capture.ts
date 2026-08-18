@@ -139,12 +139,14 @@ export function getPrimaryMonitor(): { x: number; y: number; width: number; heig
   return cachedPrimary;
 }
 
-function qualitySettings(quality: 'low' | 'medium' | 'high'): { scaleW: number; q: number } {
+function qualitySettings(quality: 'low' | 'medium' | 'high' | 'full'): { scaleW: number; q: number } {
   switch (quality) {
     case 'low':
       return { scaleW: 640, q: 8 };
     case 'high':
       return { scaleW: 1280, q: 3 };
+    case 'full':
+      return { scaleW: 0, q: 2 };
     default:
       return { scaleW: 960, q: 5 };
   }
@@ -172,8 +174,8 @@ function spawnGrabber(
   ffArgs: { fps: number; scaleW: number; q: number },
   display: string = DISPLAY,
 ) {
-  // Portrait regions are narrow — don't upscale past the source width.
-  const outW = Math.min(ffArgs.scaleW, grab.width) & ~1;
+  // Portrait regions are narrow — don't upscale past the source width. scaleW: 0 means native resolution.
+  const outW = ffArgs.scaleW > 0 ? (Math.min(ffArgs.scaleW, grab.width) & ~1) : (grab.width & ~1);
   return Bun.spawn(
     [
       'ffmpeg',
@@ -206,7 +208,7 @@ function regionsDiffer(a: Region, b: Region): boolean {
 }
 
 export function startCapture(
-  quality: 'low' | 'medium' | 'high',
+  quality: 'low' | 'medium' | 'high' | 'full',
   fps: number,
   ws: WebSocket,
   region?: Region,

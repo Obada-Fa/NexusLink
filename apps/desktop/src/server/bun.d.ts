@@ -8,6 +8,7 @@ declare var Bun: {
     readonly type: string;
   };
   write(path: string, data: string | ArrayBuffer | Uint8Array): Promise<number>;
+  sleep(ms: number): Promise<void>;
   env: Record<string, string>;
   serve(opts: {
     hostname?: string;
@@ -30,6 +31,9 @@ declare var Bun: {
     stderr: AsyncIterable<Uint8Array>;
     kill(signal?: string): void;
     exited: Promise<number>;
+    exitCode?: number | null;
+    killed?: boolean;
+    pid?: number;
   };
   spawnSync(cmd: string[], opts?: Record<string, unknown>): {
     stdout: { toString(enc?: string): string };

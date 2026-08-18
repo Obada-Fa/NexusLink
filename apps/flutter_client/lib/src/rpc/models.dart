@@ -253,12 +253,14 @@ class AgentInfo {
   final String id;
   final String name;
   final bool available;
+  final String? icon; // data: URI
   final AgentCapabilities capabilities;
 
   AgentInfo({
     required this.id,
     required this.name,
     required this.available,
+    this.icon,
     this.capabilities = AgentCapabilities.empty,
   });
 
@@ -266,6 +268,7 @@ class AgentInfo {
         id: j['id'] as String,
         name: (j['name'] as String?) ?? j['id'] as String,
         available: j['available'] as bool? ?? false,
+        icon: j['icon'] as String?,
         capabilities: AgentCapabilities.fromJson(j['capabilities']),
       );
 }
@@ -278,6 +281,7 @@ class AgentSessionInfo {
   final bool busy;
   final String status;
   final String? hostChatId;
+  final String? icon;
 
   AgentSessionInfo({
     required this.agentSessionId,
@@ -287,6 +291,7 @@ class AgentSessionInfo {
     required this.busy,
     required this.status,
     this.hostChatId,
+    this.icon,
   });
 
   factory AgentSessionInfo.fromJson(Map<String, dynamic> j) => AgentSessionInfo(
@@ -297,6 +302,7 @@ class AgentSessionInfo {
         busy: j['busy'] as bool? ?? false,
         status: (j['status'] as String?) ?? 'running',
         hostChatId: j['hostChatId'] as String?,
+        icon: j['icon'] as String?,
       );
 
   AgentSessionInfo copyWith({
@@ -307,6 +313,7 @@ class AgentSessionInfo {
     bool? busy,
     String? status,
     String? hostChatId,
+    String? icon,
   }) =>
       AgentSessionInfo(
         agentSessionId: agentSessionId ?? this.agentSessionId,
@@ -316,6 +323,7 @@ class AgentSessionInfo {
         busy: busy ?? this.busy,
         status: status ?? this.status,
         hostChatId: hostChatId ?? this.hostChatId,
+        icon: icon ?? this.icon,
       );
 }
 
@@ -327,6 +335,7 @@ class AgentHostChat {
   final int updatedAt;
   final bool resumable;
   final String source;
+  final String? icon;
 
   AgentHostChat({
     required this.agent,
@@ -336,6 +345,7 @@ class AgentHostChat {
     required this.updatedAt,
     required this.resumable,
     required this.source,
+    this.icon,
   });
 
   factory AgentHostChat.fromJson(Map<String, dynamic> j) => AgentHostChat(
@@ -346,6 +356,7 @@ class AgentHostChat {
         updatedAt: (j['updatedAt'] as num?)?.toInt() ?? 0,
         resumable: j['resumable'] as bool? ?? true,
         source: (j['source'] as String?) ?? '',
+        icon: j['icon'] as String?,
       );
 }
 
@@ -524,6 +535,40 @@ List<AgentDisplayItem> groupAgentDisplay(List<AgentEvent> events) {
 
 bool toolGroupRunning(List<AgentEvent> tools) =>
     tools.any((e) => e.kind == 'tool-start');
+
+/// True when a tool-start never got a matching tool-end (host died, cancel
+/// never arrived, etc.).
+bool transcriptHasOpenTools(List<AgentEvent> events) =>
+    mergeToolEvents(events).any((e) => e.kind == 'tool-start');
+
+/// Pair leftover tool-starts with tool-end so the chat can leave "Working".
+List<AgentEvent> closeOpenTools(
+  List<AgentEvent> events, {
+  String output = 'Interrupted.',
+}) {
+  final open = mergeToolEvents(events)
+      .where((e) => e.kind == 'tool-start')
+      .toList();
+  if (open.isEmpty) return events;
+  var seq = 0;
+  for (final e in events) {
+    if (e.seq > seq) seq = e.seq;
+  }
+  final ts = DateTime.now().millisecondsSinceEpoch;
+  return [
+    ...events,
+    for (final e in open)
+      AgentEvent(
+        seq: ++seq,
+        ts: ts,
+        kind: 'tool-end',
+        toolName: e.toolName,
+        toolInput: e.toolInput,
+        toolOutput: output,
+        refId: (e.refId ?? '').isNotEmpty ? e.refId : 'orphan-$seq',
+      ),
+  ];
+}
 
 String toolGroupTitle(List<AgentEvent> tools) {
   final n = tools.length;
