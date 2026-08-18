@@ -295,6 +295,46 @@ class AgentHostChat {
       );
 }
 
+/// `git status` snapshot for the agent's current folder.
+class GitWorkingTree {
+  final String cwd;
+  final String branch;
+  final int ahead;
+  final int behind;
+  final int changed;
+  final List<String> files;
+
+  GitWorkingTree({
+    required this.cwd,
+    required this.branch,
+    required this.ahead,
+    required this.behind,
+    required this.changed,
+    required this.files,
+  });
+
+  factory GitWorkingTree.fromJson(Map<String, dynamic> j) => GitWorkingTree(
+        cwd: (j['cwd'] as String?) ?? '',
+        branch: (j['branch'] as String?) ?? '',
+        ahead: (j['ahead'] as num?)?.toInt() ?? 0,
+        behind: (j['behind'] as num?)?.toInt() ?? 0,
+        changed: (j['changed'] as num?)?.toInt() ?? 0,
+        files: (j['files'] as List?)?.map((e) => '$e').toList() ?? const [],
+      );
+}
+
+String workingTreeSubtitle(GitWorkingTree git) {
+  final bits = <String>[git.branch];
+  if (git.ahead > 0) bits.add('ahead ${git.ahead}');
+  if (git.behind > 0) bits.add('behind ${git.behind}');
+  if (git.changed > 0) {
+    bits.add('${git.changed} changed');
+  } else {
+    bits.add('clean');
+  }
+  return bits.join(' · ');
+}
+
 /// Normalized event from the host agent gateway.
 class AgentEvent {
   final int seq;

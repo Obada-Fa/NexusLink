@@ -39,6 +39,7 @@ class ConnectionState {
 class ConnectionNotifier extends Notifier<ConnectionState> {
   VoidCallback? _statusSub;
   bool _disposed = false;
+  Future<void>? _inFlightConnect;
 
   @override
   ConnectionState build() {
@@ -53,6 +54,16 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
   /// Connect to a host ws URL. Derives the matching http base for file transfer.
   Future<void> connect(String wsUrl) async {
     wsUrl = normalizeHostWsUrl(wsUrl);
+    final run = _connect(wsUrl);
+    _inFlightConnect = run;
+    try {
+      await run;
+    } finally {
+      if (identical(_inFlightConnect, run)) _inFlightConnect = null;
+    }
+  }
+
+  Future<void> _connect(String wsUrl) async {
     _teardown();
     final client = RpcClient(wsUrl);
     final sub = client.statusStream.listen((s) {
@@ -105,14 +116,32 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
   /// if this session already had a host (explicit disconnect clears it).
   Future<void> ensureConnected() async {
     if (_disposed) return;
-    if (state.status == RpcStatus.connected ||
-        state.status == RpcStatus.connecting) {
+    if (state.status == RpcStatus.connected) return;
+    final inflight = _inFlightConnect;
+    if (inflight != null) {
+      try {
+        await inflight;
+      } catch (_) {}
+      return;
+    }
+    if (state.status == RpcStatus.connecting) {
+      await _waitWhileConnecting();
       return;
     }
     final url = state.hostUrl?.trim();
     if (url == null || url.isEmpty) return;
     try {
       await connect(url);
+    } catch (_) {}
+  }
+
+  Future<void> _waitWhileConnecting() async {
+    final client = state.client;
+    if (client == null || client.status != RpcStatus.connecting) return;
+    try {
+      await client.statusStream
+          .firstWhere((s) => s != RpcStatus.connecting)
+          .timeout(const Duration(seconds: 15));
     } catch (_) {}
   }
 

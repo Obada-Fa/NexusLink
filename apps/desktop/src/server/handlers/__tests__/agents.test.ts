@@ -2,6 +2,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { homedir } from 'node:os';
+import { realpathSync } from 'node:fs';
 import type { AgentEvent, WsMessage } from '@nexuslink/rpc-types';
 import {
   listAgents,
@@ -44,6 +45,7 @@ import {
   modelFamilyId,
   collapseModelFamilies,
   pickModelVariant,
+  agyEffortFlag,
 } from '../agents';
 
 describe('agent gateway', () => {
@@ -132,16 +134,19 @@ describe('agent gateway', () => {
       cwd: '/tmp',
       title: 'Project chat',
     });
-    expect(info.cwd).toBe('/tmp');
+    expect(info.cwd).toBe(resolveAgentCwd('/tmp'));
     const moved = openHostChat({
       agent: 'mock',
       hostChatId: 'host-cwd',
       cwd: homedir(),
     });
     expect(moved.agentSessionId).toBe(info.agentSessionId);
-    expect(moved.cwd).toBe(homedir());
+    expect(moved.cwd).toBe(resolveAgentCwd(homedir()));
     const again = setAgentSessionCwd(info.agentSessionId, '/tmp');
-    expect(again.cwd).toBe('/tmp');
+    expect(again.cwd).toBe(resolveAgentCwd('/tmp'));
+    const kept = openHostChat({ agent: 'mock', hostChatId: 'host-cwd' });
+    expect(kept.agentSessionId).toBe(info.agentSessionId);
+    expect(kept.cwd).toBe(resolveAgentCwd('/tmp'));
     closeAgentSession(info.agentSessionId);
   });
 
@@ -156,9 +161,9 @@ describe('agent gateway', () => {
   test('resolves ~ and rejects missing working directories', () => {
     expect(resolveAgentCwd('~')).toBe(homedir());
     expect(resolveAgentCwd()).toBe(homedir());
-    expect(resolveAgentCwd('/tmp')).toBe('/tmp');
-    expect(() => resolveAgentCwd('/this/path/does-not-exist-nexuslink')).toThrow(/directory not found/);
-    expect(resolveAgentCwd('/this/path/does-not-exist-nexuslink', { fallbackHome: true })).toBe(homedir());
+    expect(resolveAgentCwd('/tmp')).toBe(realpathSync('/tmp'));
+    expect(() => resolveAgentCwd('/this/path-does-not-exist-nexuslink')).toThrow(/directory not found/);
+    expect(resolveAgentCwd('/this-path-does-not-exist-nexuslink', { fallbackHome: true })).toBe(homedir());
   });
 });
 
@@ -269,12 +274,41 @@ describe('composer flags and attachments', () => {
       text: 'plan this',
       mode: 'plan',
       thinking: 'low',
+      newProject: true,
     });
     expect(agy).toContain('--mode');
     expect(agy).toContain('--effort');
     expect(agy).toContain('low');
     expect(agy).toContain('--add-dir');
     expect(agy).toContain('/tmp/proj');
+    expect(agy).toContain('--new-project');
+    expect(agy).not.toContain('--conversation');
+
+    const agyResume = buildAgyArgv({
+      bin: 'agy',
+      cwd: '/tmp/proj',
+      conversationId: 'conv-1',
+      projectId: 'proj-9',
+      newProject: true,
+      text: 'continue',
+    });
+    expect(agyResume).toContain('--conversation');
+    expect(agyResume).toContain('conv-1');
+    expect(agyResume).toContain('--project');
+    expect(agyResume).toContain('proj-9');
+    expect(agyResume).not.toContain('--new-project');
+
+    const agyClaude = buildAgyArgv({
+      bin: 'agy',
+      cwd: '/tmp/proj',
+      text: 'hi',
+      model: 'claude-sonnet-4-6',
+      thinking: 'high',
+    });
+    expect(agyClaude).toContain('--model');
+    expect(agyClaude).not.toContain('--effort');
+    expect(agyEffortFlag('claude-sonnet-4-6', 'high')).toBeUndefined();
+    expect(agyEffortFlag('gemini-3.7-flash', 'high')).toBe('high');
 
     const cursorResolved = buildCursorArgv({
       bin: 'cursor-agent',
@@ -435,6 +469,21 @@ describe('CLI stream parsers', () => {
       }),
     ).toEqual([{ kind: 'error', text: 'rate limited' }]);
 
+    expect(
+      parseCursorStreamEvent({
+        type: 'tool_call',
+        subtype: 'started',
+        call_id: 'call-1\nfc_abc',
+        tool_call: { readToolCall: { args: { path: 'a.ts' } } },
+      })[0],
+    ).toMatchObject({ kind: 'tool-start', refId: 'call-1fc_abc' });
+    expect(
+      parseCursorStreamEvent({
+        type: 'system',
+        subtype: 'turn_complete',
+      }),
+    ).toEqual([{ kind: 'result', text: '' }]);
+
     expect(describeCursorToolCall({ writeToolCall: { args: { path: 'a.txt' } } }).name).toBe(
       'write',
     );
@@ -591,11 +640,16 @@ describe('CLI login helpers', () => {
     expect(isCliAuthError(
       "Error: Authentication required. Please run 'agent login' first, or set CURSOR_API_KEY environment variable.",
     )).toBe(true);
+    expect(isCliAuthError('authentication failed or timed out')).toBe(true);
+    expect(isCliAuthError('You are not logged into Antigravity.')).toBe(true);
+    expect(isCliAuthError('Print mode: auth timed out')).toBe(true);
     const rewritten = rewriteCliAuthError(
       "Error: Authentication required. Please run 'agent login' first.",
       'Cursor CLI',
     );
     expect(rewritten).toContain("isn't signed in");
     expect(rewritten).toContain('CURSOR_API_KEY');
+    expect(rewriteCliAuthError('authentication failed or timed out', 'Antigravity'))
+      .toContain("isn't signed in");
   });
 });

@@ -168,4 +168,31 @@ void main() {
       expect(collapsed.first.name, 'Gemini 3.7 Flash');
     });
   });
+
+  group('workingTreeSubtitle', () {
+    test('summarizes branch and dirty files', () {
+      expect(
+        workingTreeSubtitle(GitWorkingTree(
+          cwd: '/tmp/p',
+          branch: 'main',
+          ahead: 40,
+          behind: 0,
+          changed: 3,
+          files: const ['a', 'b', 'c'],
+        )),
+        'main · ahead 40 · 3 changed',
+      );
+      expect(
+        workingTreeSubtitle(GitWorkingTree(
+          cwd: '/tmp/p',
+          branch: 'feat',
+          ahead: 0,
+          behind: 0,
+          changed: 0,
+          files: const [],
+        )),
+        'feat · clean',
+      );
+    });
+  });
 }

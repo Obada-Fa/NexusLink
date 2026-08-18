@@ -7,14 +7,30 @@ import type { RpcClient } from '@/lib/rpc-client';
 import {
   comparePathNames,
   folderDisplayName,
-  loadLastAgentCwd,
+  loadRecentAgentCwds,
   saveLastAgentCwd,
 } from '@/lib/last-cwd';
+import { chatListSubtitle } from '@/lib/agent-labels';
+import { mergeAgentHistory } from '@/lib/agent-history';
+import {
+  applyComposerPrefs,
+  loadComposerPrefs,
+  modeLabel,
+  modelLabel,
+  resolveAgentCaps,
+  saveComposerPrefs,
+  thinkingLabel,
+  workingTreeSubtitle,
+  type AgentCapabilities,
+  type AgentModelOption,
+  type GitWorkingTree,
+} from '@/lib/agent-composer';
 
 interface AgentInfo {
   id: string;
   name: string;
   available: boolean;
+  capabilities?: AgentCapabilities;
 }
 
 interface AgentSessionInfo {
@@ -140,9 +156,19 @@ export default function AgentsPage() {
   const [picking, setPicking] = useState<Picking | null>(null);
   const [menuTab, setMenuTab] = useState<'recent' | 'pc'>('recent');
   const [reconnecting, setReconnecting] = useState(false);
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [composerView, setComposerView] = useState<'root' | 'model' | 'thinking' | 'mode' | 'agent'>('root');
+  const [mode, setMode] = useState('agent');
+  const [thinking, setThinking] = useState('medium');
+  const [model, setModel] = useState<string | null>(null);
+  const [liveModels, setLiveModels] = useState<AgentModelOption[]>([]);
+  const [photos, setPhotos] = useState<{ name: string; mime: string; data: string }[]>([]);
+  const [gitTree, setGitTree] = useState<GitWorkingTree | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const photoRef = useRef<HTMLInputElement | null>(null);
   const unsubRef = useRef<(() => void) | null>(null);
   const activeIdRef = useRef<string | null>(null);
+  const refreshLockRef = useRef(false);
   activeIdRef.current = active?.agentSessionId ?? null;
 
   const handleReconnect = useCallback(async () => {
@@ -158,30 +184,41 @@ export default function AgentsPage() {
     }
   }, [connect, hostUrl]);
 
+  const refreshFromHost = useCallback(async (quiet = false) => {
+    if (status !== 'connected' || !client || refreshLockRef.current) return;
+    refreshLockRef.current = true;
+    try {
+      const [a, s] = await Promise.all([
+        client.request('agent.list') as Promise<AgentInfo[]>,
+        client.request('agent.listSessions') as Promise<AgentSessionInfo[]>,
+      ]);
+      let host: AgentHostChat[] = [];
+      try {
+        host = (await client.request('agent.listHostChats')) as AgentHostChat[];
+      } catch {
+        host = [];
+      }
+      setAgents(a);
+      setSessions(s);
+      setHostChats(host);
+      const activeId = activeIdRef.current;
+      if (!activeId) return;
+      const match = s.find((x) => x.agentSessionId === activeId);
+      if (match) setActive(match);
+      const history = (await client.request('agent.history', {
+        agentSessionId: activeId,
+      })) as AgentEvent[];
+      setEvents((prev) => mergeAgentHistory(history, prev));
+    } catch (e) {
+      if (!quiet) setError(e instanceof Error ? e.message : 'Could not list agents.');
+    } finally {
+      refreshLockRef.current = false;
+    }
+  }, [status, client]);
+
   useEffect(() => {
     if (status !== 'connected' || !client) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const [a, s] = await Promise.all([
-          client.request('agent.list') as Promise<AgentInfo[]>,
-          client.request('agent.listSessions') as Promise<AgentSessionInfo[]>,
-        ]);
-        let host: AgentHostChat[] = [];
-        try {
-          host = (await client.request('agent.listHostChats')) as AgentHostChat[];
-        } catch {
-          host = [];
-        }
-        if (!cancelled) {
-          setAgents(a);
-          setSessions(s);
-          setHostChats(host);
-        }
-      } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Could not list agents.');
-      }
-    })();
+    void refreshFromHost();
     const unsubs: (() => void)[] = [];
     unsubs.push(
       client.subscribe('agent-event', (msg: unknown) => {
@@ -225,14 +262,78 @@ export default function AgentsPage() {
       }),
     );
     return () => {
-      cancelled = true;
       for (const u of unsubs) u();
     };
-  }, [status, client]);
+  }, [status, client, refreshFromHost]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refreshFromHost(true);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pageshow', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pageshow', onVisible);
+    };
+  }, [refreshFromHost]);
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
   }, [events.length]);
+
+  const caps = resolveAgentCaps(
+    active?.agent ?? '',
+    agents.find((a) => a.id === active?.agent)?.capabilities,
+    liveModels,
+  );
+  const prefsAgentRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!active) {
+      setLiveModels([]);
+      setGitTree(null);
+      setPhotos([]);
+      setComposerOpen(false);
+      prefsAgentRef.current = null;
+      return;
+    }
+    const next = applyComposerPrefs(
+      resolveAgentCaps(active.agent, agents.find((a) => a.id === active.agent)?.capabilities),
+      loadComposerPrefs(active.agent),
+    );
+    setMode(next.mode);
+    setThinking(next.thinking);
+    setModel(next.model);
+    setPhotos([]);
+    setLiveModels([]);
+    prefsAgentRef.current = active.agent;
+    if (!client) return;
+    void client
+      .request('agent.listModels', { agent: active.agent })
+      .then((raw) => {
+        if (Array.isArray(raw) && raw.length) setLiveModels(raw as AgentModelOption[]);
+      })
+      .catch(() => {});
+  }, [active?.agentSessionId, active?.agent, client]);
+
+  useEffect(() => {
+    if (!active || prefsAgentRef.current !== active.agent) return;
+    saveComposerPrefs(active.agent, { mode, thinking, model });
+  }, [active, mode, thinking, model]);
+
+  const refreshGit = useCallback(async () => {
+    if (!client || !active?.cwd) {
+      setGitTree(null);
+      return;
+    }
+    try {
+      const raw = await client.request('fs.gitStatus', { cwd: active.cwd });
+      setGitTree(raw && typeof raw === 'object' ? (raw as GitWorkingTree) : null);
+    } catch {
+      setGitTree(null);
+    }
+  }, [client, active?.cwd]);
 
   const newChat = useCallback((agent: AgentInfo) => {
     setPicking({ kind: 'new', agent });
@@ -338,15 +439,17 @@ export default function AgentsPage() {
 
   const send = useCallback(async () => {
     const text = draft.trim();
-    if (!text || !client || !active) return;
+    if ((!text && photos.length === 0) || !client || !active) return;
     setDraft('');
+    const attached = photos;
+    setPhotos([]);
     const currentTitle = (active.title || '').trim();
     const isDefault =
       !currentTitle ||
       currentTitle === 'Agent' ||
       currentTitle === 'Host chat' ||
       agents.some((a) => a.name === currentTitle || a.id === currentTitle);
-    if (isDefault) {
+    if (isDefault && text) {
       const summary = text.split('\n')[0].trim();
       const clipped = summary.length > 50 ? `${summary.slice(0, 47)}…` : summary;
       if (clipped) {
@@ -360,8 +463,12 @@ export default function AgentsPage() {
     await client.request('agent.prompt', {
       agentSessionId: active.agentSessionId,
       text,
+      ...(model && model !== 'auto' && model !== 'default' ? { model } : {}),
+      ...(mode !== 'agent' ? { mode } : {}),
+      ...(thinking ? { thinking } : {}),
+      ...(attached.length ? { images: attached } : {}),
     });
-  }, [draft, client, active, agents]);
+  }, [draft, photos, client, active, agents, model, mode, thinking]);
 
   return (
     <div style={styles.wrapper}>
@@ -458,7 +565,9 @@ export default function AgentsPage() {
                     style={{ ...styles.row, marginBottom: 0, flex: 1 }}
                   >
                     <strong>{s.title}</strong>
-                    <span style={styles.muted}>{s.cwd}</span>
+                    <span style={styles.muted}>
+                      {chatListSubtitle({ agent: s.agent, cwd: s.cwd })}
+                    </span>
                   </button>
                   <button
                     type="button"
@@ -491,9 +600,12 @@ export default function AgentsPage() {
                 <button key={`${c.agent}-${c.hostChatId}`} onClick={() => openHostChat(c)} style={styles.row}>
                   <strong>{c.title}</strong>
                   <span style={styles.muted}>
-                    {[c.source, c.cwd, !c.resumable ? 'view only' : '']
-                      .filter(Boolean)
-                      .join(' · ')}
+                    {chatListSubtitle({
+                      agent: c.agent,
+                      source: c.source,
+                      cwd: c.cwd,
+                      resumable: c.resumable,
+                    })}
                   </span>
                 </button>
               ));
@@ -508,23 +620,121 @@ export default function AgentsPage() {
             ))}
           </div>
           <form
-            style={styles.composer}
+            style={styles.composerBox}
             onSubmit={(ev) => {
               ev.preventDefault();
               void send();
             }}
           >
+            {photos.length > 0 && (
+              <div style={styles.thumbs}>
+                {photos.map((p, i) => (
+                  <button
+                    key={`${p.name}-${i}`}
+                    type="button"
+                    style={styles.thumb}
+                    onClick={() => setPhotos((prev) => prev.filter((_, j) => j !== i))}
+                    title="Remove photo"
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            )}
             <input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              placeholder="Message the agent…"
-              style={styles.input}
+              placeholder={photos.length ? 'Add a note about the photo…' : 'Message the agent…'}
+              style={styles.composerField}
             />
-            <button type="submit" style={styles.send}>
-              Send
-            </button>
+            <div style={styles.composerRow}>
+              <button
+                type="button"
+                style={styles.plusBtn}
+                title="Photo, model, thinking, folder…"
+                onClick={() => {
+                  setComposerView('root');
+                  setComposerOpen(true);
+                  void refreshGit();
+                }}
+              >
+                +
+              </button>
+              <span style={{ flex: 1 }} />
+              <button type="submit" style={styles.send}>
+                Send
+              </button>
+            </div>
+            <input
+              ref={photoRef}
+              type="file"
+              accept="image/*"
+              multiple
+              hidden
+              onChange={(e) => {
+                const files = [...(e.target.files ?? [])].slice(0, 4 - photos.length);
+                e.target.value = '';
+                for (const file of files) {
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    const result = String(reader.result || '');
+                    const data = result.includes(',') ? result.slice(result.indexOf(',') + 1) : result;
+                    if (!data) return;
+                    setPhotos((prev) => [
+                      ...prev,
+                      { name: file.name || 'photo.jpg', mime: file.type || 'image/jpeg', data },
+                    ].slice(0, 4));
+                  };
+                  reader.readAsDataURL(file);
+                }
+              }}
+            />
           </form>
         </>
+      )}
+
+      {composerOpen && active && (
+        <ComposerMenu
+          view={composerView}
+          setView={setComposerView}
+          caps={caps}
+          mode={mode}
+          thinking={thinking}
+          model={model}
+          git={gitTree}
+          cwd={active.cwd}
+          agents={agents}
+          activeAgent={active.agent}
+          onClose={() => setComposerOpen(false)}
+          onPhoto={() => {
+            setComposerOpen(false);
+            photoRef.current?.click();
+          }}
+          onFolder={() => {
+            setComposerOpen(false);
+            setPicking({ kind: 'folder', session: active });
+          }}
+          onMode={(v) => { setMode(v); setComposerView('root'); }}
+          onThinking={(v) => { setThinking(v); setComposerView('root'); }}
+          onModel={(v) => { setModel(v); setComposerView('root'); }}
+          onAgent={(agent) => {
+            setComposerOpen(false);
+            if (agent.id === active.agent) return;
+            setPicking(null);
+            void (async () => {
+              if (!client) return;
+              const cwd = active.cwd;
+              const created = (await client.request('agent.createSession', {
+                agent: agent.id,
+                title: agent.name,
+                cwd,
+              })) as AgentSessionInfo;
+              setSessions((s) => [created, ...s.filter((x) => x.agentSessionId !== created.agentSessionId)]);
+              setActive(created);
+              setEvents([]);
+            })();
+          }}
+        />
       )}
 
       {picking && client && (
@@ -534,6 +744,137 @@ export default function AgentsPage() {
           onPick={(cwd) => void applyPickedCwd(cwd)}
         />
       )}
+    </div>
+  );
+}
+
+function ComposerMenu({
+  view,
+  setView,
+  caps,
+  mode,
+  thinking,
+  model,
+  git,
+  cwd,
+  agents,
+  activeAgent,
+  onClose,
+  onPhoto,
+  onFolder,
+  onMode,
+  onThinking,
+  onModel,
+  onAgent,
+}: {
+  view: 'root' | 'model' | 'thinking' | 'mode' | 'agent';
+  setView: (v: 'root' | 'model' | 'thinking' | 'mode' | 'agent') => void;
+  caps: ReturnType<typeof resolveAgentCaps>;
+  mode: string;
+  thinking: string;
+  model: string | null;
+  git: GitWorkingTree | null;
+  cwd: string;
+  agents: AgentInfo[];
+  activeAgent: string;
+  onClose: () => void;
+  onPhoto: () => void;
+  onFolder: () => void;
+  onMode: (v: string) => void;
+  onThinking: (v: string) => void;
+  onModel: (v: string) => void;
+  onAgent: (agent: AgentInfo) => void;
+}) {
+  const title =
+    view === 'model' ? 'Model'
+    : view === 'thinking' ? 'Thinking'
+    : view === 'mode' ? 'Mode'
+    : view === 'agent' ? 'Agent'
+    : 'Add to this turn';
+  return (
+    <div style={styles.overlay} onClick={onClose}>
+      <div style={styles.sheet} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.sheetHead}>
+          {view === 'root' ? (
+            <span style={{ width: 34 }} />
+          ) : (
+            <button type="button" onClick={() => setView('root')} style={styles.barBtn}>←</button>
+          )}
+          <strong>{title}</strong>
+          <button type="button" onClick={onClose} style={styles.barBtn}>✕</button>
+        </div>
+        <div style={styles.sheetBody}>
+          {view === 'root' && (
+            <>
+              <button type="button" style={styles.menuRow} onClick={onPhoto}>
+                <strong>Photo</strong>
+                <span style={styles.menuSub}>Attach from this phone</span>
+              </button>
+              {cwd.trim() ? (
+                <button type="button" style={styles.menuRow} onClick={onFolder}>
+                  <strong>{git ? `Working tree · ${folderDisplayName(cwd)}` : folderDisplayName(cwd)}</strong>
+                  <span style={styles.menuSub}>{git ? workingTreeSubtitle(git) : cwd}</span>
+                  {git?.files.slice(0, 4).map((f) => (
+                    <span key={f} style={styles.menuFile}>{f}</span>
+                  ))}
+                </button>
+              ) : null}
+              <button type="button" style={styles.menuRow} onClick={() => setView('model')}>
+                <strong>Model</strong>
+                <span style={styles.menuSub}>{modelLabel(model, caps.models)}</span>
+              </button>
+              <button type="button" style={styles.menuRow} onClick={() => setView('thinking')}>
+                <strong>Thinking</strong>
+                <span style={styles.menuSub}>{thinkingLabel(thinking)}</span>
+              </button>
+              {caps.modes.length > 1 ? (
+                <button type="button" style={styles.menuRow} onClick={() => setView('mode')}>
+                  <strong>Mode</strong>
+                  <span style={styles.menuSub}>{modeLabel(mode)}</span>
+                </button>
+              ) : null}
+              <button type="button" style={styles.menuRow} onClick={() => setView('agent')}>
+                <strong>Agent</strong>
+                <span style={styles.menuSub}>
+                  {agents.find((a) => a.id === activeAgent)?.name ?? 'Switch agent'}
+                </span>
+              </button>
+            </>
+          )}
+          {view === 'model' && caps.models.map((m) => (
+            <button key={m.id} type="button" style={styles.menuRow} onClick={() => onModel(m.id)}>
+              <strong>{m.name}</strong>
+              <span style={styles.menuSub}>{m.id}{m.id === model ? ' · selected' : ''}</span>
+            </button>
+          ))}
+          {view === 'thinking' && caps.thinkingLevels.map((level) => (
+            <button key={level} type="button" style={styles.menuRow} onClick={() => onThinking(level)}>
+              <strong>{thinkingLabel(level)}</strong>
+              {level === thinking ? <span style={styles.menuSub}>selected</span> : null}
+            </button>
+          ))}
+          {view === 'mode' && caps.modes.map((m) => (
+            <button key={m} type="button" style={styles.menuRow} onClick={() => onMode(m)}>
+              <strong>{modeLabel(m)}</strong>
+              {m === mode ? <span style={styles.menuSub}>selected</span> : null}
+            </button>
+          ))}
+          {view === 'agent' && agents.map((a) => (
+            <button
+              key={a.id}
+              type="button"
+              disabled={!a.available}
+              style={styles.menuRow}
+              onClick={() => onAgent(a)}
+            >
+              <strong>{a.name}</strong>
+              <span style={styles.menuSub}>
+                {a.id === activeAgent ? 'This chat' : a.available ? 'New chat in this folder' : 'Not installed on the PC'}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -550,7 +891,7 @@ function CwdPicker({
   const [browse, setBrowse] = useState(false);
   const [home, setHome] = useState('/');
   const [cwd, setCwd] = useState('/');
-  const [recentPath, setRecentPath] = useState<string | null>(null);
+  const [recentPaths, setRecentPaths] = useState<string[]>([]);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [dirs, setDirs] = useState<DirEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -574,11 +915,11 @@ function CwdPicker({
         const info = (await client.request('system.getInfo')) as { homeDir?: string };
         if (info.homeDir) homeDir = info.homeDir;
       } catch { /* keep / */ }
-      const recent = loadLastAgentCwd();
+      const recent = loadRecentAgentCwds();
       const seen = new Set<string>();
-      const hints: ProjectInfo[] = [{ name: 'Home', path: homeDir }];
+      const hints: ProjectInfo[] = [];
       seen.add(homeDir);
-      if (recent) seen.add(recent);
+      for (const path of recent) seen.add(path);
       try {
         const listed = (await client.request('fs.listProjects')) as ProjectInfo[];
         for (const p of listed) {
@@ -587,14 +928,14 @@ function CwdPicker({
           hints.push(p);
         }
       } catch { /* suggestions optional */ }
-      const sorted = [
-        hints[0],
-        ...hints.slice(1).sort((a, b) => comparePathNames(a.name, b.name)),
+      const sorted: ProjectInfo[] = [
+        ...hints.slice().sort((a, b) => comparePathNames(a.name, b.name)),
+        { name: 'Home', path: homeDir },
       ];
       if (!cancelled) {
         setHome(homeDir);
         setCwd(homeDir);
-        setRecentPath(recent);
+        setRecentPaths(recent);
         setProjects(sorted);
         setLoading(false);
       }
@@ -717,24 +1058,31 @@ function CwdPicker({
                 <strong>Enter path</strong>
                 <span style={styles.muted}>Type or paste a folder path</span>
               </button>
-              <h2 style={styles.section}>Suggestions</h2>
-              {recentPath && (
-                <button
-                  key={`recent-${recentPath}`}
-                  type="button"
-                  onClick={() => pick(recentPath)}
-                  style={styles.row}
-                >
-                  <strong>{folderDisplayName(recentPath)}</strong>
-                  <span style={styles.muted}>{recentPath}</span>
-                </button>
+              {recentPaths.length > 0 && (
+                <>
+                  <h2 style={styles.section}>Recent</h2>
+                  {recentPaths.map((path) => (
+                    <button
+                      key={`recent-${path}`}
+                      type="button"
+                      onClick={() => pick(path)}
+                      style={styles.row}
+                    >
+                      <strong>{folderDisplayName(path)}</strong>
+                      <span style={styles.muted}>{path}</span>
+                    </button>
+                  ))}
+                </>
               )}
+              <h2 style={styles.section}>Suggestions</h2>
               {projects
-                .filter((p) => p.path !== recentPath)
+                .filter((p) => !recentPaths.includes(p.path))
                 .map((p) => (
                   <button key={p.path} type="button" onClick={() => pick(p.path)} style={styles.row}>
                     <strong>{p.name}</strong>
-                    <span style={styles.muted}>{p.path}</span>
+                    <span style={styles.muted}>
+                      {p.path === home ? 'Your user folder — not a project' : p.path}
+                    </span>
                   </button>
                 ))}
             </>
@@ -956,6 +1304,67 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '8px 10px calc(8px + env(safe-area-inset-bottom))',
     borderTop: '1px solid #1c1c30',
   },
+  composerBox: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+    margin: '8px 10px calc(8px + env(safe-area-inset-bottom))',
+    padding: '8px 8px 6px',
+    borderRadius: 16,
+    border: '1px solid #2a2a40',
+    background: '#151522',
+  },
+  composerField: {
+    width: '100%',
+    padding: '8px',
+    border: 'none',
+    background: 'transparent',
+    color: '#eee',
+    fontSize: 14,
+    outline: 'none',
+  },
+  composerRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+  },
+  plusBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    border: '1px solid #2a2a40',
+    background: '#1c1c2a',
+    color: '#eee',
+    fontSize: 22,
+    lineHeight: '32px',
+    cursor: 'pointer',
+  },
+  thumbs: { display: 'flex', gap: 8, padding: '0 4px 4px', flexWrap: 'wrap' },
+  thumb: {
+    fontSize: 11,
+    color: '#ccc',
+    background: '#1c1c2a',
+    border: '1px solid #2a2a40',
+    borderRadius: 8,
+    padding: '6px 8px',
+    cursor: 'pointer',
+  },
+  menuRow: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-start',
+    gap: 2,
+    width: '100%',
+    padding: '12px 14px',
+    border: 'none',
+    borderBottom: '1px solid #1c1c30',
+    background: 'transparent',
+    color: '#eee',
+    textAlign: 'left',
+    cursor: 'pointer',
+  },
+  menuSub: { fontSize: 12, color: '#889' },
+  menuFile: { fontSize: 11, color: '#8a8a9a', fontFamily: 'ui-monospace, monospace' },
   input: {
     flex: 1,
     padding: '10px 12px',

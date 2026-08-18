@@ -32,6 +32,22 @@ export default function ConnectionProvider({ children }: { children: React.React
     }
   }, [status]);
 
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      const { status: s, hostUrl, connect: reconnect } = useConnectionStore.getState();
+      if (s === 'disconnected' && hostUrl) {
+        reconnect(hostUrl).catch(() => {});
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('pageshow', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pageshow', onVisible);
+    };
+  }, []);
+
   return <>{children}</>;
 }
 

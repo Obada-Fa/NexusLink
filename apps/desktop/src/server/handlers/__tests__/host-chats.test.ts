@@ -1,14 +1,25 @@
 import { describe, expect, test } from 'bun:test';
 import {
   cleanMessageText,
+  agySourceLabel,
+  agentSourceLabel,
+  chatListSubtitle,
+  cwdFromAgyCliHistory,
+  cwdFromAgyProjectResources,
+  cwdFromDashedSlug,
   extractProtobufStrings,
+  parseAgyCliHistoryLine,
+  normalizeHostChat,
+  fileUriToPath,
   parseAgyJsonl,
   parseAgyStepStrings,
+  parseAgyWorkspaceUris,
   parseClaudeJsonl,
   parseCursorJsonl,
   parseCursorTranscriptLine,
   parseOpencodeExport,
 } from '../host-chats';
+import { realpathSync } from 'node:fs';
 
 describe('cleanMessageText', () => {
   test('strips timestamp and extracts inner user_query text', () => {
@@ -170,5 +181,95 @@ describe('host chat parsers', () => {
     const events = parseAgyStepStrings(['abc', 'Please look at src/main.ts for the crash']);
     expect(events[0]!.kind).toBe('user');
     expect(events[0]!.text).toContain('src/main.ts');
+  });
+});
+
+describe('Antigravity workspace paths', () => {
+  test('parses file URIs and workspace_uris JSON', () => {
+    expect(fileUriToPath('file:///home/obada/Projects/mobile/opendesktop'))
+      .toBe('/home/obada/Projects/mobile/opendesktop');
+    expect(fileUriToPath('file:///home/obada/Programming/market%20place'))
+      .toBe('/home/obada/Programming/market place');
+    expect(parseAgyWorkspaceUris('["file:///tmp"]')).toBe(realpathSync('/tmp'));
+    expect(parseAgyWorkspaceUris('')).toBe('');
+  });
+
+  test('reads folderUri from Antigravity project JSON', () => {
+    expect(cwdFromAgyProjectResources({
+      id: 'abc',
+      projectResources: {
+        resources: [{ gitFolder: { folderUri: 'file:///tmp' } }],
+      },
+    })).toBe(realpathSync('/tmp'));
+    expect(cwdFromAgyProjectResources({
+      resources: [{ folderUri: 'file:///tmp' }],
+    })).toBe(realpathSync('/tmp'));
+    expect(cwdFromAgyProjectResources({ id: 'default-cli-project', projectResources: {} })).toBe('');
+    expect(cwdFromAgyProjectResources({ name: '/tmp', projectResources: {} })).toBe(realpathSync('/tmp'));
+  });
+});
+
+describe('Antigravity CLI history cwd', () => {
+  test('labels CLI vs IDE sources', () => {
+    expect(agySourceLabel('antigravity-cli')).toBe('Antigravity CLI');
+    expect(agySourceLabel('antigravity')).toBe('Antigravity');
+    expect(agySourceLabel('')).toBe('Antigravity');
+  });
+
+  test('parses history.jsonl workspace lines', () => {
+    expect(parseAgyCliHistoryLine({
+      display: 'uploadapk assets on github',
+      workspace: '/tmp',
+      conversationId: 'abc',
+    })).toEqual({
+      conversationId: 'abc',
+      workspace: realpathSync('/tmp'),
+      display: 'uploadapk assets on github',
+    });
+    expect(parseAgyCliHistoryLine({ display: 'no folder' })).toBeNull();
+  });
+
+  test('resolves cwd from conversation id then preview text', () => {
+    const entries = [
+      { conversationId: '', workspace: '/old', display: 'ignore me please now' },
+      { conversationId: 'chat-1', workspace: '/from-id', display: 'uploadapk assets on github' },
+      { conversationId: '', workspace: '/from-preview', display: 'Agent Menu Tabs Layout' },
+    ];
+    expect(cwdFromAgyCliHistory('chat-1', 'other preview text here', entries)).toBe('/from-id');
+    expect(cwdFromAgyCliHistory('missing', 'Agent Menu Tabs Layout extra', entries)).toBe('/from-preview');
+    expect(cwdFromAgyCliHistory('missing', 'hi', entries)).toBe('');
+  });
+});
+
+describe('unified chat list metadata', () => {
+  test('labels known agents and title-cases future ones', () => {
+    expect(agentSourceLabel('opencode')).toBe('OpenCode');
+    expect(agentSourceLabel('claude')).toBe('Claude Code');
+    expect(agentSourceLabel('cool-agent')).toBe('Cool Agent');
+    expect(agentSourceLabel('cursor', 'Cursor IDE')).toBe('Cursor IDE');
+  });
+
+  test('formats source · folder for every agent', () => {
+    expect(chatListSubtitle({ agent: 'opencode', cwd: '/tmp/proj' }))
+      .toBe('OpenCode · /tmp/proj');
+    expect(chatListSubtitle({ agent: 'claude', cwd: '/tmp', resumable: false }))
+      .toBe('Claude Code · /tmp · view only');
+  });
+
+  test('reconstructs cwd from dashed project slugs', () => {
+    expect(cwdFromDashedSlug('tmp')).toBe(realpathSync('/tmp'));
+    expect(cwdFromDashedSlug('-tmp')).toBe(realpathSync('/tmp'));
+  });
+
+  test('fills a missing source from the agent id', () => {
+    expect(normalizeHostChat({
+      agent: 'opencode',
+      hostChatId: 's1',
+      title: 'hi',
+      cwd: '/tmp',
+      updatedAt: 1,
+      resumable: true,
+      source: '',
+    }).source).toBe('OpenCode');
   });
 });

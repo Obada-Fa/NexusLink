@@ -1,7 +1,7 @@
 // Load conversations that already exist on the PC (OpenCode, Cursor CLI/IDE,
 // Antigravity) so the phone can open them instead of starting a blank chat.
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { Database } from 'bun:sqlite';
@@ -52,6 +52,282 @@ export function clipTitle(text: string): string {
   const t = cleaned.replace(/\s+/g, ' ').trim();
   if (!t) return '';
   return t.length > 72 ? `${t.slice(0, 69)}…` : t;
+}
+
+export function canonicalDir(dir: string): string {
+  const raw = (dir || '').trim();
+  if (!raw) return '';
+  try {
+    return realpathSync(raw);
+  } catch {
+    return raw.replace(/\/$/, '') || raw;
+  }
+}
+
+/** Display name for the chat subtitle (`OpenCode · /path`). Unknown ids title-case. */
+export function agentSourceLabel(agentId: string, source?: string): string {
+  const given = (source ?? '').trim();
+  if (given) return given;
+  switch (agentId) {
+    case 'claude':
+      return 'Claude Code';
+    case 'cursor':
+      return 'Cursor';
+    case 'opencode':
+      return 'OpenCode';
+    case 'antigravity':
+      return 'Antigravity';
+    case 'mock':
+      return 'Demo Agent';
+    default: {
+      const raw = agentId.trim();
+      if (!raw) return 'Agent';
+      return raw
+        .replace(/[_\s]+/g, '-')
+        .split('-')
+        .filter(Boolean)
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ');
+    }
+  }
+}
+
+export function chatListSubtitle(input: {
+  agent?: string;
+  source?: string;
+  cwd?: string;
+  resumable?: boolean;
+}): string {
+  return [
+    agentSourceLabel(input.agent ?? '', input.source),
+    (input.cwd ?? '').trim(),
+    input.resumable === false ? 'view only' : '',
+  ].filter(Boolean).join(' · ');
+}
+
+export function normalizeHostChat(chat: AgentHostChat): AgentHostChat {
+  return {
+    ...chat,
+    source: agentSourceLabel(chat.agent, chat.source),
+    cwd: (chat.cwd ?? '').trim(),
+  };
+}
+
+/** Reconstruct a path from a dashed project slug (`home-foo-bar` or `-home-foo-bar`). */
+export function cwdFromDashedSlug(slug: string): string {
+  const raw = (slug || '').trim();
+  if (!raw) return '';
+  const dashed = raw.replace(/^-+/, '');
+  if (!dashed) return '';
+  const naive = `/${dashed.replace(/-/g, '/')}`;
+  if (existsSync(naive)) return canonicalDir(naive);
+  const parts = dashed.split('-').filter(Boolean);
+  if (!parts.length) return '';
+  let testPath = `/${parts[0]}`;
+  for (let i = 1; i < parts.length; i++) {
+    const slash = `${testPath}/${parts[i]}`;
+    const hyphen = `${testPath}-${parts[i]}`;
+    if (existsSync(slash)) testPath = slash;
+    else if (existsSync(hyphen)) testPath = hyphen;
+    else testPath = slash;
+  }
+  return existsSync(testPath) ? canonicalDir(testPath) : '';
+}
+
+/** `file:///home/you/proj` or `%20`-encoded URIs → a filesystem path. */
+export function fileUriToPath(uri: string): string {
+  let path = (uri || '').trim();
+  if (!path) return '';
+  if (path.startsWith('file://')) path = path.slice('file://'.length);
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    // keep the raw path
+  }
+  return path;
+}
+
+export function parseAgyWorkspaceUris(raw: string | null | undefined): string {
+  if (!raw || !String(raw).trim()) return '';
+  const text = String(raw).trim();
+  const take = (value: unknown): string => {
+    if (typeof value !== 'string' || !value.trim()) return '';
+    const path = fileUriToPath(value);
+    if (!path) return '';
+    return existsSync(path) ? canonicalDir(path) : path;
+  };
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (Array.isArray(parsed)) return take(parsed[0]);
+    return take(parsed);
+  } catch {
+    return take(text);
+  }
+}
+
+export function cwdFromAgyProjectResources(raw: unknown): string {
+  if (!raw || typeof raw !== 'object') return '';
+  const rec = raw as Record<string, unknown>;
+  const inner = (rec.projectResources as Record<string, unknown> | undefined) ?? rec;
+  const resources = Array.isArray(inner.resources) ? inner.resources : [];
+  for (const item of resources) {
+    if (!item || typeof item !== 'object') continue;
+    const it = item as Record<string, unknown>;
+    const git = it.gitFolder as Record<string, unknown> | undefined;
+    const uri = String(git?.folderUri ?? it.folderUri ?? '');
+    if (!uri) continue;
+    const path = fileUriToPath(uri);
+    if (path && existsSync(path)) return canonicalDir(path);
+    if (path.startsWith('/')) return path;
+  }
+  const name = String(rec.name ?? '').trim();
+  if (name.startsWith('/') || name.startsWith('file:')) {
+    const path = fileUriToPath(name);
+    if (path && existsSync(path)) return canonicalDir(path);
+    if (path.startsWith('/')) return path;
+  }
+  return '';
+}
+
+export function agySourceLabel(appDataDir?: string | null): string {
+  return String(appDataDir ?? '').toLowerCase().includes('cli')
+    ? 'Antigravity CLI'
+    : 'Antigravity';
+}
+
+export type AgyCliHistoryEntry = {
+  conversationId: string;
+  workspace: string;
+  display: string;
+};
+
+export function parseAgyCliHistoryLine(raw: unknown): AgyCliHistoryEntry | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const rec = raw as Record<string, unknown>;
+  const workspace = String(rec.workspace ?? '').trim();
+  if (!workspace) return null;
+  return {
+    conversationId: String(rec.conversationId ?? '').trim(),
+    workspace: existsSync(workspace) ? canonicalDir(workspace) : workspace,
+    display: String(rec.display ?? '').trim(),
+  };
+}
+
+export function cwdFromAgyCliHistory(
+  hostChatId: string,
+  preview: string,
+  entries: AgyCliHistoryEntry[],
+): string {
+  const byId = [...entries].reverse().find((e) => e.conversationId && e.conversationId === hostChatId);
+  if (byId?.workspace) return byId.workspace;
+  const needle = preview.replace(/\s+/g, ' ').trim().toLowerCase();
+  if (needle.length < 12) return '';
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const display = entries[i]!.display.replace(/\s+/g, ' ').trim().toLowerCase();
+    if (display.length < 12) continue;
+    if (needle.startsWith(display) || display.startsWith(needle)) return entries[i]!.workspace;
+  }
+  return '';
+}
+
+export function agyProjectIdForCwd(cwd: string): string | undefined {
+  const want = canonicalDir(cwd);
+  if (!want) return undefined;
+  const dir = join(homedir(), '.gemini', 'config', 'projects');
+  if (!existsSync(dir)) return undefined;
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith('.json')) continue;
+      const rec = JSON.parse(readFileSync(join(dir, name), 'utf8')) as Record<string, unknown>;
+      const id = String(rec.id ?? name.replace(/\.json$/, ''));
+      if (!id || id === 'default-cli-project') continue;
+      const folder = cwdFromAgyProjectResources(rec);
+      if (folder && canonicalDir(folder) === want) return id;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function agyCwdForProjectId(projectId: string): string {
+  if (!projectId || projectId === 'default-cli-project') return '';
+  const path = join(homedir(), '.gemini', 'config', 'projects', `${projectId}.json`);
+  if (!existsSync(path)) return '';
+  try {
+    return cwdFromAgyProjectResources(JSON.parse(readFileSync(path, 'utf8')));
+  } catch {
+    return '';
+  }
+}
+
+type AgySummary = { title: string; preview: string; cwd: string; source: string };
+
+function loadAgyCliHistory(): AgyCliHistoryEntry[] {
+  const path = join(homedir(), '.gemini', 'antigravity-cli', 'history.jsonl');
+  if (!existsSync(path)) return [];
+  try {
+    return readFileSync(path, 'utf8').split('\n').flatMap((line) => {
+      if (!line.trim()) return [];
+      try {
+        const parsed = parseAgyCliHistoryLine(JSON.parse(line));
+        return parsed ? [parsed] : [];
+      } catch {
+        return [];
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
+function loadAgySummaries(): Map<string, AgySummary> {
+  const out = new Map<string, AgySummary>();
+  const dbPath = join(homedir(), '.gemini', 'antigravity-cli', 'conversation_summaries.db');
+  if (!existsSync(dbPath)) return out;
+  const db = openReadonlyDb(dbPath);
+  if (!db) return out;
+  try {
+    const rows = db.query(
+      'SELECT conversation_id, title, preview, workspace_uris, project_id, app_data_dir FROM conversation_summaries',
+    ).all() as {
+      conversation_id: string;
+      title?: string;
+      preview?: string;
+      workspace_uris?: string;
+      project_id?: string;
+      app_data_dir?: string;
+    }[];
+    for (const row of rows) {
+      if (!row.conversation_id) continue;
+      out.set(row.conversation_id, {
+        title: row.title ?? '',
+        preview: row.preview ?? '',
+        cwd: parseAgyWorkspaceUris(row.workspace_uris) || agyCwdForProjectId(row.project_id ?? ''),
+        source: agySourceLabel(row.app_data_dir),
+      });
+    }
+  } catch {
+    try {
+      const rows = db.query(
+        'SELECT conversation_id, title, preview FROM conversation_summaries',
+      ).all() as { conversation_id: string; title?: string; preview?: string }[];
+      for (const row of rows) {
+        if (!row.conversation_id) continue;
+        out.set(row.conversation_id, {
+          title: row.title ?? '',
+          preview: row.preview ?? '',
+          cwd: '',
+          source: 'Antigravity',
+        });
+      }
+    } catch {
+      // ignore
+    }
+  } finally {
+    db.close();
+  }
+  return out;
 }
 
 export function titleFromEvents(events: HostChatDelta[], fallback: string): string {
@@ -330,7 +606,7 @@ export function listOpencodeHostChats(bin: string): AgentHostChat[] {
       const r = row as Record<string, unknown>;
       const id = String(r.id ?? '');
       if (!id) return [];
-      const cwd = String(r.directory ?? r.cwd ?? '');
+      const cwd = String(r.directory ?? r.cwd ?? r.path ?? r.workdir ?? '');
       const updated = typeof r.updated === 'number' ? r.updated : Date.now();
       const title = clipTitle(String(r.title ?? '')) || 'OpenCode session';
       return [{
@@ -340,7 +616,7 @@ export function listOpencodeHostChats(bin: string): AgentHostChat[] {
         cwd,
         updatedAt: updated,
         resumable: true,
-        source: 'OpenCode',
+        source: agentSourceLabel('opencode'),
       }];
     });
   } catch {
@@ -384,7 +660,7 @@ export function listCursorCliHostChats(cursorBinInstalled: boolean): AgentHostCh
         try {
           const meta = JSON.parse(readFileSync(metaPath, 'utf8')) as Record<string, unknown>;
           if (meta.hasConversation === false) continue;
-          const cwd = String(meta.cwd ?? '');
+          const cwd = String(meta.cwd ?? '').trim() || cwdFromDashedSlug(workspace);
           const updatedAt = typeof meta.updatedAtMs === 'number' ? meta.updatedAtMs : Date.now();
           const fallback = cwd ? basename(cwd) : 'Cursor CLI chat';
           out.push({
@@ -461,27 +737,7 @@ export function listCursorIdeHostChats(): AgentHostChat[] {
         continue;
       }
 
-      // Infer project cwd from slug if possible
-      let cwd = '';
-      if (slug.startsWith('home-')) {
-        const candidate = '/' + slug.replace(/-/g, '/');
-        if (existsSync(candidate)) {
-          cwd = candidate;
-        } else {
-          const parts = slug.split('-');
-          let testPath = '/' + parts[0];
-          for (let i = 1; i < parts.length; i++) {
-            if (existsSync(`${testPath}/${parts[i]}`)) {
-              testPath = `${testPath}/${parts[i]}`;
-            } else if (existsSync(`${testPath}-${parts[i]}`)) {
-              testPath = `${testPath}-${parts[i]}`;
-            } else {
-              testPath = `${testPath}/${parts[i]}`;
-            }
-          }
-          if (existsSync(testPath)) cwd = testPath;
-        }
-      }
+      const cwd = cwdFromDashedSlug(slug);
 
       for (const id of chats) {
         if (seen.has(id)) {
@@ -584,11 +840,34 @@ export function getAgyChatTitle(hostChatId: string): string | null {
   return null;
 }
 
+function agyListTitle(id: string, summary?: AgySummary): string {
+  const fromSummary = clipTitle(summary?.title ?? '') || clipTitle(summary?.preview ?? '');
+  if (fromSummary) return fromSummary;
+  return getAgyChatTitle(id) ?? 'Antigravity conversation';
+}
+
+function agyListMeta(id: string, summary: AgySummary | undefined, history: AgyCliHistoryEntry[]): {
+  title: string;
+  cwd: string;
+  source: string;
+} {
+  const title = agyListTitle(id, summary);
+  const cwd = summary?.cwd
+    || cwdFromAgyCliHistory(id, `${summary?.title ?? ''} ${summary?.preview ?? ''} ${title}`, history);
+  return {
+    title,
+    cwd,
+    source: summary?.source || 'Antigravity',
+  };
+}
+
 export function listAgyHostChats(): AgentHostChat[] {
   const brainDir = join(homedir(), '.gemini', 'antigravity-cli', 'brain');
   const convDir = join(homedir(), '.gemini', 'antigravity-cli', 'conversations');
   const out: AgentHostChat[] = [];
   const seen = new Set<string>();
+  const summaries = loadAgySummaries();
+  const history = loadAgyCliHistory();
 
   if (existsSync(brainDir)) {
     try {
@@ -601,16 +880,16 @@ export function listAgyHostChats(): AgentHostChat[] {
         } catch {
           // keep now
         }
-        const title = getAgyChatTitle(id) ?? 'Antigravity conversation';
+        const meta = agyListMeta(id, summaries.get(id), history);
         seen.add(id);
         out.push({
           agent: 'antigravity',
           hostChatId: id,
-          title,
-          cwd: '',
+          title: meta.title,
+          cwd: meta.cwd,
           updatedAt,
           resumable: true,
-          source: 'Antigravity',
+          source: meta.source,
         });
       }
     } catch {
@@ -631,8 +910,9 @@ export function listAgyHostChats(): AgentHostChat[] {
         } catch {
           // keep now
         }
-        let title = getAgyChatTitle(id);
-        if (!title) {
+        const meta = agyListMeta(id, summaries.get(id), history);
+        let title = meta.title;
+        if (title === 'Antigravity conversation') {
           try {
             title = titleFromEvents(loadAgyHistory(id), 'Antigravity conversation');
           } catch {
@@ -643,10 +923,10 @@ export function listAgyHostChats(): AgentHostChat[] {
           agent: 'antigravity',
           hostChatId: id,
           title,
-          cwd: '',
+          cwd: meta.cwd,
           updatedAt,
           resumable: true,
-          source: 'Antigravity',
+          source: meta.source,
         });
       }
     } catch {
@@ -776,26 +1056,7 @@ export function listClaudeHostChats(): AgentHostChat[] {
       }
       if (!isDir) continue;
 
-      let cwd = '';
-      if (slug.startsWith('-')) {
-        const candidate = '/' + slug.slice(1).replace(/-/g, '/');
-        if (existsSync(candidate)) {
-          cwd = candidate;
-        } else {
-          const parts = slug.slice(1).split('-');
-          let testPath = '/' + parts[0];
-          for (let i = 1; i < parts.length; i++) {
-            if (existsSync(`${testPath}/${parts[i]}`)) {
-              testPath = `${testPath}/${parts[i]}`;
-            } else if (existsSync(`${testPath}-${parts[i]}`)) {
-              testPath = `${testPath}-${parts[i]}`;
-            } else {
-              testPath = `${testPath}/${parts[i]}`;
-            }
-          }
-          if (existsSync(testPath)) cwd = testPath;
-        }
-      }
+      const cwd = cwdFromDashedSlug(slug);
 
       for (const name of readdirSync(projectDir)) {
         if (!name.endsWith('.jsonl') || name.startsWith('journal') || name.startsWith('agent-')) continue;
@@ -823,7 +1084,7 @@ export function listClaudeHostChats(): AgentHostChat[] {
           cwd,
           updatedAt,
           resumable: true,
-          source: 'Claude Code',
+          source: agentSourceLabel('claude'),
         });
       }
     }
