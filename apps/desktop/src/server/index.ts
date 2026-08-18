@@ -6,6 +6,7 @@ import { handleTerminalCreate, handleTerminalInput, handleTerminalResize, handle
 import { validateToken, generateToken, handleSessionPair, validateSessionTOTP, isLocalDev, generateDevToken } from './handlers/auth';
 import { setSend as setSignalingSend } from './handlers/signaling';
 import { mouseMove, mouseClick, mouseScroll, keyEvent, typeText, buttonDown, buttonUp, mouseMoveAbs } from './handlers/input';
+import { setSend as setCaptureSend, startCapture, stopCapture, stopCapturesForSocket, getScreenMetadata } from './handlers/capture';
 import {
   listWindows, listApps, refreshApps, launchApp, adoptWindow, releaseWindow, activateWindow,
   getWindowGeometry, getAdoptedCaptureRegion, setAppsBroadcast, initAppWatcher,
