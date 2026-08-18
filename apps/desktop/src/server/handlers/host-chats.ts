@@ -542,6 +542,48 @@ export function loadCursorIdeHistory(hostChatId: string): HostChatDelta[] {
   return [];
 }
 
+export function getAgyChatTitle(hostChatId: string): string | null {
+  if (!hostChatId) return null;
+  const summariesDbPath = join(homedir(), '.gemini', 'antigravity-cli', 'conversation_summaries.db');
+  if (existsSync(summariesDbPath)) {
+    const db = openReadonlyDb(summariesDbPath);
+    if (db) {
+      try {
+        const row = db.query('SELECT title, preview FROM conversation_summaries WHERE conversation_id = ?').get(hostChatId) as {
+          title?: string;
+          preview?: string;
+        } | null;
+        if (row?.title?.trim()) {
+          const clipped = clipTitle(row.title);
+          if (clipped) return clipped;
+        }
+        if (row?.preview?.trim()) {
+          const clipped = clipTitle(row.preview);
+          if (clipped) return clipped;
+        }
+      } catch {
+        // ignore
+      } finally {
+        db.close();
+      }
+    }
+  }
+
+  const transcriptPath = join(homedir(), '.gemini', 'antigravity-cli', 'brain', hostChatId, '.system_generated', 'logs', 'transcript.jsonl');
+  if (existsSync(transcriptPath)) {
+    try {
+      const head = readFileSync(transcriptPath, 'utf8').split('\n').slice(0, 20).join('\n');
+      const events = parseAgyJsonl(head);
+      const title = titleFromEvents(events, '');
+      if (title) return title;
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
 export function listAgyHostChats(): AgentHostChat[] {
   const brainDir = join(homedir(), '.gemini', 'antigravity-cli', 'brain');
   const convDir = join(homedir(), '.gemini', 'antigravity-cli', 'conversations');
@@ -559,13 +601,7 @@ export function listAgyHostChats(): AgentHostChat[] {
         } catch {
           // keep now
         }
-        let title = 'Antigravity conversation';
-        try {
-          const head = readFileSync(transcriptPath, 'utf8').split('\n').slice(0, 20).join('\n');
-          title = titleFromEvents(parseAgyJsonl(head), title);
-        } catch {
-          // keep fallback
-        }
+        const title = getAgyChatTitle(id) ?? 'Antigravity conversation';
         seen.add(id);
         out.push({
           agent: 'antigravity',
@@ -595,11 +631,13 @@ export function listAgyHostChats(): AgentHostChat[] {
         } catch {
           // keep now
         }
-        let title = 'Antigravity conversation';
-        try {
-          title = titleFromEvents(loadAgyHistory(id), title);
-        } catch {
-          // keep fallback
+        let title = getAgyChatTitle(id);
+        if (!title) {
+          try {
+            title = titleFromEvents(loadAgyHistory(id), 'Antigravity conversation');
+          } catch {
+            title = 'Antigravity conversation';
+          }
         }
         out.push({
           agent: 'antigravity',
@@ -651,10 +689,173 @@ export function loadAgyHistory(hostChatId: string): HostChatDelta[] {
   }
 }
 
+export function parseClaudeJsonl(text: string): HostChatDelta[] {
+  const out: HostChatDelta[] = [];
+  for (const line of text.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const obj = JSON.parse(t);
+      const ts = typeof obj.timestamp === 'string'
+        ? new Date(obj.timestamp).getTime()
+        : typeof obj.timestamp === 'number'
+          ? obj.timestamp
+          : Date.now();
+      const type = String(obj.type ?? '');
+      const msg = (obj.message as Record<string, unknown> | undefined) ?? {};
+      const role = String(msg.role ?? type ?? '');
+      const content = msg.content ?? obj.content;
+
+      if (role === 'user' || type === 'user') {
+        if (typeof content === 'string' && content.trim()) {
+          const cleaned = cleanMessageText(content);
+          if (cleaned) out.push({ kind: 'user', text: cleaned, ts });
+        } else if (Array.isArray(content)) {
+          const userTexts: string[] = [];
+          for (const item of content) {
+            if (!item || typeof item !== 'object') continue;
+            const it = item as Record<string, unknown>;
+            if (it.type === 'text' && typeof it.text === 'string' && it.text.trim()) {
+              const cleaned = cleanMessageText(it.text);
+              if (cleaned) userTexts.push(cleaned);
+            } else if (it.type === 'tool_result') {
+              const refId = String(it.tool_use_id ?? it.id ?? '');
+              const toolOutput = typeof it.content === 'string'
+                ? it.content.slice(0, 4000)
+                : JSON.stringify(it.content ?? {}, null, 2).slice(0, 4000);
+              out.push({ kind: 'tool-end', refId, toolOutput, ts });
+            }
+          }
+          if (userTexts.length) {
+            out.push({ kind: 'user', text: userTexts.join('\n').trim(), ts });
+          }
+        }
+      } else if (role === 'assistant' || type === 'assistant') {
+        if (typeof content === 'string' && content.trim()) {
+          const cleaned = cleanMessageText(content);
+          if (cleaned) out.push({ kind: 'text', text: cleaned, ts });
+        } else if (Array.isArray(content)) {
+          for (const item of content) {
+            if (!item || typeof item !== 'object') continue;
+            const it = item as Record<string, unknown>;
+            if (it.type === 'text' && typeof it.text === 'string' && it.text.trim()) {
+              const cleaned = cleanMessageText(it.text);
+              if (cleaned) out.push({ kind: 'text', text: cleaned, ts });
+            } else if (it.type === 'thinking' && typeof it.thinking === 'string') {
+              const think = cleanMessageText(it.thinking);
+              if (think) out.push({ kind: 'thinking', text: think, ts });
+            } else if (it.type === 'tool_use') {
+              const name = String(it.name ?? 'tool');
+              const refId = String(it.id ?? '');
+              const toolInput = JSON.stringify(it.input ?? {}, null, 2).slice(0, 4000);
+              out.push({ kind: 'tool-start', toolName: name, toolInput, refId, ts });
+            }
+          }
+        }
+      }
+    } catch {
+      // skip invalid line
+    }
+  }
+  return out.slice(-EVENT_CAP);
+}
+
+export function listClaudeHostChats(): AgentHostChat[] {
+  const root = join(homedir(), '.claude', 'projects');
+  if (!existsSync(root)) return [];
+  const out: AgentHostChat[] = [];
+  const seen = new Set<string>();
+  try {
+    for (const slug of readdirSync(root)) {
+      const projectDir = join(root, slug);
+      let isDir = false;
+      try {
+        isDir = statSync(projectDir).isDirectory();
+      } catch {
+        continue;
+      }
+      if (!isDir) continue;
+
+      let cwd = '';
+      if (slug.startsWith('-')) {
+        const candidate = '/' + slug.slice(1).replace(/-/g, '/');
+        if (existsSync(candidate)) {
+          cwd = candidate;
+        } else {
+          const parts = slug.slice(1).split('-');
+          let testPath = '/' + parts[0];
+          for (let i = 1; i < parts.length; i++) {
+            if (existsSync(`${testPath}/${parts[i]}`)) {
+              testPath = `${testPath}/${parts[i]}`;
+            } else if (existsSync(`${testPath}-${parts[i]}`)) {
+              testPath = `${testPath}-${parts[i]}`;
+            } else {
+              testPath = `${testPath}/${parts[i]}`;
+            }
+          }
+          if (existsSync(testPath)) cwd = testPath;
+        }
+      }
+
+      for (const name of readdirSync(projectDir)) {
+        if (!name.endsWith('.jsonl') || name.startsWith('journal') || name.startsWith('agent-')) continue;
+        const id = name.replace(/\.jsonl$/, '');
+        if (seen.has(id)) continue;
+        const file = join(projectDir, name);
+        let updatedAt = Date.now();
+        try {
+          updatedAt = statSync(file).mtimeMs;
+        } catch {
+          // keep now
+        }
+        let title = 'Claude Code chat';
+        try {
+          const head = readFileSync(file, 'utf8').split('\n').slice(0, 30).join('\n');
+          title = titleFromEvents(parseClaudeJsonl(head), title);
+        } catch {
+          // keep fallback
+        }
+        seen.add(id);
+        out.push({
+          agent: 'claude',
+          hostChatId: id,
+          title,
+          cwd,
+          updatedAt,
+          resumable: true,
+          source: 'Claude Code',
+        });
+      }
+    }
+  } catch {
+    return [];
+  }
+  return out
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, LIST_CAP);
+}
+
+export function loadClaudeHistory(hostChatId: string): HostChatDelta[] {
+  const root = join(homedir(), '.claude', 'projects');
+  if (!existsSync(root)) return [];
+  try {
+    for (const slug of readdirSync(root)) {
+      const file = join(root, slug, `${hostChatId}.jsonl`);
+      if (existsSync(file)) {
+        return parseClaudeJsonl(readFileSync(file, 'utf8'));
+      }
+    }
+  } catch {
+    return [];
+  }
+  return [];
+}
+
 export function loadHostChatHistory(agent: string, hostChatId: string, bin?: string | null): HostChatDelta[] {
   if (agent === 'opencode' && bin) return loadOpencodeHistory(bin, hostChatId);
   if (agent === 'cursor' && hostChatId.startsWith('ide:')) return loadCursorIdeHistory(hostChatId);
   if (agent === 'cursor') return loadCursorCliHistory(hostChatId);
   if (agent === 'antigravity') return loadAgyHistory(hostChatId);
+  if (agent === 'claude') return loadClaudeHistory(hostChatId);
   return [];
 }

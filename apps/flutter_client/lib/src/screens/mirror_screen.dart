@@ -408,7 +408,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     final sid = _session?.sessionId;
     return {
       ...?extra,
-      ?'sessionId': sid,
+      'sessionId': ?sid,
     };
   }
 

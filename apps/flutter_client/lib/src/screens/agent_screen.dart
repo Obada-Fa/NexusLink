@@ -16,6 +16,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
+import '../widgets/agent_activity_icon.dart';
+import '../widgets/code_block_builder.dart';
 import '../widgets/link_actions.dart';
 import '../widgets/not_connected_view.dart';
 import 'cwd_picker.dart';
@@ -53,8 +55,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   bool _loading = true;
   bool _busy = false;
   bool _sending = false;
+  int _menuTab = 0;
   String? _error;
-  void Function()? _unsub;
+  final _unsubs = <void Function()>[];
 
   RpcClient? get _client => ref.read(activeClientProvider);
 
@@ -87,7 +90,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       } catch (_) {
         // Older hosts have no listHostChats.
       }
-      _unsub = client.subscribe('agent-event', _onPush);
+      for (final u in _unsubs) {
+        u();
+      }
+      _unsubs.clear();
+      _unsubs.add(client.subscribe('agent-event', _onPush));
+      _unsubs.add(client.subscribe('agent-session-update', _onSessionUpdate));
+      _unsubs.add(client.subscribe('agent-session-deleted', _onSessionDelete));
       if (!mounted) return;
       setState(() {
         _agents = agentsRaw
@@ -112,18 +121,79 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     }
   }
 
+  void _onSessionUpdate(Map<String, dynamic> msg) {
+    final raw = msg['session'];
+    if (raw is! Map<String, dynamic>) return;
+    final updated = AgentSessionInfo.fromJson(raw);
+    if (!mounted) return;
+    setState(() {
+      final idx = _sessions
+          .indexWhere((s) => s.agentSessionId == updated.agentSessionId);
+      if (idx != -1) {
+        _sessions[idx] = updated;
+      } else {
+        _sessions.insert(0, updated);
+      }
+      if (_active?.agentSessionId == updated.agentSessionId) {
+        _active = updated;
+      }
+    });
+  }
+
+  void _onSessionDelete(Map<String, dynamic> msg) {
+    final id = msg['agentSessionId'];
+    if (id is! String) return;
+    if (!mounted) return;
+    setState(() {
+      _sessions.removeWhere((s) => s.agentSessionId == id);
+      if (_active?.agentSessionId == id) {
+        _active = null;
+        _events.clear();
+        _busy = false;
+      }
+    });
+  }
+
+  void _setBusy(bool busy) {
+    _busy = busy;
+    final session = _active;
+    if (session == null) return;
+    final updated = session.copyWith(busy: busy);
+    _active = updated;
+    final idx =
+        _sessions.indexWhere((s) => s.agentSessionId == session.agentSessionId);
+    if (idx != -1) _sessions[idx] = updated;
+  }
+
   void _onPush(Map<String, dynamic> msg) {
-    if (msg['agentSessionId'] != _active?.agentSessionId) return;
+    final sessionId = msg['agentSessionId'] as String?;
     final ev = msg['event'];
     if (ev is! Map<String, dynamic>) return;
     final parsed = AgentEvent.fromJson(ev);
+
+    if (sessionId != null &&
+        (parsed.kind == 'result' || parsed.kind == 'error')) {
+      final idx =
+          _sessions.indexWhere((s) => s.agentSessionId == sessionId);
+      if (idx != -1) {
+        _sessions[idx] = _sessions[idx].copyWith(busy: false);
+      }
+    }
+
+    if (sessionId != _active?.agentSessionId) {
+      if (sessionId != null &&
+          (parsed.kind == 'result' || parsed.kind == 'error')) {
+        setState(() {});
+      }
+      return;
+    }
     if (parsed.kind == 'user' && _pendingThumbs != null) {
       _thumbsBySeq[parsed.seq] = _pendingThumbs!;
       _pendingThumbs = null;
     }
     setState(() {
       _events.add(parsed);
-      if (parsed.kind == 'result' || parsed.kind == 'error') _busy = false;
+      if (parsed.kind == 'result' || parsed.kind == 'error') _setBusy(false);
     });
     _scrollToEnd();
     if (parsed.kind == 'permission-request') {
@@ -482,7 +552,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         }
       }
       setState(() {
-        _busy = true;
+        _setBusy(true);
         _pendingThumbs = photos.map((p) => p.bytes).toList();
         _photos.clear();
       });
@@ -512,7 +582,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       } catch (e) {
         if (!mounted) return;
         setState(() {
-          _busy = false;
+          _setBusy(false);
           _pendingThumbs = null;
           _events.add(AgentEvent(
             seq: _events.length + 1,
@@ -535,7 +605,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       await client.request(
           'agent.cancel', {'agentSessionId': session.agentSessionId});
     } catch (_) {}
-    if (mounted) setState(() => _busy = false);
+    if (mounted) setState(() => _setBusy(false));
   }
 
   void _localStatus(String text) {
@@ -787,15 +857,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     });
   }
 
-  IconData _iconFor(String id) {
-    return switch (id) {
-      'claude' => Icons.auto_awesome,
-      'cursor' => Icons.code,
-      'opencode' => Icons.terminal,
-      'antigravity' => Icons.rocket_launch_outlined,
-      _ => Icons.smart_toy_outlined,
-    };
-  }
+  IconData _iconFor(String id) => iconForAgent(id);
 
   String _modeLabel(String mode) => switch (mode) {
         'plan' => 'Plan',
@@ -1085,7 +1147,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
 
   @override
   void dispose() {
-    _unsub?.call();
+    for (final u in _unsubs) {
+      u();
+    }
+    _unsubs.clear();
     _input.dispose();
     _scroll.dispose();
     super.dispose();
@@ -1207,83 +1272,170 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                 : null,
             onTap: a.available ? () => _newChat(a) : null,
           ),
-        if (_sessions.isNotEmpty) ...[
-          const SizedBox(height: 16),
-          const Text('RECENT',
-              style: TextStyle(
-                  fontSize: 11, letterSpacing: 0.8, color: Color(0xFF666677))),
-          const SizedBox(height: 8),
-          for (final s in _sessions)
-            ListTile(
-              leading: Icon(
-                _iconFor(s.agent),
-                color: const Color(0xFF2A6AFF),
+        const SizedBox(height: 16),
+        _menuTabs(),
+        const SizedBox(height: 8),
+        if (_menuTab == 0) ...[
+          if (_sessions.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 24, horizontal: 16),
+              child: Center(
+                child: Text(
+                  'No recent chats yet.\nStart a new chat above.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Color(0xFF666677), fontSize: 13),
+                ),
               ),
-              title: Text(s.title),
-              subtitle:
-                  Text(s.cwd, maxLines: 1, overflow: TextOverflow.ellipsis),
-              trailing: PopupMenuButton<String>(
-                icon: const Icon(Icons.more_vert,
-                    size: 18, color: Colors.white38),
-                onSelected: (val) {
-                  if (val == 'rename') {
-                    _renameSessionDialog(s);
-                  } else if (val == 'delete') {
-                    _deleteSession(s);
-                  }
-                },
-                itemBuilder: (_) => [
-                  const PopupMenuItem(
-                    value: 'rename',
-                    child: Row(
-                      children: [
-                        Icon(Icons.edit_outlined, size: 16),
-                        SizedBox(width: 8),
-                        Text('Rename'),
-                      ],
+            )
+          else
+            for (final s in _sessions)
+              ListTile(
+                leading: AgentActivityIcon(
+                  agentId: s.agent,
+                  active: s.busy ||
+                      (_active?.agentSessionId == s.agentSessionId && _busy),
+                ),
+                title: Text(s.title),
+                subtitle:
+                    Text(s.cwd, maxLines: 1, overflow: TextOverflow.ellipsis),
+                trailing: PopupMenuButton<String>(
+                  icon: const Icon(Icons.more_vert,
+                      size: 18, color: Colors.white38),
+                  onSelected: (val) {
+                    if (val == 'rename') {
+                      _renameSessionDialog(s);
+                    } else if (val == 'delete') {
+                      _deleteSession(s);
+                    }
+                  },
+                  itemBuilder: (_) => [
+                    const PopupMenuItem(
+                      value: 'rename',
+                      child: Row(
+                        children: [
+                          Icon(Icons.edit_outlined, size: 16),
+                          SizedBox(width: 8),
+                          Text('Rename'),
+                        ],
+                      ),
                     ),
-                  ),
-                  const PopupMenuItem(
-                    value: 'delete',
-                    child: Row(
-                      children: [
-                        Icon(Icons.delete_outline,
-                            size: 16, color: Color(0xFFEE5555)),
-                        SizedBox(width: 8),
-                        Text('Delete',
-                            style: TextStyle(color: Color(0xFFEE5555))),
-                      ],
+                    const PopupMenuItem(
+                      value: 'delete',
+                      child: Row(
+                        children: [
+                          Icon(Icons.delete_outline,
+                              size: 16, color: Color(0xFFEE5555)),
+                          SizedBox(width: 8),
+                          Text('Delete',
+                              style: TextStyle(color: Color(0xFFEE5555))),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
+                onTap: () => _openSession(s),
+                onLongPress: () => _renameSessionDialog(s),
               ),
-              onTap: () => _openSession(s),
-              onLongPress: () => _renameSessionDialog(s),
-            ),
-        ],
-        if (_hostChats.isNotEmpty) ...[
-          const SizedBox(height: 16),
-          const Text('ON THIS PC',
-              style: TextStyle(
-                  fontSize: 11, letterSpacing: 0.8, color: Color(0xFF666677))),
-          const SizedBox(height: 8),
-          for (final c in _hostChats)
-            ListTile(
-              leading: Icon(_iconFor(c.agent)),
-              title: Text(c.title),
-              subtitle: Text(
-                [
-                  c.source,
-                  if (c.cwd.isNotEmpty) c.cwd,
-                  if (!c.resumable) 'view only',
-                ].join(' · '),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+        ] else ...[
+          if (_hostChats.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 24, horizontal: 16),
+              child: Center(
+                child: Text(
+                  'No PC conversations found.\nChats started on your PC with Antigravity, OpenCode, Claude, or Cursor will appear here.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Color(0xFF666677), fontSize: 13),
+                ),
               ),
-              onTap: () => _openHostChat(c),
-            ),
+            )
+          else
+            for (final c in _hostChats)
+              ListTile(
+                leading: Icon(_iconFor(c.agent)),
+                title: Text(c.title),
+                subtitle: Text(
+                  [
+                    c.source,
+                    if (c.cwd.isNotEmpty) c.cwd,
+                    if (!c.resumable) 'view only',
+                  ].join(' · '),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                onTap: () => _openHostChat(c),
+              ),
         ],
       ],
+    );
+  }
+
+  Widget _menuTabs() {
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0xFF151522),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFF22223A)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _tabButton(
+              label: _sessions.isNotEmpty ? 'Recent (${_sessions.length})' : 'Recent',
+              icon: Icons.history,
+              selected: _menuTab == 0,
+              onTap: () => setState(() => _menuTab = 0),
+            ),
+          ),
+          const SizedBox(width: 4),
+          Expanded(
+            child: _tabButton(
+              label: _hostChats.isNotEmpty ? 'PC (${_hostChats.length})' : 'PC',
+              icon: Icons.computer_outlined,
+              selected: _menuTab == 1,
+              onTap: () => setState(() => _menuTab = 1),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _tabButton({
+    required String label,
+    required IconData icon,
+    required bool selected,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xFF2A6AFF) : Colors.transparent,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              icon,
+              size: 15,
+              color: selected ? Colors.white : const Color(0xFF888899),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+                color: selected ? Colors.white : const Color(0xFF888899),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1298,14 +1450,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
             itemCount: display.length + (_busy ? 1 : 0),
             itemBuilder: (_, i) {
               if (i >= display.length) {
-                return const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-                  child: Text('Working…',
-                      style: TextStyle(
-                          color: Colors.white38,
-                          fontSize: 12,
-                          fontStyle: FontStyle.italic)),
-                );
+                return _workingRow();
               }
               final item = display[i];
               if (item.tools != null) return _toolGroup(item.tools!);
@@ -1315,6 +1460,28 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         ),
         _composer(),
       ],
+    );
+  }
+
+  Widget _workingRow() {
+    final agentId = _active?.agent ?? 'mock';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          AgentActivityIcon(agentId: agentId, active: true, size: 22),
+          const SizedBox(width: 10),
+          const Text(
+            'Working…',
+            style: TextStyle(
+              color: Colors.white38,
+              fontSize: 12,
+              fontStyle: FontStyle.italic,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1388,7 +1555,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                   MarkdownBody(
                     data: e.text ?? '',
                     inlineSyntaxes: [IpAutolinkSyntax()],
-                    builders: {'a': LinkActionBuilder()},
+                    builders: {
+                      'a': LinkActionBuilder(),
+                      'pre': CodeBlockBuilder(),
+                    },
                     styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
                         .copyWith(
                           p: const TextStyle(color: Colors.white, fontSize: 14),
@@ -1480,13 +1650,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
           initiallyExpanded: false,
           tilePadding: const EdgeInsets.symmetric(horizontal: 12),
           childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-          leading: Icon(
-            running ? Icons.hourglass_top : Icons.check_circle_outline,
-            size: 18,
-            color: running
-                ? const Color(0xFFF0C040)
-                : const Color(0xFF4ADE80),
-          ),
+          leading: running && _active != null
+              ? AgentActivityIcon(agentId: _active!.agent, active: true, size: 18)
+              : Icon(
+                  running ? Icons.hourglass_top : Icons.check_circle_outline,
+                  size: 18,
+                  color: running
+                      ? const Color(0xFFF0C040)
+                      : const Color(0xFF4ADE80),
+                ),
           title: Text(
             toolGroupTitle(tools),
             style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
@@ -1784,7 +1956,8 @@ class _CopyButtonState extends State<_CopyButton> {
 
   Future<void> _copy() async {
     if (widget.text.isEmpty) return;
-    await Clipboard.setData(ClipboardData(text: widget.text));
+    final textToCopy = cleanCopyMessage(widget.text);
+    await Clipboard.setData(ClipboardData(text: textToCopy));
     if (!mounted) return;
     setState(() => _copied = true);
     _timer?.cancel();

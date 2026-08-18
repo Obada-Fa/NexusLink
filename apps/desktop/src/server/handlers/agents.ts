@@ -23,7 +23,9 @@ import type {
 } from '@nexuslink/rpc-types';
 import {
   clipTitle,
+  getAgyChatTitle,
   listAgyHostChats,
+  listClaudeHostChats,
   listCursorCliHostChats,
   listCursorIdeHostChats,
   listOpencodeHostChats,
@@ -653,6 +655,23 @@ export function resolveAgentCwd(cwd?: string, opts?: { fallbackHome?: boolean })
   throw new Error(existsSync(path) ? `not a directory: ${path}` : `directory not found: ${path}`);
 }
 
+export function isDefaultSessionTitle(title: string | undefined, agentId?: string): boolean {
+  const current = (title || '').trim();
+  const def = agentId ? AGENT_DEFS.find((d) => d.id === agentId) : undefined;
+  return (
+    !current ||
+    current === 'Agent' ||
+    current === 'Host chat' ||
+    current === 'New chat' ||
+    current === (def?.name ?? '') ||
+    current === 'Antigravity' ||
+    current === 'OpenCode' ||
+    current === 'Cursor CLI' ||
+    current === 'Claude Code' ||
+    current === 'Demo Agent'
+  );
+}
+
 export function createAgentSession(
   agentId: string,
   cwd?: string,
@@ -682,6 +701,7 @@ export function createAgentSession(
   if (opts?.hostChatId) session.adapter.bindHostChat?.(opts.hostChatId);
   agentSessions.set(info.agentSessionId, session);
   saveAgentSessionsToDisk();
+  broadcast({ type: 'agent-session-update', session: { ...info } });
   return { ...info };
 }
 
@@ -715,6 +735,9 @@ export function listHostChats(agent?: string): AgentHostChat[] {
   }
   if (want('antigravity')) {
     out.push(...listAgyHostChats());
+  }
+  if (want('claude')) {
+    out.push(...listClaudeHostChats());
   }
   return out.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 80);
 }
@@ -795,24 +818,12 @@ export function promptAgent(
   if (!display) return { ok: false };
 
   // Auto-name the session if it still has the default/generic name
-  const currentTitle = (session.info.title || '').trim();
-  const def = AGENT_DEFS.find((d) => d.id === session.info.agent);
-  const isDefaultTitle =
-    !currentTitle ||
-    currentTitle === 'Agent' ||
-    currentTitle === 'Host chat' ||
-    currentTitle === (def?.name ?? '') ||
-    currentTitle === 'Antigravity' ||
-    currentTitle === 'OpenCode' ||
-    currentTitle === 'Cursor CLI' ||
-    currentTitle === 'Claude Code' ||
-    currentTitle === 'Demo Agent';
-
-  if (isDefaultTitle) {
+  if (isDefaultSessionTitle(session.info.title, session.info.agent)) {
     const newTitle = clipTitle(display);
     if (newTitle) {
       session.info.title = newTitle;
       saveAgentSessionsToDisk();
+      broadcast({ type: 'agent-session-update', session: { ...session.info } });
     }
   }
 
@@ -842,6 +853,7 @@ export function renameAgentSession(
   const cleaned = clipTitle(title) || session.info.title;
   session.info.title = cleaned;
   saveAgentSessionsToDisk();
+  broadcast({ type: 'agent-session-update', session: { ...session.info } });
   return { ok: true, title: cleaned };
 }
 
@@ -861,6 +873,7 @@ export function closeAgentSession(agentSessionId: string): { ok: boolean } {
   session.info.status = 'exited';
   agentSessions.delete(agentSessionId);
   saveAgentSessionsToDisk();
+  broadcast({ type: 'agent-session-deleted', agentSessionId });
   return { ok: true };
 }
 
@@ -953,7 +966,7 @@ export function finishCliTurn(opts: {
   exitCode: number | null;
   stderr: string;
 }): AgentDelta | null {
-  if (opts.sawResult) return null;
+  if (opts.sawResult || opts.exitCode === 0) return null;
   const err = opts.stderr.trim();
   if (err) return { kind: 'error', text: err };
   return {
@@ -1376,6 +1389,8 @@ function openUrlOnHost(url: string): void {
 class ClaudeAdapter implements AgentAdapter {
   private proc: Proc | null = null;
   private spawnKey = '';
+  private sawResult = false;
+  private streamedText = false;
 
   constructor(private session: AgentSession) {}
 
@@ -1408,14 +1423,21 @@ class ClaudeAdapter implements AgentAdapter {
     spawned.exited.then(async (code) => {
       if (this.proc !== spawned) return;
       const stderr = await stderrP.catch(() => '');
-      if (this.session.info.busy) {
-        setBusy(this.session, false);
-        emit(this.session, finishCliTurn({
-          sawResult: false,
-          exitCode: code,
-          stderr: stderr || 'Claude Code process exited',
-        })!);
+      if (!this.session.info.busy) return;
+      setBusy(this.session, false);
+      const isSuccess = (code === 0 && this.streamedText) || this.sawResult;
+      const fail = finishCliTurn({
+        sawResult: isSuccess,
+        exitCode: code,
+        stderr: isSuccess ? '' : (stderr || 'Claude Code process exited'),
+      });
+      if (!fail) {
+        if (!this.sawResult) {
+          emit(this.session, { kind: 'result', text: '' });
+        }
+        return;
       }
+      emit(this.session, fail);
       this.proc = null;
     }).catch(() => {});
     return this.proc;
@@ -1423,6 +1445,14 @@ class ClaudeAdapter implements AgentAdapter {
 
   private onEvent(msg: Record<string, unknown>): void {
     const s = this.session;
+    const sid = sessionIdFromEvent(msg);
+    if (sid) {
+      if (!this.session.info.hostChatId) {
+        this.session.info.hostChatId = sid;
+        saveAgentSessionsToDisk();
+        broadcast({ type: 'agent-session-update', session: { ...this.session.info } });
+      }
+    }
     const type = msg.type;
     if (type === 'assistant') {
       const message = msg.message as Record<string, unknown> | undefined;
@@ -1431,6 +1461,7 @@ class ClaudeAdapter implements AgentAdapter {
         for (const raw of content) {
           const part = raw as Record<string, unknown>;
           if (part.type === 'text' && typeof part.text === 'string' && part.text.trim()) {
+            this.streamedText = true;
             emit(s, { kind: 'text', text: part.text });
           } else if (part.type === 'thinking' && typeof part.thinking === 'string') {
             emit(s, { kind: 'thinking', text: part.thinking });
@@ -1461,11 +1492,12 @@ class ClaudeAdapter implements AgentAdapter {
         }
       }
     } else if (type === 'result') {
+      this.sawResult = true;
       setBusy(s, false);
-      emit(s, {
+      emit(s, withoutDuplicateResult({
         kind: 'result',
         text: typeof msg.result === 'string' ? msg.result : '',
-      });
+      }, this.streamedText));
     } else if (type === 'system' && msg.subtype === 'init') {
       emit(s, { kind: 'status', text: 'ready' });
     } else if (type === 'control_request' || msg.subtype === 'can_use_tool') {
@@ -1495,6 +1527,8 @@ class ClaudeAdapter implements AgentAdapter {
   }
 
   prompt(text: string, opts?: AdapterPromptOpts): void {
+    this.sawResult = false;
+    this.streamedText = false;
     const proc = this.ensureProc(opts);
     const line = JSON.stringify({
       type: 'user',
@@ -1602,12 +1636,18 @@ class CursorAdapter implements AgentAdapter {
       const errText = await stderr.catch(() => '');
       if (!this.session.info.busy) return;
       setBusy(this.session, false);
+      const isSuccess = code === 0 || this.streamedText || this.sawResult;
       const fail = finishCliTurn({
-        sawResult: this.sawResult,
+        sawResult: isSuccess,
         exitCode: code,
-        stderr: errText,
+        stderr: isSuccess ? '' : errText,
       });
-      if (!fail) return;
+      if (!fail) {
+        if (!this.sawResult) {
+          emit(this.session, { kind: 'result', text: '' });
+        }
+        return;
+      }
       if (isCliAuthError(fail.text ?? '')) {
         emit(this.session, {
           kind: 'error',
@@ -1708,7 +1748,14 @@ class CursorAdapter implements AgentAdapter {
 
   private onEvent(msg: Record<string, unknown>): void {
     const sid = sessionIdFromEvent(msg);
-    if (sid) this.chatId = sid;
+    if (sid) {
+      this.chatId = sid;
+      if (!this.session.info.hostChatId) {
+        this.session.info.hostChatId = sid;
+        saveAgentSessionsToDisk();
+        broadcast({ type: 'agent-session-update', session: { ...this.session.info } });
+      }
+    }
     const events = parseCursorStreamEvent(msg);
     for (const ev of events) {
       if (ev.kind === 'text' || ev.kind === 'text-delta') {
@@ -1752,6 +1799,7 @@ class OpenCodeAdapter implements AgentAdapter {
   private proc: Proc | null = null;
   private ocSession: string | null = null;
   private sawResult = false;
+  private streamedText = false;
 
   constructor(private session: AgentSession) {}
 
@@ -1762,6 +1810,7 @@ class OpenCodeAdapter implements AgentAdapter {
   prompt(text: string, opts?: AdapterPromptOpts): void {
     this.cancel();
     this.sawResult = false;
+    this.streamedText = false;
     const bin = resolveBin('opencode') ?? 'opencode';
     const argv = buildOpencodeArgv({
       bin,
@@ -1778,28 +1827,44 @@ class OpenCodeAdapter implements AgentAdapter {
     proc.exited.then(async (code) => {
       if (this.proc !== proc) return;
       const errText = await stderr.catch(() => '');
-      if (this.session.info.busy) {
-        setBusy(this.session, false);
-        const fail = finishCliTurn({
-          sawResult: this.sawResult,
-          exitCode: code,
-          stderr: errText,
-        });
-        if (fail) emit(this.session, fail);
+      if (!this.session.info.busy) return;
+      setBusy(this.session, false);
+      const isSuccess = code === 0 || this.streamedText || this.sawResult;
+      const fail = finishCliTurn({
+        sawResult: isSuccess,
+        exitCode: code,
+        stderr: isSuccess ? '' : errText,
+      });
+      if (!fail) {
+        if (!this.sawResult) {
+          emit(this.session, { kind: 'result', text: '' });
+        }
+        return;
       }
+      emit(this.session, fail);
     }).catch(() => {});
   }
 
   private onEvent(msg: Record<string, unknown>): void {
     const sid = sessionIdFromEvent(msg);
-    if (sid) this.ocSession = sid;
+    if (sid) {
+      this.ocSession = sid;
+      if (!this.session.info.hostChatId) {
+        this.session.info.hostChatId = sid;
+        saveAgentSessionsToDisk();
+        broadcast({ type: 'agent-session-update', session: { ...this.session.info } });
+      }
+    }
     const events = parseOpencodeStreamEvent(msg);
     for (const ev of events) {
+      if (ev.kind === 'text' || ev.kind === 'text-delta') {
+        this.streamedText = true;
+      }
       if (ev.kind === 'result' || ev.kind === 'error') {
         this.sawResult = true;
         setBusy(this.session, false);
       }
-      emit(this.session, ev);
+      emit(this.session, withoutDuplicateResult(ev, this.streamedText));
     }
   }
 
@@ -1890,9 +1955,27 @@ class AntigravityAdapter implements AgentAdapter {
     proc.exited.then(async (code) => {
       if (this.proc !== proc) return;
       const errText = await stderr.catch(() => '');
+      if (this.conversationId) {
+        let changed = false;
+        if (!this.session.info.hostChatId) {
+          this.session.info.hostChatId = this.conversationId;
+          changed = true;
+        }
+        if (isDefaultSessionTitle(this.session.info.title, this.session.info.agent)) {
+          const agyTitle = getAgyChatTitle(this.conversationId);
+          if (agyTitle) {
+            this.session.info.title = agyTitle;
+            changed = true;
+          }
+        }
+        if (changed) {
+          saveAgentSessionsToDisk();
+          broadcast({ type: 'agent-session-update', session: { ...this.session.info } });
+        }
+      }
       if (!this.session.info.busy) return;
       setBusy(this.session, false);
-      const isSuccess = (code === 0 && this.streamedText) || this.sawResult;
+      const isSuccess = code === 0 || this.streamedText || this.sawResult;
       const fail = finishCliTurn({
         sawResult: isSuccess,
         exitCode: code,
@@ -1912,7 +1995,25 @@ class AntigravityAdapter implements AgentAdapter {
 
   private onEvent(msg: Record<string, unknown>): void {
     const sid = sessionIdFromEvent(msg);
-    if (sid) this.conversationId = sid;
+    if (sid) {
+      this.conversationId = sid;
+      let changed = false;
+      if (!this.session.info.hostChatId) {
+        this.session.info.hostChatId = sid;
+        changed = true;
+      }
+      if (isDefaultSessionTitle(this.session.info.title, this.session.info.agent)) {
+        const agyTitle = getAgyChatTitle(sid);
+        if (agyTitle) {
+          this.session.info.title = agyTitle;
+          changed = true;
+        }
+      }
+      if (changed) {
+        saveAgentSessionsToDisk();
+        broadcast({ type: 'agent-session-update', session: { ...this.session.info } });
+      }
+    }
     const events = parseAgyStreamEvent(msg);
     for (const ev of events) {
       if (ev.kind === 'text' || ev.kind === 'text-delta') this.streamedText = true;

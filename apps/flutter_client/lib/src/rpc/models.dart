@@ -223,6 +223,7 @@ class AgentSessionInfo {
   final String title;
   final bool busy;
   final String status;
+  final String? hostChatId;
 
   AgentSessionInfo({
     required this.agentSessionId,
@@ -231,6 +232,7 @@ class AgentSessionInfo {
     required this.title,
     required this.busy,
     required this.status,
+    this.hostChatId,
   });
 
   factory AgentSessionInfo.fromJson(Map<String, dynamic> j) => AgentSessionInfo(
@@ -240,6 +242,7 @@ class AgentSessionInfo {
         title: (j['title'] as String?) ?? 'Agent',
         busy: j['busy'] as bool? ?? false,
         status: (j['status'] as String?) ?? 'running',
+        hostChatId: j['hostChatId'] as String?,
       );
 
   AgentSessionInfo copyWith({
@@ -249,6 +252,7 @@ class AgentSessionInfo {
     String? title,
     bool? busy,
     String? status,
+    String? hostChatId,
   }) =>
       AgentSessionInfo(
         agentSessionId: agentSessionId ?? this.agentSessionId,
@@ -257,6 +261,7 @@ class AgentSessionInfo {
         title: title ?? this.title,
         busy: busy ?? this.busy,
         status: status ?? this.status,
+        hostChatId: hostChatId ?? this.hostChatId,
       );
 }
 

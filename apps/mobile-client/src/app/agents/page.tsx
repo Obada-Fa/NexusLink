@@ -24,6 +24,7 @@ interface AgentSessionInfo {
   title: string;
   busy: boolean;
   status: string;
+  hostChatId?: string;
 }
 
 interface AgentHostChat {
@@ -132,6 +133,7 @@ export default function AgentsPage() {
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
   const [picking, setPicking] = useState<AgentInfo | null>(null);
+  const [menuTab, setMenuTab] = useState<'recent' | 'pc'>('recent');
   const [reconnecting, setReconnecting] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
   const unsubRef = useRef<(() => void) | null>(null);
@@ -175,22 +177,51 @@ export default function AgentsPage() {
         if (!cancelled) setError(e instanceof Error ? e.message : 'Could not list agents.');
       }
     })();
-    unsubRef.current = client.subscribe('agent-event', (msg: unknown) => {
-      const m = msg as { agentSessionId?: string; event?: AgentEvent };
-      if (!m.event || m.agentSessionId !== activeIdRef.current) return;
-      setEvents((prev) => [...prev, m.event!]);
-      if (m.event.kind === 'permission-request' && m.event.refId) {
-        const allow = window.confirm(m.event.text || `Allow ${m.event.toolName || 'this tool'}?`);
-        void client.request('agent.permission', {
-          agentSessionId: m.agentSessionId,
-          requestId: m.event.refId,
-          allow,
+    const unsubs: (() => void)[] = [];
+    unsubs.push(
+      client.subscribe('agent-event', (msg: unknown) => {
+        const m = msg as { agentSessionId?: string; event?: AgentEvent };
+        if (!m.event || m.agentSessionId !== activeIdRef.current) return;
+        setEvents((prev) => [...prev, m.event!]);
+        if (m.event.kind === 'permission-request' && m.event.refId) {
+          const allow = window.confirm(m.event.text || `Allow ${m.event.toolName || 'this tool'}?`);
+          void client.request('agent.permission', {
+            agentSessionId: m.agentSessionId,
+            requestId: m.event.refId,
+            allow,
+          });
+        }
+      }),
+    );
+    unsubs.push(
+      client.subscribe('agent-session-update', (msg: unknown) => {
+        const m = msg as { session?: AgentSessionInfo };
+        if (!m.session) return;
+        const updated = m.session;
+        setSessions((prev) => {
+          const idx = prev.findIndex((s) => s.agentSessionId === updated.agentSessionId);
+          if (idx !== -1) {
+            const next = [...prev];
+            next[idx] = updated;
+            return next;
+          }
+          return [updated, ...prev];
         });
-      }
-    });
+        setActive((prev) => (prev?.agentSessionId === updated.agentSessionId ? updated : prev));
+      }),
+    );
+    unsubs.push(
+      client.subscribe('agent-session-deleted', (msg: unknown) => {
+        const m = msg as { agentSessionId?: string };
+        if (!m.agentSessionId) return;
+        const id = m.agentSessionId;
+        setSessions((prev) => prev.filter((s) => s.agentSessionId !== id));
+        setActive((prev) => (prev?.agentSessionId === id ? null : prev));
+      }),
+    );
     return () => {
       cancelled = true;
-      unsubRef.current?.();
+      for (const u of unsubs) u();
     };
   }, [status, client]);
 
@@ -351,46 +382,81 @@ export default function AgentsPage() {
               {a.available && <span style={styles.selectBtn}>Select</span>}
             </button>
           ))}
-          {sessions.length > 0 && <h2 style={styles.section}>Recent</h2>}
-          {sessions.map((s) => (
-            <div
-              key={s.agentSessionId}
+          <div style={styles.tabContainer}>
+            <button
+              type="button"
+              onClick={() => setMenuTab('recent')}
               style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 8,
-                marginBottom: 8,
+                ...styles.tabButton,
+                ...(menuTab === 'recent' ? styles.tabButtonActive : {}),
               }}
             >
-              <button
-                type="button"
-                onClick={() => openSession(s)}
-                style={{ ...styles.row, marginBottom: 0, flex: 1 }}
-              >
-                <strong>{s.title}</strong>
-                <span style={styles.muted}>{s.cwd}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => void renameSession(s)}
-                title="Rename chat"
-                style={styles.barBtn}
-              >
-                ✎
-              </button>
-            </div>
-          ))}
-          {hostChats.length > 0 && <h2 style={styles.section}>On this PC</h2>}
-          {hostChats.map((c) => (
-            <button key={`${c.agent}-${c.hostChatId}`} onClick={() => openHostChat(c)} style={styles.row}>
-              <strong>{c.title}</strong>
-              <span style={styles.muted}>
-                {[c.source, c.cwd, !c.resumable ? 'view only' : '']
-                  .filter(Boolean)
-                  .join(' · ')}
-              </span>
+              Recent {sessions.length > 0 ? `(${sessions.length})` : ''}
             </button>
-          ))}
+            <button
+              type="button"
+              onClick={() => setMenuTab('pc')}
+              style={{
+                ...styles.tabButton,
+                ...(menuTab === 'pc' ? styles.tabButtonActive : {}),
+              }}
+            >
+              PC {hostChats.length > 0 ? `(${hostChats.length})` : ''}
+            </button>
+          </div>
+          {menuTab === 'recent' ? (
+            sessions.length === 0 ? (
+              <p style={styles.emptyTabMessage}>No recent chats yet. Start a new chat above.</p>
+            ) : (
+              sessions.map((s) => (
+                <div
+                  key={s.agentSessionId}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    marginBottom: 8,
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => openSession(s)}
+                    style={{ ...styles.row, marginBottom: 0, flex: 1 }}
+                  >
+                    <strong>{s.title}</strong>
+                    <span style={styles.muted}>{s.cwd}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void renameSession(s)}
+                    title="Rename chat"
+                    style={styles.barBtn}
+                  >
+                    ✎
+                  </button>
+                </div>
+              ))
+            )
+          ) : (
+            (() => {
+              const visible = hostChats.filter(
+                (c) => !sessions.some((s) => s.hostChatId && s.hostChatId === c.hostChatId),
+              );
+              if (visible.length === 0) {
+                return <p style={styles.emptyTabMessage}>No PC conversations found.</p>;
+              }
+              return visible.map((c) => (
+                <button key={`${c.agent}-${c.hostChatId}`} onClick={() => openHostChat(c)} style={styles.row}>
+                  <strong>{c.title}</strong>
+                  <span style={styles.muted}>
+                    {[c.source, c.cwd, !c.resumable ? 'view only' : '']
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </span>
+                </button>
+              ));
+            })()
+          )}
         </div>
       ) : (
         <>
@@ -642,7 +708,12 @@ function Bubble({ e }: { e: AgentEvent }) {
 
   const handleCopy = () => {
     if (!e.text) return;
-    void navigator.clipboard.writeText(e.text);
+    let textToCopy = e.text;
+    const fenceMatch = textToCopy.trim().match(/^```[a-zA-Z0-9_\-\.]*\r?\n([\s\S]*?)\r?\n?```$/);
+    if (fenceMatch && fenceMatch[1] !== undefined) {
+      textToCopy = fenceMatch[1].trim();
+    }
+    void navigator.clipboard.writeText(textToCopy);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -745,6 +816,38 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
   },
   list: { padding: 16, overflowY: 'auto' },
+  tabContainer: {
+    display: 'flex',
+    gap: 4,
+    background: '#151522',
+    border: '1px solid #22223a',
+    borderRadius: 10,
+    padding: 3,
+    margin: '16px 0 12px',
+  },
+  tabButton: {
+    flex: 1,
+    padding: '8px 12px',
+    background: 'transparent',
+    border: 'none',
+    borderRadius: 8,
+    color: '#888899',
+    fontSize: 13,
+    fontWeight: 500,
+    cursor: 'pointer',
+    textAlign: 'center',
+  },
+  tabButtonActive: {
+    background: '#2a6aff',
+    color: '#ffffff',
+    fontWeight: 600,
+  },
+  emptyTabMessage: {
+    textAlign: 'center',
+    color: '#666677',
+    fontSize: 13,
+    margin: '24px 0',
+  },
   section: {
     fontSize: 11,
     textTransform: 'uppercase',
