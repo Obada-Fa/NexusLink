@@ -93,6 +93,49 @@ void main() {
     });
   });
 
+  group('agent display grouping', () {
+    AgentEvent ev(int seq, String kind,
+            {String? name, String? ref, String? input, String? output}) =>
+        AgentEvent(
+          seq: seq,
+          ts: seq,
+          kind: kind,
+          toolName: name,
+          toolInput: input,
+          toolOutput: output,
+          refId: ref,
+        );
+
+    test('merges start/end and groups consecutive tools', () {
+      final items = groupAgentDisplay([
+        ev(1, 'user'),
+        ev(2, 'tool-start', name: 'edit', ref: 'a', input: 'main.dart'),
+        ev(3, 'tool-end', name: 'edit', ref: 'a', output: 'ok'),
+        ev(4, 'tool-start', name: 'shell', ref: 'b'),
+        ev(5, 'tool-end', name: 'shell', ref: 'b', output: 'failed'),
+        ev(6, 'text'),
+      ]);
+      expect(items.length, 3);
+      expect(items[0].event?.kind, 'user');
+      expect(items[1].tools?.length, 2);
+      expect(items[1].tools?.map((e) => e.kind).toList(),
+          ['tool-end', 'tool-end']);
+      expect(toolGroupTitle(items[1].tools!), '2 steps');
+      expect(toolGroupSummary(items[1].tools!), 'edit · shell');
+      expect(items[2].event?.kind, 'text');
+    });
+
+    test('keeps an in-flight tool in the same group', () {
+      final items = groupAgentDisplay([
+        ev(1, 'tool-end', name: 'edit', ref: 'a'),
+        ev(2, 'tool-start', name: 'shell', ref: 'b'),
+      ]);
+      expect(items.length, 1);
+      expect(toolGroupRunning(items[0].tools!), isTrue);
+      expect(toolGroupTitle(items[0].tools!), 'Working… 2 steps');
+    });
+  });
+
   group('model families', () {
     test('strips thinking suffixes and collapses catalogs', () {
       expect(modelFamilyId('claude-opus-5-thinking-high'), 'claude-opus-5');
