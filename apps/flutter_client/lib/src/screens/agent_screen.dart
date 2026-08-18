@@ -87,15 +87,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   /// Socket events are dropped while the phone is backgrounded, so pull a
   /// fresh host snapshot when the user comes back — same as reopening the chat.
-  Future<void> _onForeground() async {
+  Future<void> _onForeground({bool syncTranscript = true}) async {
     await ref.read(connectionProvider.notifier).ensureConnected();
     if (!mounted) return;
     final client = _client;
     if (client == null || client.status != RpcStatus.connected) return;
     if (!identical(client, _boundClient)) {
       await _load();
+      syncTranscript = true;
     }
-    await _refreshSnapshot();
+    await _refreshSnapshot(syncTranscript: syncTranscript);
   }
 
   Future<void> _load() async {
@@ -163,11 +164,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
   }
 
-  Future<void> _refreshSnapshot() async {
+  Future<void> _refreshSnapshot({bool syncTranscript = true}) async {
     final client = _client;
     if (client == null || client.status != RpcStatus.connected) return;
     final gen = ++_syncGen;
     final activeId = _active?.agentSessionId;
+    final shouldSyncTranscript = syncTranscript && activeId != null;
     try {
       final sessionsRaw =
           await client.request('agent.listSessions') as List<dynamic>;
@@ -180,7 +182,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         );
       } catch (_) {}
       List<AgentEvent> history = const [];
-      if (activeId != null) {
+      if (shouldSyncTranscript) {
         final raw = await client.request(
           'agent.history',
           {'agentSessionId': activeId},
@@ -215,21 +217,29 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           if (match != null) {
             _active = match;
             _busy = match.busy;
-            if (!match.busy) {
+          }
+          if (shouldSyncTranscript) {
+            if (match != null && !match.busy) {
               final settled = closeOpenTools(_events,
                   output: 'Interrupted — host restarted.');
+              if (settled.length != _events.length) {
+                _events
+                  ..clear()
+                  ..addAll(settled);
+              }
+            }
+            final merged = mergeAgentHistory(history, _events);
+            // While a turn is in flight, live pushes are authoritative — never
+            // shrink the transcript on a reconnect/resync race.
+            if (!_busy || merged.length >= _events.length) {
               _events
                 ..clear()
-                ..addAll(settled);
+                ..addAll(merged);
             }
           }
-          final merged = mergeAgentHistory(history, _events);
-          _events
-            ..clear()
-            ..addAll(merged);
         }
       });
-      if (activeId != null) _scrollToEnd();
+      if (shouldSyncTranscript) _scrollToEnd();
       unawaited(_refreshGitTree());
     } catch (_) {
       // Stay on the last known transcript; the next resume will try again.
@@ -258,9 +268,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           _busy = false;
           final settled = closeOpenTools(_events,
               output: 'Interrupted — host is no longer running this turn.');
-          _events
-            ..clear()
-            ..addAll(settled);
+          if (settled.length != _events.length) {
+            _events
+              ..clear()
+              ..addAll(settled);
+          }
         }
       }
     });
@@ -1550,7 +1562,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   Widget build(BuildContext context) {
     ref.listen<RpcStatus>(connectionStatusProvider, (prev, next) {
       if (next == RpcStatus.connected && prev != RpcStatus.connected) {
-        unawaited(_onForeground());
+        // Foreground resume always resyncs (events were missed). In-app socket
+        // blips while chatting keep the live transcript — resync only when idle.
+        unawaited(_onForeground(syncTranscript: !_busy));
       }
     });
     return PopScope(

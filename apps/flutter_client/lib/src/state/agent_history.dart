@@ -1,15 +1,21 @@
 import '../rpc/models.dart';
 
-/// Replace the on-screen transcript with a host snapshot, keeping any live
-/// events that arrived after the snapshot was taken (higher `seq`).
+/// Replace the on-screen transcript with a host snapshot, unioned with any live
+/// events the phone already has. Uses seq as the key so gaps in either list do
+/// not drop messages (the old maxSeq filter could erase in-flight replies).
 List<AgentEvent> mergeAgentHistory(
   List<AgentEvent> history,
   List<AgentEvent> live,
 ) {
   if (history.isEmpty) return List<AgentEvent>.from(live);
-  var maxSeq = -1;
+  if (live.isEmpty) return List<AgentEvent>.from(history);
+
+  final bySeq = <int, AgentEvent>{};
   for (final e in history) {
-    if (e.seq > maxSeq) maxSeq = e.seq;
+    bySeq[e.seq] = e;
   }
-  return [...history, ...live.where((e) => e.seq > maxSeq)];
+  for (final e in live) {
+    bySeq.putIfAbsent(e.seq, () => e);
+  }
+  return bySeq.values.toList()..sort((a, b) => a.seq.compareTo(b.seq));
 }
