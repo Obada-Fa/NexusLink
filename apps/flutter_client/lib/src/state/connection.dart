@@ -52,6 +52,7 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
 
   /// Connect to a host ws URL. Derives the matching http base for file transfer.
   Future<void> connect(String wsUrl) async {
+    wsUrl = normalizeHostWsUrl(wsUrl);
     _teardown();
     final client = RpcClient(wsUrl);
     final sub = client.statusStream.listen((s) {

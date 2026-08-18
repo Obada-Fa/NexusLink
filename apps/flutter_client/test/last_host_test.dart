@@ -31,4 +31,24 @@ void main() {
     expect(lastHostLabel('ws://192.168.1.10:45678/rpc'), '192.168.1.10:45678');
     expect(lastHostLabel('not-a-url'), 'not-a-url');
   });
+
+  test('normalizeHostWsUrl accepts QR HTTP URLs and bare host:port', () {
+    expect(
+      normalizeHostWsUrl('http://100.108.139.27:45678'),
+      'ws://100.108.139.27:45678/rpc',
+    );
+    expect(
+      normalizeHostWsUrl('https://100.108.139.27:45678/'),
+      'wss://100.108.139.27:45678/rpc',
+    );
+    expect(
+      normalizeHostWsUrl('100.108.139.27:45678'),
+      'ws://100.108.139.27:45678/rpc',
+    );
+    expect(
+      normalizeHostWsUrl('ws://192.168.1.10:45678/rpc'),
+      'ws://192.168.1.10:45678/rpc',
+    );
+    expect(normalizeHostWsUrl('  '), '');
+  });
 }

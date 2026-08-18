@@ -501,6 +501,7 @@ export function buildOpencodeArgv(opts: {
 
 export function buildAgyArgv(opts: {
   bin: string;
+  cwd?: string;
   conversationId?: string | null;
   text: string;
   model?: string;
@@ -515,6 +516,7 @@ export function buildAgyArgv(opts: {
     '--dangerously-skip-permissions',
     '--print-timeout', '15m',
   ];
+  if (opts.cwd) argv.push('--add-dir', opts.cwd);
   if (opts.mode === 'plan') argv.push('--mode', 'plan');
   const resolved = pickModelVariant(opts.model, opts.thinking, opts.catalog ?? []);
   if (resolved && resolved !== 'default') argv.push('--model', resolved);
@@ -757,12 +759,18 @@ export function openHostChat(params: {
   if (existing) {
     existing.info.createdAt = Date.now();
     existing.info.status = 'running';
+    if (params.cwd?.trim()) {
+      existing.info.cwd = resolveAgentCwd(params.cwd);
+    }
     saveAgentSessionsToDisk();
+    broadcast({ type: 'agent-session-update', session: { ...existing.info } });
     return { ...existing.info };
   }
 
   const viewOnly = hostChatId.startsWith('ide:');
-  const cwd = resolveAgentCwd(params.cwd, { fallbackHome: true });
+  const cwd = params.cwd?.trim()
+    ? resolveAgentCwd(params.cwd)
+    : resolveAgentCwd(params.cwd, { fallbackHome: true });
   const title = params.title || 'Host chat';
   const info = createAgentSession(agent, cwd, title, { hostChatId });
   const session = agentSessions.get(info.agentSessionId);
@@ -855,6 +863,19 @@ export function renameAgentSession(
   saveAgentSessionsToDisk();
   broadcast({ type: 'agent-session-update', session: { ...session.info } });
   return { ok: true, title: cleaned };
+}
+
+export function setAgentSessionCwd(
+  agentSessionId: string,
+  cwd: string,
+): AgentSessionInfo {
+  loadAgentSessionsFromDisk();
+  const session = agentSessions.get(agentSessionId);
+  if (!session) throw new Error('session not found');
+  session.info.cwd = resolveAgentCwd(cwd);
+  saveAgentSessionsToDisk();
+  broadcast({ type: 'agent-session-update', session: { ...session.info } });
+  return { ...session.info };
 }
 
 export function cancelAgent(agentSessionId: string): { ok: boolean } {
@@ -1937,6 +1958,7 @@ class AntigravityAdapter implements AgentAdapter {
     const bin = resolveBin('agy') ?? 'agy';
     const argv = buildAgyArgv({
       bin,
+      cwd: this.session.info.cwd,
       conversationId: this.conversationId,
       text,
       model: opts?.model,
