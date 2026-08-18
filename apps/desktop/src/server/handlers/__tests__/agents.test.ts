@@ -12,6 +12,7 @@ import {
   closeAgentSession,
   resolveAgentPermission,
   openHostChat,
+  setAgentSessionCwd,
   resolveAgentCwd,
   setAgentBroadcast,
   finishCliTurn,
@@ -121,6 +122,26 @@ describe('agent gateway', () => {
     const history = agentHistory(info.agentSessionId);
     expect(history.some((e) => e.kind === 'status')).toBe(true);
     expect(openHostChat({ agent: 'mock', hostChatId: 'host-1' }).agentSessionId).toBe(info.agentSessionId);
+    closeAgentSession(info.agentSessionId);
+  });
+
+  test('openHostChat and setAgentSessionCwd keep the folder the user picked', () => {
+    const info = openHostChat({
+      agent: 'mock',
+      hostChatId: 'host-cwd',
+      cwd: '/tmp',
+      title: 'Project chat',
+    });
+    expect(info.cwd).toBe('/tmp');
+    const moved = openHostChat({
+      agent: 'mock',
+      hostChatId: 'host-cwd',
+      cwd: homedir(),
+    });
+    expect(moved.agentSessionId).toBe(info.agentSessionId);
+    expect(moved.cwd).toBe(homedir());
+    const again = setAgentSessionCwd(info.agentSessionId, '/tmp');
+    expect(again.cwd).toBe('/tmp');
     closeAgentSession(info.agentSessionId);
   });
 
@@ -244,6 +265,7 @@ describe('composer flags and attachments', () => {
 
     const agy = buildAgyArgv({
       bin: 'agy',
+      cwd: '/tmp/proj',
       text: 'plan this',
       mode: 'plan',
       thinking: 'low',
@@ -251,6 +273,8 @@ describe('composer flags and attachments', () => {
     expect(agy).toContain('--mode');
     expect(agy).toContain('--effort');
     expect(agy).toContain('low');
+    expect(agy).toContain('--add-dir');
+    expect(agy).toContain('/tmp/proj');
 
     const cursorResolved = buildCursorArgv({
       bin: 'cursor-agent',

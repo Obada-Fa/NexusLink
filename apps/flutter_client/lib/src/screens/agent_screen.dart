@@ -337,13 +337,18 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   Future<void> _openHostChat(AgentHostChat chat) async {
     final client = _client;
     if (client == null) return;
+    var cwd = chat.cwd.trim();
+    if (cwd.isEmpty) {
+      cwd = (await _pickProject())?.trim() ?? '';
+      if (cwd.isEmpty) return;
+    }
     try {
       final created = await client.request(
         'agent.openHostChat',
         {
           'agent': chat.agent,
           'hostChatId': chat.hostChatId,
-          'cwd': chat.cwd,
+          'cwd': cwd,
           'title': chat.title,
         },
         const Duration(seconds: 25),
@@ -761,6 +766,34 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       }
     }
     return false;
+  }
+
+  Future<void> _changeSessionCwd(AgentSessionInfo s) async {
+    final client = _client;
+    if (client == null) return;
+    final cwd = await _pickProject();
+    if (cwd == null || cwd.trim().isEmpty) return;
+    try {
+      final raw = await client.request('agent.setSessionCwd', {
+        'agentSessionId': s.agentSessionId,
+        'cwd': cwd,
+      }) as Map<String, dynamic>;
+      final updated = AgentSessionInfo.fromJson(raw);
+      if (!mounted) return;
+      setState(() {
+        final idx =
+            _sessions.indexWhere((x) => x.agentSessionId == updated.agentSessionId);
+        if (idx != -1) _sessions[idx] = updated;
+        if (_active?.agentSessionId == updated.agentSessionId) {
+          _active = updated;
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString())),
+      );
+    }
   }
 
   Future<void> _deleteSession(AgentSessionInfo s) async {
@@ -1202,6 +1235,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
           actions: [
             if (_active != null)
               IconButton(
+                tooltip: 'Change folder',
+                icon: const Icon(Icons.folder_open),
+                onPressed: () => _changeSessionCwd(_active!),
+              ),
+            if (_active != null)
+              IconButton(
                 tooltip: 'Rename chat',
                 icon: const Icon(Icons.edit_outlined),
                 onPressed: () => _renameSessionDialog(_active!),
@@ -1304,6 +1343,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                   onSelected: (val) {
                     if (val == 'rename') {
                       _renameSessionDialog(s);
+                    } else if (val == 'folder') {
+                      _changeSessionCwd(s);
                     } else if (val == 'delete') {
                       _deleteSession(s);
                     }
@@ -1316,6 +1357,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                           Icon(Icons.edit_outlined, size: 16),
                           SizedBox(width: 8),
                           Text('Rename'),
+                        ],
+                      ),
+                    ),
+                    const PopupMenuItem(
+                      value: 'folder',
+                      child: Row(
+                        children: [
+                          Icon(Icons.folder_open, size: 16),
+                          SizedBox(width: 8),
+                          Text('Change folder'),
                         ],
                       ),
                     ),

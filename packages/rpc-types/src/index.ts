@@ -42,6 +42,7 @@ export type RpcMethod =
   | 'agent.list'
   | 'agent.createSession'
   | 'agent.renameSession'
+  | 'agent.setSessionCwd'
   | 'agent.listSessions'
   | 'agent.listHostChats'
   | 'agent.openHostChat'
@@ -160,6 +161,8 @@ export type Params<M extends RpcMethod> =
     ? { agent: string; cwd?: string; title?: string }
     : M extends 'agent.renameSession'
     ? { agentSessionId: string; title: string }
+    : M extends 'agent.setSessionCwd'
+    ? { agentSessionId: string; cwd: string }
     : M extends 'agent.listSessions'
     ? {}
     : M extends 'agent.listHostChats'
@@ -292,6 +295,8 @@ export type Result<M extends RpcMethod> =
     ? AgentSessionInfo
     : M extends 'agent.renameSession'
     ? { ok: boolean; title: string }
+    : M extends 'agent.setSessionCwd'
+    ? AgentSessionInfo
     : M extends 'agent.listSessions'
     ? AgentSessionInfo[]
     : M extends 'agent.listHostChats'

@@ -18,7 +18,7 @@ import {
 import { setSend as setWebrtcSend, startWebrtc, signalWebrtc, stopWebrtc, stopWebrtcForSocket } from './handlers/webrtc';
 import { getClipboard, setClipboard } from './handlers/clipboard';
 import {
-  listAgents, createAgentSession, renameAgentSession, listAgentSessions, listHostChats, openHostChat, promptAgent,
+  listAgents, createAgentSession, renameAgentSession, setAgentSessionCwd, listAgentSessions, listHostChats, openHostChat, promptAgent,
   cancelAgent, closeAgentSession, agentHistory, resolveAgentPermission, setAgentBroadcast,
   listAgentModels,
 } from './handlers/agents';
@@ -276,6 +276,12 @@ export async function startRpcServer(port = 45678, hostname?: string) {
           (params.title as string) ?? '',
         );
         break;
+      case 'agent.setSessionCwd':
+        result = setAgentSessionCwd(
+          params.agentSessionId as string,
+          (params.cwd as string) ?? '',
+        );
+        break;
       case 'agent.listSessions':
         result = listAgentSessions();
         break;
@@ -286,7 +292,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         result = openHostChat({
           agent: params.agent as string,
           hostChatId: params.hostChatId as string,
-          cwd: typeof params.cwd === 'string' ? params.cwd : undefined,
+          cwd: typeof params.cwd === 'string' && params.cwd.trim() ? params.cwd : undefined,
           title: typeof params.title === 'string' ? params.title : undefined,
         });
         break;

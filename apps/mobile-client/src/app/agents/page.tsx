@@ -37,6 +37,11 @@ interface AgentHostChat {
   source: string;
 }
 
+type Picking =
+  | { kind: 'new'; agent: AgentInfo }
+  | { kind: 'host'; chat: AgentHostChat }
+  | { kind: 'folder'; session: AgentSessionInfo };
+
 interface AgentEvent {
   seq: number;
   ts: number;
@@ -132,7 +137,7 @@ export default function AgentsPage() {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
-  const [picking, setPicking] = useState<AgentInfo | null>(null);
+  const [picking, setPicking] = useState<Picking | null>(null);
   const [menuTab, setMenuTab] = useState<'recent' | 'pc'>('recent');
   const [reconnecting, setReconnecting] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -230,25 +235,8 @@ export default function AgentsPage() {
   }, [events.length]);
 
   const newChat = useCallback((agent: AgentInfo) => {
-    setPicking(agent);
+    setPicking({ kind: 'new', agent });
   }, []);
-
-  const createWithCwd = useCallback(
-    async (cwd: string) => {
-      const agent = picking;
-      if (!client || !agent) return;
-      setPicking(null);
-      const created = (await client.request('agent.createSession', {
-        agent: agent.id,
-        title: agent.name,
-        cwd,
-      })) as AgentSessionInfo;
-      setSessions((s) => [created, ...s]);
-      setActive(created);
-      setEvents([]);
-    },
-    [client, picking],
-  );
 
   const openSession = useCallback(
     async (s: AgentSessionInfo) => {
@@ -263,19 +251,65 @@ export default function AgentsPage() {
     [client],
   );
 
-  const openHostChat = useCallback(
-    async (chat: AgentHostChat) => {
+  const openHostChatWithCwd = useCallback(
+    async (chat: AgentHostChat, cwd: string) => {
       if (!client) return;
       const created = (await client.request('agent.openHostChat', {
         agent: chat.agent,
         hostChatId: chat.hostChatId,
-        cwd: chat.cwd,
+        cwd,
         title: chat.title,
       })) as AgentSessionInfo;
       setSessions((prev) => [created, ...prev.filter((x) => x.agentSessionId !== created.agentSessionId)]);
       await openSession(created);
     },
     [client, openSession],
+  );
+
+  const applyPickedCwd = useCallback(
+    async (cwd: string) => {
+      const current = picking;
+      if (!client || !current) return;
+      setPicking(null);
+      if (current.kind === 'new') {
+        const created = (await client.request('agent.createSession', {
+          agent: current.agent.id,
+          title: current.agent.name,
+          cwd,
+        })) as AgentSessionInfo;
+        setSessions((s) => [created, ...s]);
+        setActive(created);
+        setEvents([]);
+        return;
+      }
+      if (current.kind === 'host') {
+        await openHostChatWithCwd(current.chat, cwd);
+        return;
+      }
+      const updated = (await client.request('agent.setSessionCwd', {
+        agentSessionId: current.session.agentSessionId,
+        cwd,
+      })) as AgentSessionInfo;
+      setSessions((prev) =>
+        prev.map((s) => (s.agentSessionId === updated.agentSessionId ? updated : s)),
+      );
+      setActive((prev) =>
+        prev?.agentSessionId === updated.agentSessionId ? updated : prev,
+      );
+    },
+    [client, picking, openHostChatWithCwd],
+  );
+
+  const openHostChat = useCallback(
+    async (chat: AgentHostChat) => {
+      const cwd = chat.cwd.trim();
+      if (!cwd) {
+        setPicking({ kind: 'host', chat });
+        return;
+      }
+      await openHostChatWithCwd(chat, cwd);
+    },
+    [openHostChatWithCwd],
   );
 
   const renameSession = useCallback(
@@ -428,6 +462,14 @@ export default function AgentsPage() {
                   </button>
                   <button
                     type="button"
+                    onClick={() => setPicking({ kind: 'folder', session: s })}
+                    title="Change folder"
+                    style={styles.barBtn}
+                  >
+                    📁
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => void renameSession(s)}
                     title="Rename chat"
                     style={styles.barBtn}
@@ -489,7 +531,7 @@ export default function AgentsPage() {
         <CwdPicker
           client={client}
           onCancel={() => setPicking(null)}
-          onPick={(cwd) => void createWithCwd(cwd)}
+          onPick={(cwd) => void applyPickedCwd(cwd)}
         />
       )}
     </div>
