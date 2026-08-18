@@ -115,7 +115,7 @@ class _AgentActivityIconState extends State<AgentActivityIcon>
 
     return AnimatedBuilder(
       animation: _controller,
-      builder: (_, __) {
+      builder: (context, _) {
         final t = _controller.value * 2 * math.pi;
         final scale = 1.0 + 0.14 * math.sin(t);
         final angle = 0.12 * math.sin(t);

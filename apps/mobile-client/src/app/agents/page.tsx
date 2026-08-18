@@ -80,6 +80,96 @@ interface DirEntry {
   isDirectory: boolean;
 }
 
+
+function getAgentThemeBackground(agentId?: string): string {
+  switch (agentId) {
+    case 'cursor': return '#101014';
+    case 'antigravity': return '#2d1b4e';
+    case 'claude': return '#3d2b1f';
+    case 'opencode': return '#1c3330';
+    default: return '#151522';
+  }
+}
+
+function AgentIcon({ agentId, name, size = 32 }: { agentId: string; name: string; size?: number }) {
+  let outlinePath = null;
+  switch (agentId) {
+    case 'claude':
+      outlinePath = (
+        <path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4L12 2z" />
+      );
+      break;
+    case 'cursor':
+      outlinePath = (
+        <>
+          <polyline points="16 18 22 12 16 6" />
+          <polyline points="8 6 2 12 8 18" />
+        </>
+      );
+      break;
+    case 'opencode':
+      outlinePath = (
+        <>
+          <polyline points="4 17 10 11 4 5" />
+          <line x1="12" x2="20" y1="19" y2="19" />
+        </>
+      );
+      break;
+    case 'antigravity':
+      outlinePath = (
+        <>
+          <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z" />
+          <path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z" />
+          <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0" />
+          <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" />
+        </>
+      );
+      break;
+  }
+
+  if (outlinePath) {
+    return (
+      <div style={{ width: size, height: size, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+        <svg
+          width={size * 0.75}
+          height={size * 0.75}
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{ opacity: 0.8 }}
+        >
+          {outlinePath}
+        </svg>
+      </div>
+    );
+  }
+
+  const letter = (name || '?').trim().charAt(0).toUpperCase();
+  const hue = (name.charCodeAt(0) * 47) % 360;
+  return (
+    <span
+      style={{
+        width: size,
+        height: size,
+        borderRadius: 8,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: size * 0.45,
+        fontWeight: 700,
+        color: '#fff',
+        background: `linear-gradient(135deg, hsl(${hue},45%,38%), hsl(${(hue + 40) % 360},50%,26%))`,
+        flexShrink: 0,
+      }}
+    >
+      {letter}
+    </span>
+  );
+}
+
 function parentUnixPath(path: string): string {
   if (!path || path === '/') return '/';
   const trimmed = path.endsWith('/') && path !== '/' ? path.slice(0, -1) : path;
@@ -516,11 +606,14 @@ export default function AgentsPage() {
               onClick={() => newChat(a)}
               style={{ ...styles.row, opacity: a.available ? 1 : 0.4 }}
             >
-              <strong>{a.name}</strong>
-              <span style={styles.muted}>
-                {a.available ? 'Runs on the PC — chat here' : 'CLI not installed on the PC'}
-              </span>
-              {a.available && <span style={styles.selectBtn}>Select</span>}
+              <AgentIcon agentId={a.id} name={a.name} />
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                <strong>{a.name}</strong>
+                <span style={styles.muted}>
+                  {a.available ? 'Runs on the PC — chat here' : 'CLI not installed on the PC'}
+                </span>
+                {a.available && <span style={styles.selectBtn}>Select</span>}
+              </div>
             </button>
           ))}
           <div style={styles.tabContainer}>
@@ -564,10 +657,13 @@ export default function AgentsPage() {
                     onClick={() => openSession(s)}
                     style={{ ...styles.row, marginBottom: 0, flex: 1 }}
                   >
-                    <strong>{s.title}</strong>
-                    <span style={styles.muted}>
-                      {chatListSubtitle({ agent: s.agent, cwd: s.cwd })}
-                    </span>
+                    <AgentIcon agentId={s.agent} name={s.title} />
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                      <strong>{s.title}</strong>
+                      <span style={styles.muted}>
+                        {chatListSubtitle({ agent: s.agent, cwd: s.cwd })}
+                      </span>
+                    </div>
                   </button>
                   <button
                     type="button"
@@ -598,15 +694,18 @@ export default function AgentsPage() {
               }
               return visible.map((c) => (
                 <button key={`${c.agent}-${c.hostChatId}`} onClick={() => openHostChat(c)} style={styles.row}>
-                  <strong>{c.title}</strong>
-                  <span style={styles.muted}>
-                    {chatListSubtitle({
-                      agent: c.agent,
-                      source: c.source,
-                      cwd: c.cwd,
-                      resumable: c.resumable,
-                    })}
-                  </span>
+                  <AgentIcon agentId={c.agent} name={c.title} />
+                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                    <strong>{c.title}</strong>
+                    <span style={styles.muted}>
+                      {chatListSubtitle({
+                        agent: c.agent,
+                        source: c.source,
+                        cwd: c.cwd,
+                        resumable: c.resumable,
+                      })}
+                    </span>
+                  </div>
                 </button>
               ));
             })()
@@ -616,7 +715,7 @@ export default function AgentsPage() {
         <>
           <div ref={listRef} style={styles.chat}>
             {mergeToolEvents(events).map((e, i) => (
-              <Bubble key={`${e.seq}-${i}`} e={e} />
+              <Bubble key={`${e.seq}-${i}`} e={e} agentId={active.agent} />
             ))}
           </div>
           <form
@@ -1093,7 +1192,7 @@ function CwdPicker({
   );
 }
 
-function Bubble({ e }: { e: AgentEvent }) {
+function Bubble({ e, agentId }: { e: AgentEvent; agentId?: string }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
@@ -1113,7 +1212,7 @@ function Bubble({ e }: { e: AgentEvent }) {
   }
   if (e.kind === 'text' || (e.kind === 'result' && e.text)) {
     return (
-      <div style={{ ...styles.bubble, ...styles.assistant, userSelect: 'text', WebkitUserSelect: 'text' }}>
+      <div style={{ ...styles.bubble, ...styles.assistant, background: getAgentThemeBackground(agentId), userSelect: 'text', WebkitUserSelect: 'text' }}>
         <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'inherit', userSelect: 'text', WebkitUserSelect: 'text' }}>
           {e.text}
         </pre>
@@ -1247,9 +1346,9 @@ const styles: Record<string, React.CSSProperties> = {
   },
   row: {
     display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'flex-start',
-    gap: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
     width: '100%',
     padding: '12px 14px',
     marginBottom: 8,

@@ -38,6 +38,7 @@ class ConnectionState {
 
 class ConnectionNotifier extends Notifier<ConnectionState> {
   VoidCallback? _statusSub;
+  RpcClient? _currentClient;
   bool _disposed = false;
   Future<void>? _inFlightConnect;
 
@@ -46,7 +47,9 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
     ref.onDispose(() {
       _disposed = true;
       _statusSub?.call();
-      state.client?.dispose();
+      _statusSub = null;
+      _currentClient?.dispose();
+      _currentClient = null;
     });
     return const ConnectionState();
   }
@@ -66,6 +69,7 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
   Future<void> _connect(String wsUrl) async {
     _teardown();
     final client = RpcClient(wsUrl);
+    _currentClient = client;
     final sub = client.statusStream.listen((s) {
       if (!_disposed) state = state.copyWith(status: s);
     });
@@ -86,6 +90,7 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
       state = state.copyWith(status: RpcStatus.connected);
     } catch (_) {
       client.dispose();
+      _currentClient = null;
       if (!_disposed) state = const ConnectionState();
       rethrow;
     }
@@ -148,7 +153,8 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
   void _teardown() {
     _statusSub?.call();
     _statusSub = null;
-    state.client?.dispose();
+    _currentClient?.dispose();
+    _currentClient = null;
   }
 
   static String _httpBaseFromWs(String wsUrl) {

@@ -8,6 +8,9 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:share_plus/share_plus.dart';
 
+import '../rpc/rpc_client.dart';
+import 'file_viewer_modal.dart';
+
 final ipAutolinkPattern = RegExp(
   r'(?<![\d])(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)(?::\d{1,5})?(?![\d])',
 );
@@ -33,6 +36,10 @@ class IpAutolinkSyntax extends md.InlineSyntax {
 }
 
 class LinkActionBuilder extends MarkdownElementBuilder {
+  final RpcClient? client;
+
+  LinkActionBuilder({this.client});
+
   @override
   Widget? visitElementAfterWithContext(
     BuildContext context,
@@ -47,11 +54,25 @@ class LinkActionBuilder extends MarkdownElementBuilder {
       decoration: TextDecoration.underline,
       decorationColor: const Color(0xFF93C5FD),
     );
+    final value = linkActionValue(text, href);
+    final isFile = isPathLike(value);
+
     return GestureDetector(
-      onTap: () => showLinkActions(context, text, href),
+      onTap: () {
+        if (isFile && client != null) {
+          showFileViewerModal(
+            context: context,
+            client: client!,
+            filePath: value,
+            title: text.trim().isNotEmpty && text != value ? text : null,
+          );
+        } else {
+          showLinkActions(context, text, href, client: client);
+        }
+      },
       onLongPress: () {
         HapticFeedback.mediumImpact();
-        showLinkActions(context, text, href);
+        showLinkActions(context, text, href, client: client);
       },
       child: Text(text, style: style),
     );
@@ -61,10 +82,13 @@ class LinkActionBuilder extends MarkdownElementBuilder {
 Future<void> showLinkActions(
   BuildContext context,
   String text,
-  String? href,
-) async {
+  String? href, {
+  RpcClient? client,
+}) async {
   final value = linkActionValue(text, href);
   if (value.isEmpty) return;
+  final isFile = isPathLike(value);
+
   await showModalBottomSheet<void>(
     context: context,
     backgroundColor: const Color(0xFF151522),
@@ -82,6 +106,20 @@ Future<void> showLinkActions(
                 style: const TextStyle(color: Colors.white70, fontSize: 13),
               ),
             ),
+            if (isFile && client != null)
+              ListTile(
+                leading: const Icon(Icons.description_outlined, color: Color(0xFF93C5FD)),
+                title: const Text('View file'),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  showFileViewerModal(
+                    context: context,
+                    client: client,
+                    filePath: value,
+                    title: text.trim().isNotEmpty && text != value ? text : null,
+                  );
+                },
+              ),
             ListTile(
               leading: const Icon(Icons.copy),
               title: const Text('Copy'),

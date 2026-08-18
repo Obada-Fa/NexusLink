@@ -1,5 +1,5 @@
 import type { WsMessage, RpcRequest, RpcResponse, RpcMethod } from '@nexuslink/rpc-types';
-import { gitWorkingTree, handleFsList, listProjects } from './handlers/fs';
+import { gitWorkingTree, handleFsList, handleFsRead, listProjects } from './handlers/fs';
 import { listProcesses } from './handlers/process';
 import { getSystemInfo, getPerfSnapshot } from './handlers/system';
 import { handleTerminalCreate, handleTerminalInput, handleTerminalResize, handleTerminalKill, setSend as setTerminalSend } from './handlers/terminal';
@@ -123,6 +123,9 @@ export async function startRpcServer(port = 45678, hostname?: string) {
     switch (method) {
       case 'fs.list':
         result = await handleFsList(params.path as string, params.showHidden as boolean | undefined);
+        break;
+      case 'fs.read':
+        result = await handleFsRead(params.path as string);
         break;
       case 'fs.listProjects':
         result = await listProjects();
