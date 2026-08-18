@@ -1,11 +1,31 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  cleanMessageText,
   extractProtobufStrings,
+  parseAgyJsonl,
   parseAgyStepStrings,
   parseCursorJsonl,
   parseCursorTranscriptLine,
   parseOpencodeExport,
 } from '../host-chats';
+
+describe('cleanMessageText', () => {
+  test('strips timestamp and extracts inner user_query text', () => {
+    const raw =
+      '<timestamp>Tuesday, Aug 18, 2026, 1:01 AM (UTC+2)</timestamp>\n<user_query>\ni want to open this project in cursor give me the copiable path\n</user_query>';
+    expect(cleanMessageText(raw)).toBe('i want to open this project in cursor give me the copiable path');
+  });
+
+  test('strips Antigravity USER_REQUEST and ADDITIONAL_METADATA blocks', () => {
+    const raw =
+      '<USER_REQUEST>\ncan you check why my ethernet connection is not working\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-08-04T22:13:02+02:00.\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection`\n</USER_SETTINGS_CHANGE>';
+    expect(cleanMessageText(raw)).toBe('can you check why my ethernet connection is not working');
+  });
+
+  test('preserves normal plain text unchanged', () => {
+    expect(cleanMessageText('Hello world! How are you?')).toBe('Hello world! How are you?');
+  });
+});
 
 describe('host chat parsers', () => {
   test('turns an OpenCode export into user/text/tool events', () => {
@@ -40,18 +60,25 @@ describe('host chat parsers', () => {
     expect(events[4]!.text).toBe('done');
   });
 
-  test('parses Cursor transcript jsonl including tool_use', () => {
+  test('parses Cursor transcript jsonl and strips timestamp wrappers', () => {
     const jsonl = [
       JSON.stringify({
         role: 'user',
-        message: { content: [{ type: 'text', text: 'fix the tests' }] },
+        message: {
+          content: [
+            {
+              type: 'text',
+              text: '<timestamp>Monday, Aug 17, 2026, 11:24 PM (UTC+2)</timestamp>\n<user_query>\nfix the tests\n</user_query>',
+            },
+          ],
+        },
       }),
       JSON.stringify({
         role: 'assistant',
         message: {
           content: [
             { type: 'tool_use', id: 'c1', name: 'Read', input: { path: 'a.ts' } },
-            { type: 'text', text: 'Looking now.' },
+            { type: 'text', text: 'Looking now.\n[REDACTED]' },
           ],
         },
       }),
@@ -60,6 +87,26 @@ describe('host chat parsers', () => {
     expect(events[0]).toMatchObject({ kind: 'user', text: 'fix the tests' });
     expect(events.some((e) => e.kind === 'tool-start' && e.toolName === 'Read')).toBe(true);
     expect(events.some((e) => e.kind === 'text' && e.text === 'Looking now.')).toBe(true);
+  });
+
+  test('parses Antigravity transcript jsonl', () => {
+    const jsonl = [
+      JSON.stringify({
+        type: 'USER_INPUT',
+        created_at: '2026-08-04T20:13:02Z',
+        content: '<USER_REQUEST>\ncheck ethernet\n</USER_REQUEST>\n<ADDITIONAL_METADATA>...</ADDITIONAL_METADATA>',
+      }),
+      JSON.stringify({
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-08-04T20:13:03Z',
+        content: 'Checking now.',
+        tool_calls: [{ name: 'run_command', args: { CommandLine: 'ip a' } }],
+      }),
+    ].join('\n');
+    const events = parseAgyJsonl(jsonl);
+    expect(events[0]).toMatchObject({ kind: 'user', text: 'check ethernet' });
+    expect(events[1]).toMatchObject({ kind: 'text', text: 'Checking now.' });
+    expect(events[2]).toMatchObject({ kind: 'tool-start', toolName: 'run_command' });
   });
 
   test('parseCursorTranscriptLine accepts a flat role/text blob', () => {

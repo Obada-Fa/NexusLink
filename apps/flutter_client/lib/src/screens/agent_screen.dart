@@ -223,6 +223,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       }) as Map<String, dynamic>;
       final session = AgentSessionInfo.fromJson(created);
       setState(() {
+        _sessions.removeWhere((x) => x.agentSessionId == session.agentSessionId);
         _sessions.insert(0, session);
         _active = session;
         _events.clear();
@@ -255,6 +256,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         ..addAll(raw.map((e) => AgentEvent.fromJson(e as Map<String, dynamic>)));
       _photos.clear();
       _liveModels = [];
+      _sessions.removeWhere((x) => x.agentSessionId == s.agentSessionId);
+      _sessions.insert(0, s);
     });
     await _loadComposerPrefs(s.agent);
     await _refreshModels(s.agent);
@@ -278,9 +281,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       final session = AgentSessionInfo.fromJson(created);
       if (!mounted) return;
       setState(() {
-        if (!_sessions.any((s) => s.agentSessionId == session.agentSessionId)) {
-          _sessions.insert(0, session);
-        }
+        _sessions.removeWhere((s) => s.agentSessionId == session.agentSessionId);
+        _sessions.insert(0, session);
       });
       await _openSession(session);
     } catch (e) {
@@ -1066,7 +1068,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
           const SizedBox(height: 8),
           for (final s in _sessions)
             ListTile(
-              leading: const Icon(Icons.chat_bubble_outline),
+              leading: Icon(
+                _iconFor(s.agent),
+                color: const Color(0xFF2A6AFF),
+              ),
               title: Text(s.title),
               subtitle: Text(s.cwd, maxLines: 1, overflow: TextOverflow.ellipsis),
               onTap: () => _openSession(s),
@@ -1266,7 +1271,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
         child: ExpansionTile(
           key: PageStorageKey<int>(tools.first.seq),
-          initiallyExpanded: running,
+          initiallyExpanded: false,
           tilePadding: const EdgeInsets.symmetric(horizontal: 12),
           childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
           leading: Icon(

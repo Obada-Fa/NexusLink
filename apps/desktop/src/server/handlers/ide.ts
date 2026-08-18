@@ -59,6 +59,18 @@ export function ideStatus(): {
   };
 }
 
+import { tailscaleIpv4FromCli } from '../launch-banner';
+
+function getIdeBindHost(): string {
+  if (process.env.NEXUSLINK_HOST) return process.env.NEXUSLINK_HOST;
+  if (process.env.HOST) return process.env.HOST;
+  if (process.env.NEXUSLINK_TAILSCALE_ONLY === '1' || process.env.TAILSCALE_ONLY === '1') {
+    const tsIps = tailscaleIpv4FromCli();
+    if (tsIps.length > 0) return tsIps[0]!;
+  }
+  return '0.0.0.0';
+}
+
 export function startIde(cwd?: string): {
   available: boolean;
   running: boolean;
@@ -73,18 +85,19 @@ export function startIde(cwd?: string): {
   }
 
   const workdir = cwd && existsSync(cwd) ? cwd : homedir();
+  const bindHost = getIdeBindHost();
   const argv =
     found.flavor === 'code-server'
       ? [
           found.bin,
-          '--bind-addr', `0.0.0.0:${IDE_PORT}`,
+          '--bind-addr', `${bindHost}:${IDE_PORT}`,
           '--auth', 'none',
           '--disable-telemetry',
           '--disable-update-check',
         ]
       : [
           found.bin,
-          '--host', '0.0.0.0',
+          '--host', bindHost,
           '--port', String(IDE_PORT),
           '--without-connection-token',
         ];
