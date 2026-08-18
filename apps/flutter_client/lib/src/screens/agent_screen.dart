@@ -218,8 +218,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             _active = match;
             _busy = match.busy;
           }
-          if (shouldSyncTranscript) {
-            if (match != null && !match.busy) {
+          if (shouldSyncTranscript &&
+              _active?.agentSessionId == activeId) {
+            if (match != null && !match.busy && transcriptHasOpenTools(_events)) {
               final settled = closeOpenTools(_events,
                   output: 'Interrupted — host restarted.');
               if (settled.length != _events.length) {
@@ -228,14 +229,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   ..addAll(settled);
               }
             }
-            final merged = mergeAgentHistory(history, _events);
-            // While a turn is in flight, live pushes are authoritative — never
-            // shrink the transcript on a reconnect/resync race.
-            if (!_busy || merged.length >= _events.length) {
-              _events
-                ..clear()
-                ..addAll(merged);
-            }
+            final merged = applyAgentHistorySnapshot(
+              history,
+              _events,
+              busy: _busy,
+            );
+            _events
+              ..clear()
+              ..addAll(merged);
           }
         }
       });
@@ -463,17 +464,21 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   Future<void> _openSession(AgentSessionInfo s) async {
     final client = _client;
     if (client == null) return;
+    ++_syncGen;
     final raw =
         await client.request('agent.history', {'agentSessionId': s.agentSessionId})
             as List<dynamic>;
     if (!mounted) return;
+    final loaded = normalizeTranscriptSeqs(raw
+        .map((e) => AgentEvent.fromJson(e as Map<String, dynamic>))
+        .toList());
     setState(() {
       _active = s;
       _busy = s.busy;
       _events
         ..clear()
-        ..addAll(raw.map((e) => AgentEvent.fromJson(e as Map<String, dynamic>)));
-      if (!s.busy) {
+        ..addAll(loaded);
+      if (!s.busy && transcriptHasOpenTools(_events)) {
         final settled = closeOpenTools(_events,
             output: 'Interrupted — host restarted.');
         _events

@@ -26,8 +26,6 @@ void main() {
     });
 
     test('keeps live events missing from a gapped host snapshot', () {
-      // Host max seq is 30 but events 25–29 never landed in history (stale
-      // snapshot / reconnect race). The old maxSeq filter dropped them.
       final history = [ev(1, 'user'), ev(30, 'placeholder')];
       final live = [
         ev(1, 'user'),
@@ -46,6 +44,36 @@ void main() {
       final merged = mergeAgentHistory(history, live);
       expect(merged.map((e) => e.seq).toList(), [1, 2, 3]);
       expect(merged.last.text, 'still streaming');
+    });
+  });
+
+  group('normalizeTranscriptSeqs', () {
+    test('renumbers duplicate zero seq rows instead of collapsing them', () {
+      final raw = [
+        ev(0, 'user'),
+        ev(0, 'assistant'),
+      ];
+      final out = normalizeTranscriptSeqs(raw);
+      expect(out.map((e) => e.text).toList(), ['user', 'assistant']);
+      expect(out.map((e) => e.seq).toList(), [1, 2]);
+    });
+  });
+
+  group('applyAgentHistorySnapshot', () {
+    test('never replaces a rendered transcript with an empty snapshot', () {
+      final current = [ev(1, 'hello'), ev(2, 'world')];
+      expect(
+        applyAgentHistorySnapshot(const [], current, busy: false),
+        current,
+      );
+    });
+
+    test('does not shrink an in-flight transcript', () {
+      final current = [ev(1, 'a'), ev(2, 'b'), ev(3, 'live')];
+      expect(
+        applyAgentHistorySnapshot(const [], current, busy: true),
+        current,
+      );
     });
   });
 }
