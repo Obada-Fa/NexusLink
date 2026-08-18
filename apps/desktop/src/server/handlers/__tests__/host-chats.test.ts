@@ -4,6 +4,7 @@ import {
   extractProtobufStrings,
   parseAgyJsonl,
   parseAgyStepStrings,
+  parseClaudeJsonl,
   parseCursorJsonl,
   parseCursorTranscriptLine,
   parseOpencodeExport,
@@ -107,6 +108,50 @@ describe('host chat parsers', () => {
     expect(events[0]).toMatchObject({ kind: 'user', text: 'check ethernet' });
     expect(events[1]).toMatchObject({ kind: 'text', text: 'Checking now.' });
     expect(events[2]).toMatchObject({ kind: 'tool-start', toolName: 'run_command' });
+  });
+
+  test('parses Claude Code transcript jsonl', () => {
+    const jsonl = [
+      JSON.stringify({
+        type: 'user',
+        timestamp: '2026-07-22T17:17:35.775Z',
+        message: {
+          role: 'user',
+          content: 'build a music share app',
+        },
+      }),
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-07-22T17:17:38.470Z',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'Exploring structure' },
+            { type: 'text', text: 'I will explore the codebase.' },
+            { type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'git status' } },
+          ],
+        },
+      }),
+      JSON.stringify({
+        type: 'user',
+        timestamp: '2026-07-22T17:17:39.000Z',
+        message: {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 't1', content: 'On branch main' },
+          ],
+        },
+      }),
+    ].join('\n');
+    const events = parseClaudeJsonl(jsonl);
+    expect(events.map((e) => e.kind)).toEqual([
+      'user', 'thinking', 'text', 'tool-start', 'tool-end',
+    ]);
+    expect(events[0]!.text).toBe('build a music share app');
+    expect(events[1]!.text).toBe('Exploring structure');
+    expect(events[2]!.text).toBe('I will explore the codebase.');
+    expect(events[3]!.toolName).toBe('Bash');
+    expect(events[4]!.toolOutput).toBe('On branch main');
   });
 
   test('parseCursorTranscriptLine accepts a flat role/text blob', () => {
