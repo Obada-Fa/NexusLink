@@ -38,6 +38,10 @@ export function cleanMessageText(raw: string): string {
     text = text.replace(/<\/?(?:user_query|USER_REQUEST|user-request|context|timestamp)>/gi, '');
   }
 
+  if (/^declaring permissions:\s*cortex tool/i.test(text.trim())) {
+    return '';
+  }
+
   // 3. Trim and normalize excessive blank lines
   text = text
     .replace(/\r\n/g, '\n')

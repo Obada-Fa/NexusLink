@@ -30,6 +30,9 @@ import {
   extractAuthUrl,
   isCliAuthError,
   rewriteCliAuthError,
+  isInternalCliNoise,
+  sanitizeCliError,
+  sanitizeAgentHistory,
   cursorModelFlag,
   withImageMentions,
   materializeAgentImages,
@@ -46,6 +49,7 @@ import {
   collapseModelFamilies,
   pickModelVariant,
   agyEffortFlag,
+  isModelEffortSupported,
 } from '../agents';
 
 describe('agent gateway', () => {
@@ -338,12 +342,26 @@ describe('composer flags and attachments', () => {
     expect(agyResolved).toContain('--effort');
     expect(agyResolved).toContain('high');
 
-    const claude = claudeSpawnArgs({ bin: 'claude', mode: 'plan', model: 'opus', thinking: 'high' });
-    expect(claude).toContain('--permission-mode');
-    expect(claude).toContain('plan');
-    expect(claude).toContain('--model');
-    expect(claude).toContain('opus');
-    expect(claude).toContain('--effort');
+    const claudeOpus = claudeSpawnArgs({ bin: 'claude', mode: 'plan', model: 'opus', thinking: 'high' });
+    expect(claudeOpus).toContain('--permission-mode');
+    expect(claudeOpus).toContain('plan');
+    expect(claudeOpus).toContain('--model');
+    expect(claudeOpus).toContain('opus');
+    expect(claudeOpus).not.toContain('--effort');
+
+    const claudeSonnet = claudeSpawnArgs({ bin: 'claude', mode: 'agent', model: 'sonnet', thinking: 'high' });
+    expect(claudeSonnet).toContain('--model');
+    expect(claudeSonnet).toContain('sonnet');
+    expect(claudeSonnet).toContain('--effort');
+    expect(claudeSonnet).toContain('high');
+
+    expect(isModelEffortSupported('antigravity', 'gemini-3.7-flash')).toBe(true);
+    expect(isModelEffortSupported('antigravity', 'claude-sonnet-4-6')).toBe(false);
+    expect(isModelEffortSupported('claude', 'sonnet')).toBe(true);
+    expect(isModelEffortSupported('claude', 'opus')).toBe(false);
+    expect(isModelEffortSupported('cursor', 'auto')).toBe(false);
+    expect(isModelEffortSupported('cursor', 'composer-2.5')).toBe(true);
+
     expect(claudeUserContent('look', [{ mime: 'image/jpeg', data: 'abc' }])).toEqual([
       { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'abc' } },
       { type: 'text', text: 'look' },
@@ -609,7 +627,7 @@ describe('CLI stream parsers', () => {
         event: 'result',
         result: { status: 'ERROR', error: 'authentication required', response: '' },
       }),
-    ).toEqual([{ kind: 'error', text: 'authentication required' }]);
+    ).toEqual([{ kind: 'error', text: rewriteCliAuthError('authentication required', 'Antigravity') }]);
   });
 });
 
@@ -652,4 +670,43 @@ describe('CLI login helpers', () => {
     expect(rewriteCliAuthError('authentication failed or timed out', 'Antigravity'))
       .toContain("isn't signed in");
   });
+
+  test('detects and cleans internal CLI / cortex tool noise', () => {
+    const cortexNoise =
+      'declaring permissions: cortex tool write_to_file: convert tool call for permissions: model output error: invalid tool call error (invalid_args) /path/to/file.dart is not a valid artifact path; artifacts must be in /home/user/.gemini/antigravity-cli/brain/abc/';
+    expect(isInternalCliNoise(cortexNoise)).toBe(true);
+    expect(isInternalCliNoise('Real syntax error in code')).toBe(false);
+
+    expect(sanitizeCliError(cortexNoise, 'Antigravity')).toBe(
+      '/path/to/file.dart is not a valid artifact path; artifacts must be in /home/user/.gemini/antigravity-cli/brain/abc/',
+    );
+
+    const history: AgentEvent[] = [
+      { seq: 1, ts: 1000, kind: 'user', text: 'hi' },
+      { seq: 2, ts: 1001, kind: 'text', text: 'hello' },
+      { seq: 3, ts: 1002, kind: 'error', text: cortexNoise },
+      { seq: 4, ts: 1003, kind: 'result', text: '' },
+    ];
+    expect(sanitizeAgentHistory(history)).toEqual([
+      { seq: 1, ts: 1000, kind: 'user', text: 'hi' },
+      { seq: 2, ts: 1001, kind: 'text', text: 'hello' },
+      { seq: 4, ts: 1003, kind: 'result', text: '' },
+    ]);
+  });
+
+  test('withoutDuplicateResult suppresses trailing errors if text was already streamed', () => {
+    expect(withoutDuplicateResult({ kind: 'result', text: 'full text' }, true)).toEqual({
+      kind: 'result',
+      text: '',
+    });
+    expect(withoutDuplicateResult({ kind: 'error', text: 'exit 1' }, true)).toEqual({
+      kind: 'result',
+      text: '',
+    });
+    expect(withoutDuplicateResult({ kind: 'error', text: 'fatal error' }, false)).toEqual({
+      kind: 'error',
+      text: 'fatal error',
+    });
+  });
 });
+

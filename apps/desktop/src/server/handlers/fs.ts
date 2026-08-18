@@ -4,6 +4,25 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 
+export async function handleFsRead(rawPath: string): Promise<string> {
+  let p = (rawPath || '').trim();
+  if (p.startsWith('file://')) {
+    p = decodeURIComponent(p.replace(/^file:\/\//, ''));
+  }
+  if (p.startsWith('~/')) {
+    p = join(homedir(), p.slice(2));
+  }
+  const stat = await fs.stat(p);
+  if (stat.isDirectory()) {
+    throw new Error(`Cannot read directory: ${p}`);
+  }
+  const MAX_READ_BYTES = 5 * 1024 * 1024;
+  if (stat.size > MAX_READ_BYTES) {
+    throw new Error(`File is too large (${stat.size} bytes, max ${MAX_READ_BYTES} bytes)`);
+  }
+  return await fs.readFile(p, 'utf-8');
+}
+
 export async function handleFsList(path: string, showHidden = false): Promise<FileEntry[]> {
   const entries = await fs.readdir(path, { withFileTypes: true, recursive: false });
   const out: FileEntry[] = [];

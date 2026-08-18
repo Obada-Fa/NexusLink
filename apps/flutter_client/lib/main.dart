@@ -5,13 +5,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'src/discovery/mdns_discovery.dart';
+import 'src/services/notification_service.dart';
 import 'src/state/connection.dart';
 import 'src/state/last_host.dart';
 import 'src/screens/launcher_screen.dart';
 import 'src/widgets/connection_lifecycle.dart';
 import 'src/widgets/link_actions.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await NotificationService.instance.init();
   runApp(const ProviderScope(child: NexusLinkApp()));
 }
 

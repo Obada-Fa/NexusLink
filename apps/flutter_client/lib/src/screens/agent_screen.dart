@@ -15,6 +15,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
+import '../services/notification_service.dart';
 import '../state/agent_history.dart';
 import '../state/connection.dart';
 import '../state/last_cwd.dart';
@@ -272,6 +273,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       }
     }
 
+    final matchedSession = _sessions
+        .where((s) => s.agentSessionId == sessionId)
+        .firstOrNull;
+    NotificationService.instance.handleAgentEvent(
+      sessionId,
+      parsed,
+      sessionTitle: matchedSession?.title ?? _active?.title,
+    );
+
     if (sessionId != _active?.agentSessionId) {
       if (sessionId != null &&
           (parsed.kind == 'result' || parsed.kind == 'error')) {
@@ -394,7 +404,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         _liveModels = [];
         _gitTree = null;
       });
-      await _loadComposerPrefs(agent.id);
+      await _loadComposerPrefs(agent.id, isNewChat: true);
       await _refreshModels(agent.id);
       await _refreshGitTree();
     } catch (e) {
@@ -554,10 +564,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
   }
 
-  Future<void> _loadComposerPrefs(String agentId) async {
+  Future<void> _loadComposerPrefs(String agentId, {bool isNewChat = false}) async {
     final p = await SharedPreferences.getInstance();
     final caps = _caps;
-    var mode = p.getString('agent-composer-$agentId-mode') ?? 'agent';
+    var mode = isNewChat ? 'agent' : (p.getString('agent-composer-$agentId-mode') ?? 'agent');
     if (!caps.modes.contains(mode)) {
       mode = caps.modes.isNotEmpty ? caps.modes.first : 'agent';
     }
@@ -666,7 +676,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             if (_model != null && _model != 'auto' && _model != 'default')
               'model': _model,
             if (_mode != 'agent') 'mode': _mode,
-            if (_thinking.isNotEmpty) 'thinking': _thinking,
+            if (_thinking.isNotEmpty && _modelSupportsEffort) 'thinking': _thinking,
             if (photos.isNotEmpty)
               'images': [
                 for (final p in photos)
@@ -777,6 +787,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       return true;
     }
     if (cmd == 'thinking' || cmd == 'effort') {
+      if (!_modelSupportsEffort) {
+        _localStatus('Thinking/effort is not supported for $_modelLabel.');
+        return true;
+      }
       final levels = _thinkingLevels;
       if (arg.isEmpty) {
         _localStatus(
@@ -992,6 +1006,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   IconData _iconFor(String id) => iconForAgent(id);
 
+  IconData _modeIcon(String mode) => switch (mode) {
+        'plan' => Icons.checklist_outlined,
+        'ask' => Icons.help_outline,
+        _ => Icons.smart_toy_outlined,
+      };
+
   String _modeLabel(String mode) => switch (mode) {
         'plan' => 'Plan',
         'ask' => 'Ask',
@@ -1015,9 +1035,22 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     return const ['low', 'medium', 'high'];
   }
 
+  bool get _modelSupportsEffort =>
+      isModelEffortSupported(_active?.agent, _model, _pickerModels);
+
   String get _modelLabel {
     final id = _model;
-    if (id == null || id == 'auto' || id == 'default') return 'Model';
+    if (id == null || id == 'default') {
+      if (_pickerModels.isNotEmpty) return _pickerModels.first.name;
+      if (_caps.models.isNotEmpty) return _caps.models.first.name;
+      return 'Model';
+    }
+    if (id == 'auto') {
+      for (final m in [..._pickerModels, ..._caps.models]) {
+        if (m.id == 'auto') return m.name;
+      }
+      return 'Auto';
+    }
     final fam = modelFamilyId(id);
     for (final m in _pickerModels) {
       if (m.id == id || m.id == fam) return m.name;
@@ -1162,10 +1195,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               },
             ),
             ListTile(
-              leading: const Icon(Icons.psychology_outlined),
+              leading: Icon(
+                Icons.psychology_outlined,
+                color: _modelSupportsEffort ? null : Colors.white24,
+              ),
               title: const Text('Thinking'),
-              subtitle: Text(_thinkingLabel(_thinking)),
-              enabled: !_busy,
+              subtitle: _modelSupportsEffort
+                  ? Text(_thinkingLabel(_thinking))
+                  : Text('Not supported for $_modelLabel',
+                      style: const TextStyle(color: Colors.white38)),
+              enabled: !_busy && _modelSupportsEffort,
               onTap: () {
                 Navigator.pop(ctx);
                 unawaited(_pickThinking());
@@ -1242,6 +1281,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   Future<void> _pickThinking() async {
+    if (!_modelSupportsEffort) {
+      _localStatus('Thinking is not supported for $_modelLabel.');
+      return;
+    }
     final levels = _thinkingLevels;
     if (!mounted) return;
     final chosen = await showModalBottomSheet<String>(
@@ -1791,6 +1834,21 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     );
   }
 
+  Color _agentBubbleColor(String? agentId) {
+    switch (agentId) {
+      case 'cursor':
+        return const Color(0xFF101014);
+      case 'antigravity':
+        return const Color(0xFF2D1B4E);
+      case 'claude':
+        return const Color(0xFF3D2B1F);
+      case 'opencode':
+        return const Color(0xFF1C3330);
+      default:
+        return const Color(0xFF151522);
+    }
+  }
+
   Widget _bubble(AgentEvent e) {
     switch (e.kind) {
       case 'user':
@@ -1852,7 +1910,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               margin: const EdgeInsets.symmetric(vertical: 4),
               padding: const EdgeInsets.fromLTRB(12, 10, 10, 6),
               decoration: BoxDecoration(
-                color: const Color(0xFF151522),
+                color: _agentBubbleColor(_active?.agent),
                 borderRadius: BorderRadius.circular(14),
               ),
               child: Column(
@@ -1862,7 +1920,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                     data: e.text ?? '',
                     inlineSyntaxes: [IpAutolinkSyntax()],
                     builders: {
-                      'a': LinkActionBuilder(),
+                      'a': LinkActionBuilder(client: _client),
                       'pre': CodeBlockBuilder(),
                     },
                     styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
@@ -1913,13 +1971,19 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           ),
         );
       case 'error':
+        final errorText = (e.text ?? '').trim();
+        if (errorText.isEmpty ||
+            errorText.toLowerCase().startsWith('declaring permissions: cortex tool') ||
+            errorText.toLowerCase().contains('is not a valid artifact path; artifacts must be in')) {
+          return const SizedBox.shrink();
+        }
         return Padding(
           padding: const EdgeInsets.all(8),
           child: SelectionArea(
             child: MarkdownBody(
-              data: e.text ?? 'error',
+              data: errorText,
               inlineSyntaxes: [IpAutolinkSyntax()],
-              builders: {'a': LinkActionBuilder()},
+              builders: {'a': LinkActionBuilder(client: _client)},
               styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
                 p: const TextStyle(color: Color(0xFFEE5555), fontSize: 13),
                 a: const TextStyle(
@@ -2161,6 +2225,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                         onPressed: _openComposerMenu,
                         icon: const Icon(Icons.add),
                       ),
+                      const SizedBox(width: 2),
+                      _modeChip(),
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: _modelChip(),
+                      ),
+                      const SizedBox(width: 4),
                       const Spacer(),
                       IconButton.filled(
                         tooltip: _busy ? 'Stop' : 'Send',
@@ -2173,6 +2244,97 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _modeChip() {
+    final modeColor = switch (_mode) {
+      'plan' => const Color(0xFFF59E0B),
+      'ask' => const Color(0xFF38BDF8),
+      _ => const Color(0xFF818CF8),
+    };
+    final canPick = _caps.modes.length > 1;
+    return Tooltip(
+      message: canPick
+          ? 'Mode: ${_modeLabel(_mode)} (tap to switch)'
+          : 'Mode: ${_modeLabel(_mode)}',
+      child: Material(
+        color: const Color(0xFF1E1E2E),
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          onTap: _busy ? null : (canPick ? _pickMode : _openComposerMenu),
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFF2A2A40)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(_modeIcon(_mode), size: 14, color: modeColor),
+                const SizedBox(width: 4),
+                Text(
+                  _modeLabel(_mode),
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.white70,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _modelChip() {
+    final canPick = _pickerModels.isNotEmpty;
+    return Tooltip(
+      message: 'Model: $_modelLabel${canPick ? ' (tap to switch)' : ''}',
+      child: Material(
+        color: const Color(0xFF1E1E2E),
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          onTap: _busy ? null : (canPick ? _pickModel : _openComposerMenu),
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFF2A2A40)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.memory_outlined,
+                    size: 14, color: Color(0xFF8A8A9A)),
+                const SizedBox(width: 4),
+                Flexible(
+                  child: Text(
+                    _modelLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.white70,
+                    ),
+                  ),
+                ),
+                if (canPick) ...[
+                  const SizedBox(width: 2),
+                  const Icon(Icons.arrow_drop_down,
+                      size: 14, color: Colors.white38),
+                ],
+              ],
+            ),
+          ),
         ),
       ),
     );

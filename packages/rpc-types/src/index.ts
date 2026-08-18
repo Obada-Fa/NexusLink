@@ -465,6 +465,7 @@ export type AgentMode = 'agent' | 'plan' | 'ask'
 export interface AgentModelOption {
   id: string
   name: string
+  supportsEffort?: boolean
 }
 
 /** What the phone composer should offer for this CLI. */

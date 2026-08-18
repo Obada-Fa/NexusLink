@@ -97,10 +97,33 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
                       const SizedBox(height: 8),
                     ],
                     _appsHeader(),
-                    if (appsAsync.isLoading)
+                    if (appsAsync.isLoading && filteredApps.isEmpty)
                       const Padding(
                         padding: EdgeInsets.only(top: 40),
                         child: Center(child: CircularProgressIndicator()),
+                      )
+                    else if (filteredApps.isEmpty && appsAsync.hasError && q.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 32),
+                        child: Center(
+                          child: Column(
+                            children: [
+                              Text(
+                                'Could not load apps: ${friendlyLaunchError(appsAsync.error!)}',
+                                style: const TextStyle(
+                                    fontSize: 12, color: Colors.white54),
+                                textAlign: TextAlign.center,
+                              ),
+                              const SizedBox(height: 10),
+                              OutlinedButton.icon(
+                                onPressed: () =>
+                                    ref.read(appsProvider.notifier).refresh(),
+                                icon: const Icon(Icons.refresh, size: 16),
+                                label: const Text('Retry'),
+                              ),
+                            ],
+                          ),
+                        ),
                       )
                     else
                       _appGrid(filteredApps, windows, sessions),

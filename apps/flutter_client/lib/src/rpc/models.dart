@@ -112,10 +112,12 @@ class AppSessionInfo {
 class AgentModelOption {
   final String id;
   final String name;
-  const AgentModelOption({required this.id, required this.name});
+  final bool? supportsEffort;
+  const AgentModelOption({required this.id, required this.name, this.supportsEffort});
   factory AgentModelOption.fromJson(Map<String, dynamic> j) => AgentModelOption(
         id: j['id'] as String,
         name: (j['name'] as String?) ?? j['id'] as String,
+        supportsEffort: j['supportsEffort'] as bool?,
       );
 }
 
@@ -145,9 +147,61 @@ List<AgentModelOption> collapseModelFamilies(List<AgentModelOption> models) {
         .replaceAll(RegExp(r'\s+Thinking\s*$', caseSensitive: false), '')
         .replaceAll(RegExp(r'\s*\(current.*\)$', caseSensitive: false), '')
         .trim();
-    out.add(AgentModelOption(id: fam, name: name.isEmpty ? fam : name));
+    out.add(AgentModelOption(
+      id: fam,
+      name: name.isEmpty ? fam : name,
+      supportsEffort: m.supportsEffort,
+    ));
   }
   return out;
+}
+
+/// Check whether a model supports thinking/effort parameters.
+bool isModelEffortSupported(String? agentId, String? modelId, [List<AgentModelOption>? catalog]) {
+  final agent = (agentId ?? '').toLowerCase().trim();
+  final m = (modelId ?? '').toLowerCase().trim();
+  final fam = modelFamilyId(m);
+
+  if (catalog != null && catalog.isNotEmpty) {
+    for (final opt in catalog) {
+      if (opt.id.toLowerCase() == m || modelFamilyId(opt.id).toLowerCase() == fam) {
+        if (opt.supportsEffort != null) {
+          return opt.supportsEffort!;
+        }
+      }
+    }
+  }
+
+  if (agent == 'antigravity') {
+    if (m.isEmpty || m == 'default' || m == 'auto') return true;
+    if (m.contains('claude') || m.contains('gpt-') || m.contains('grok') || m.contains('composer')) {
+      return false;
+    }
+    return m.contains('gemini');
+  }
+
+  if (agent == 'claude') {
+    if (m.isEmpty || m == 'default' || m == 'sonnet' || m.contains('sonnet')) return true;
+    if (m == 'opus' || m == 'haiku' || m.contains('opus') || m.contains('haiku')) return false;
+    return true;
+  }
+
+  if (agent == 'cursor') {
+    if (m == 'auto') return false;
+    if (m.contains('haiku') || m == 'gpt-4o-mini' || m.contains('gpt-4o-mini')) return false;
+    return true;
+  }
+
+  if (agent == 'opencode') {
+    if (m.contains('non-reasoning') || m.contains('standard')) return false;
+    return true;
+  }
+
+  if (agent == 'mock') {
+    return true;
+  }
+
+  return true;
 }
 
 class AgentCapabilities {

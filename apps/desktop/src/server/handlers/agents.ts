@@ -106,38 +106,38 @@ const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
 const CURSOR_MODELS: AgentModelOption[] = [
-  { id: 'auto', name: 'Auto' },
-  { id: 'composer-2.5', name: 'Composer 2.5' },
-  { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex' },
-  { id: 'cursor-grok-4.6', name: 'Grok 4.6' },
-  { id: 'claude-opus-5', name: 'Claude Opus 5' },
-  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5' },
-  { id: 'gpt-5.6-sol', name: 'GPT-5.6' },
+  { id: 'auto', name: 'Auto', supportsEffort: false },
+  { id: 'composer-2.5', name: 'Composer 2.5', supportsEffort: true },
+  { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', supportsEffort: true },
+  { id: 'cursor-grok-4.6', name: 'Grok 4.6', supportsEffort: true },
+  { id: 'claude-opus-5', name: 'Claude Opus 5', supportsEffort: true },
+  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', supportsEffort: true },
+  { id: 'gpt-5.6-sol', name: 'GPT-5.6', supportsEffort: true },
 ];
 
 const OPENCODE_MODELS: AgentModelOption[] = [
-  { id: 'opencode/deepseek-v4-flash-free', name: 'DeepSeek V4 Flash' },
-  { id: 'opencode/mimo-v2.5-free', name: 'MiMo 2.5' },
-  { id: 'opencode/big-pickle', name: 'Big Pickle' },
-  { id: 'opencode/hy3-free', name: 'HY3' },
-  { id: 'opencode/laguna-s-2.1-free', name: 'Laguna S 2.1' },
-  { id: 'opencode/nemotron-3-ultra-free', name: 'Nemotron 3 Ultra' },
-  { id: 'opencode/nemotron-3.5-lightning-free', name: 'Nemotron 3.5 Lightning' },
+  { id: 'opencode/deepseek-v4-flash-free', name: 'DeepSeek V4 Flash', supportsEffort: true },
+  { id: 'opencode/mimo-v2.5-free', name: 'MiMo 2.5', supportsEffort: true },
+  { id: 'opencode/big-pickle', name: 'Big Pickle', supportsEffort: true },
+  { id: 'opencode/hy3-free', name: 'HY3', supportsEffort: true },
+  { id: 'opencode/laguna-s-2.1-free', name: 'Laguna S 2.1', supportsEffort: true },
+  { id: 'opencode/nemotron-3-ultra-free', name: 'Nemotron 3 Ultra', supportsEffort: true },
+  { id: 'opencode/nemotron-3.5-lightning-free', name: 'Nemotron 3.5 Lightning', supportsEffort: true },
 ];
 
 const ANTIGRAVITY_MODELS: AgentModelOption[] = [
-  { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash' },
-  { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro' },
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
-  { id: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
-  { id: 'gpt-oss-120b', name: 'GPT-OSS 120B' },
+  { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash', supportsEffort: true },
+  { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', supportsEffort: true },
+  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', supportsEffort: false },
+  { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', supportsEffort: false },
+  { id: 'gpt-oss-120b', name: 'GPT-OSS 120B', supportsEffort: false },
 ];
 
 const CLAUDE_MODELS: AgentModelOption[] = [
-  { id: 'default', name: 'Default' },
-  { id: 'sonnet', name: 'Sonnet' },
-  { id: 'opus', name: 'Opus' },
-  { id: 'haiku', name: 'Haiku' },
+  { id: 'default', name: 'Default', supportsEffort: true },
+  { id: 'sonnet', name: 'Sonnet', supportsEffort: true },
+  { id: 'opus', name: 'Opus', supportsEffort: false },
+  { id: 'haiku', name: 'Haiku', supportsEffort: false },
 ];
 
 const AGENT_DEFS: AgentDef[] = [
@@ -206,15 +206,22 @@ const AGENT_DEFS: AgentDef[] = [
 ];
 
 export function listAgents(): AgentInfo[] {
-  return AGENT_DEFS.map((d) => ({
-    id: d.id,
-    name: d.name,
-    available: d.bin ? which(d.bin) !== null : true,
-    capabilities: {
-      ...d.capabilities,
-      models: modelCache.get(d.id) ?? d.capabilities.models,
-    },
-  }));
+  return AGENT_DEFS.map((d) => {
+    const raw = modelCache.get(d.id) ?? d.capabilities.models;
+    const models = raw.map((m) => ({
+      ...m,
+      supportsEffort: m.supportsEffort ?? isModelEffortSupported(d.id, m.id),
+    }));
+    return {
+      id: d.id,
+      name: d.name,
+      available: d.bin ? which(d.bin) !== null : true,
+      capabilities: {
+        ...d.capabilities,
+        models,
+      },
+    };
+  });
 }
 
 const modelCache = new Map<string, AgentModelOption[]>();
@@ -384,7 +391,12 @@ export function listAgentModels(agentId: string): AgentModelOption[] {
   const def = AGENT_DEFS.find((d) => d.id === agentId);
   if (!def) return [];
   const cached = modelCache.get(agentId);
-  if (cached?.length) return cached;
+  if (cached?.length) {
+    return cached.map((m) => ({
+      ...m,
+      supportsEffort: m.supportsEffort ?? isModelEffortSupported(agentId, m.id),
+    }));
+  }
   let models = def.capabilities.models;
   if (def.bin) {
     const bin = which(def.bin);
@@ -393,8 +405,12 @@ export function listAgentModels(agentId: string): AgentModelOption[] {
       if (live.length) models = live;
     }
   }
-  modelCache.set(agentId, models);
-  return models;
+  const augmented = models.map((m) => ({
+    ...m,
+    supportsEffort: m.supportsEffort ?? isModelEffortSupported(agentId, m.id),
+  }));
+  modelCache.set(agentId, augmented);
+  return augmented;
 }
 
 export function thinkingToEffort(thinking?: string): 'low' | 'medium' | 'high' | undefined {
@@ -404,6 +420,33 @@ export function thinkingToEffort(thinking?: string): 'low' | 'medium' | 'high' |
   if (t === 'low' || t === 'minimal') return 'low';
   if (t === 'high' || t === 'extra-high' || t === 'max' || t === 'xhigh') return 'high';
   return 'medium';
+}
+
+export function isModelEffortSupported(agentId?: string, modelId?: string): boolean {
+  const agent = (agentId || '').toLowerCase().trim();
+  const m = (modelId || '').toLowerCase().trim();
+  if (agent === 'antigravity') {
+    if (!m || m === 'default' || m === 'auto') return true;
+    if (m.includes('claude') || m.includes('gpt-') || m.includes('grok') || m.includes('composer')) {
+      return false;
+    }
+    return m.includes('gemini');
+  }
+  if (agent === 'claude') {
+    if (!m || m === 'default' || m === 'sonnet' || m.includes('sonnet')) return true;
+    if (m === 'opus' || m === 'haiku' || m.includes('opus') || m.includes('haiku')) return false;
+    return true;
+  }
+  if (agent === 'cursor') {
+    if (m === 'auto') return false;
+    if (m.includes('haiku') || m === 'gpt-4o-mini' || m.includes('gpt-4o-mini')) return false;
+    return true;
+  }
+  if (agent === 'opencode') {
+    if (m.includes('non-reasoning') || m.includes('standard')) return false;
+    return true;
+  }
+  return true;
 }
 
 /** Antigravity `--effort` is Gemini-only; Claude/GPT models reject it. */
@@ -422,6 +465,7 @@ export function cursorModelFlag(model?: string, thinking?: string): string | und
   const m = (model || '').trim();
   if (!m || m === 'auto' || m === 'default') return undefined;
   if (m.includes('[')) return m;
+  if (!isModelEffortSupported('cursor', m)) return m;
   // Cursor model ids already encode thinking (…-thinking-high, …-xhigh).
   if (/thinking|xhigh|-high|-low|-medium|-max|-fast/i.test(m)) return m;
   const effort = thinkingToEffort(thinking);
@@ -504,8 +548,10 @@ export function buildOpencodeArgv(opts: {
   const argv = [opts.bin, 'run', '--format', 'json', '--auto', '--dir', opts.cwd];
   if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
   if (opts.mode === 'plan') argv.push('--agent', 'plan');
-  const variant = opts.thinking && opts.thinking !== 'medium' ? opts.thinking : undefined;
-  if (variant) argv.push('--variant', variant === 'extra-high' ? 'max' : variant);
+  if (isModelEffortSupported('opencode', opts.model)) {
+    const variant = opts.thinking && opts.thinking !== 'medium' ? opts.thinking : undefined;
+    if (variant) argv.push('--variant', variant === 'extra-high' ? 'max' : variant);
+  }
   if (opts.session) argv.push('--session', opts.session);
   for (const p of opts.imagePaths ?? []) argv.push('--file', p);
   argv.push(opts.text.trim() || 'Please look at the attached image(s).');
@@ -560,8 +606,10 @@ export function claudeSpawnArgs(opts: {
     '--permission-mode', opts.mode === 'plan' ? 'plan' : 'acceptEdits',
   ];
   if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
-  const effort = thinkingToEffort(opts.thinking);
-  if (effort && effort !== 'medium') argv.push('--effort', effort);
+  if (isModelEffortSupported('claude', opts.model)) {
+    const effort = thinkingToEffort(opts.thinking);
+    if (effort && effort !== 'medium') argv.push('--effort', effort);
+  }
   return argv;
 }
 
@@ -642,7 +690,7 @@ function loadAgentSessionsFromDisk(): void {
       if (!def) continue;
       const session: AgentSession = {
         info: { ...info, busy: false, status: 'running' },
-        history: Array.isArray(item.history) ? item.history : [],
+        history: Array.isArray(item.history) ? sanitizeAgentHistory(item.history) : [],
         adapter: null as unknown as AgentAdapter,
         seq: Array.isArray(item.history) && item.history.length > 0 ? (item.history[item.history.length - 1].seq ?? 0) : 0,
         pendingPermissions: new Map(),
@@ -844,6 +892,7 @@ export function agentHistory(agentSessionId: string): AgentEvent[] {
     const history = loadHostChatHistory(session.info.agent, session.info.hostChatId, bin);
     seedHistory(session, history);
   }
+  session.history = sanitizeAgentHistory(session.history);
   return session.history.slice();
 }
 
@@ -1097,6 +1146,41 @@ export function rewriteCliAuthError(stderr: string, agentName: string): string {
   return stderr.trim();
 }
 
+export function isInternalCliNoise(text: string): boolean {
+  if (!text || typeof text !== 'string') return false;
+  const trimmed = text.trim();
+  return (
+    /^declaring permissions:\s*cortex tool/i.test(trimmed) ||
+    /invalid tool call error \(invalid_args\)/i.test(trimmed) ||
+    /is not a valid artifact path; artifacts must be in/i.test(trimmed)
+  );
+}
+
+export function sanitizeCliError(text: string, agentName: string): string {
+  if (!text || typeof text !== 'string') return '';
+  if (isCliAuthError(text)) {
+    return rewriteCliAuthError(text, agentName);
+  }
+  let cleaned = text.trim();
+  if (/^declaring permissions:\s*cortex tool/i.test(cleaned)) {
+    const m = cleaned.match(/invalid tool call error \([^)]*\)\s*(.*)$/i)
+      ?? cleaned.match(/model output error:\s*(.*)$/i);
+    if (m?.[1]) {
+      cleaned = m[1].trim();
+    }
+  }
+  return cleaned;
+}
+
+export function sanitizeAgentHistory(history: AgentEvent[]): AgentEvent[] {
+  return history.filter((e) => {
+    if (e.kind === 'error' && isInternalCliNoise(e.text ?? '')) {
+      return false;
+    }
+    return true;
+  });
+}
+
 function asToolRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -1336,6 +1420,7 @@ export function withoutDuplicateResult(
   streamedText: boolean,
 ): AgentDelta {
   if (ev.kind === 'result' && streamedText) return { kind: 'result', text: '' };
+  if (ev.kind === 'error' && streamedText) return { kind: 'result', text: '' };
   return ev;
 }
 
@@ -1376,7 +1461,7 @@ export function parseOpencodeStreamEvent(msg: Record<string, unknown>): AgentDel
       (typeof part.message === 'string' && part.message) ||
       (typeof msg.message === 'string' && msg.message) ||
       JSON.stringify(msg.error ?? part ?? msg);
-    return [{ kind: 'error', text }];
+    return [{ kind: 'error', text: sanitizeCliError(text, 'OpenCode') }];
   }
   return [];
 }
@@ -1414,7 +1499,8 @@ export function parseAgyStreamEvent(msg: Record<string, unknown>): AgentDelta[] 
     const response = typeof result.response === 'string' ? result.response : '';
     const error = typeof result.error === 'string' ? result.error : '';
     if (status === 'ERROR' || (error && status !== 'SUCCESS')) {
-      return [{ kind: 'error', text: error || 'Antigravity reported an error' }];
+      const cleaned = sanitizeCliError(error || 'Antigravity reported an error', 'Antigravity');
+      return [{ kind: 'error', text: cleaned }];
     }
     return [{ kind: 'result', text: response }];
   }
@@ -2121,9 +2207,8 @@ class AntigravityAdapter implements AgentAdapter {
         }
         return;
       }
-      emit(this.session, isCliAuthError(fail.text ?? '')
-        ? { kind: 'error', text: rewriteCliAuthError(fail.text ?? '', 'Antigravity') }
-        : fail);
+      const cleaned = sanitizeCliError(fail.text ?? '', 'Antigravity');
+      emit(this.session, withoutDuplicateResult({ kind: 'error', text: cleaned }, this.streamedText));
     }).catch(() => {});
   }
 
@@ -2155,8 +2240,8 @@ class AntigravityAdapter implements AgentAdapter {
         this.sawResult = true;
         setBusy(this.session, false);
       }
-      const out = ev.kind === 'error' && isCliAuthError(ev.text ?? '')
-        ? { kind: 'error' as const, text: rewriteCliAuthError(ev.text ?? '', 'Antigravity') }
+      const out = ev.kind === 'error'
+        ? { kind: 'error' as const, text: sanitizeCliError(ev.text ?? '', 'Antigravity') }
         : ev;
       emit(this.session, withoutDuplicateResult(out, this.streamedText));
     }

@@ -34,3 +34,17 @@ describe('parseGitStatusPorcelain', () => {
     });
   });
 });
+
+describe('handleFsRead', () => {
+  test('reads an existing file by path and strips file:// prefix', async () => {
+    const { handleFsRead } = await import('../fs');
+    const content = await handleFsRead(`file://${process.cwd()}/package.json`);
+    expect(content).toContain('"name"');
+  });
+
+  test('throws for non-existent file or directory', async () => {
+    const { handleFsRead } = await import('../fs');
+    expect(handleFsRead('/tmp/non_existent_file_xyz_123.txt')).rejects.toThrow();
+    expect(handleFsRead('/tmp')).rejects.toThrow();
+  });
+});
