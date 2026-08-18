@@ -89,6 +89,12 @@ String friendlyLaunchError(Object error) {
   return raw.replaceFirst(RegExp(r'^RpcException:\s*'), '');
 }
 
+/// Backoff for a dropped WebSocket: 1s, 2s, 4s, 8s, then cap at 15s.
+int reconnectDelayMs(int attempts) {
+  final exp = 1000 * (1 << attempts.clamp(0, 10));
+  return exp.clamp(1000, 15000);
+}
+
 class RpcClient {
   RpcClient(this.wsUrl);
 
@@ -99,6 +105,7 @@ class RpcClient {
   bool _closed = false;
   int _reconnectAttempts = 0;
   Timer? _reconnectTimer;
+  Timer? _heartbeat;
 
   final _pending = <String, Completer<dynamic>>{};
   final _topicSubs = <String, List<void Function(Map<String, dynamic>)>>{};
@@ -119,10 +126,15 @@ class RpcClient {
 
   Future<void> connect() async {
     _closed = false;
+    _reconnectTimer?.cancel();
+    _stopHeartbeat();
     _setStatus(RpcStatus.connecting);
     try {
       final ws = await WebSocket.connect(wsUrl)
           .timeout(const Duration(seconds: 8));
+      // Ping frames keep NAT mappings and phone radios from dropping an idle
+      // socket. Without this the session dies after ~30–60s of no traffic.
+      ws.pingInterval = const Duration(seconds: 20);
       _ws = ws;
       ws.listen(
         _onMessage,
@@ -135,16 +147,20 @@ class RpcClient {
       // UI layer) means reconnects re-authenticate too.
       await performPairingHandshake(_requestRaw);
       _reconnectAttempts = 0;
+      _startHeartbeat();
       _setStatus(RpcStatus.connected);
     } catch (e) {
       _ws?.close();
       _ws = null;
+      _stopHeartbeat();
       _setStatus(RpcStatus.disconnected);
+      if (!_closed) _scheduleReconnect();
       rethrow;
     }
   }
 
   void _onClosed() {
+    _stopHeartbeat();
     _ws = null;
     _failPending('connection closed');
     _setStatus(RpcStatus.disconnected);
@@ -152,8 +168,9 @@ class RpcClient {
   }
 
   void _scheduleReconnect() {
-    final delayMs =
-        (1000 * (1 << _reconnectAttempts)).clamp(1000, 30000);
+    if (_closed) return;
+    _reconnectTimer?.cancel();
+    final delayMs = reconnectDelayMs(_reconnectAttempts);
     _reconnectAttempts++;
     _reconnectTimer = Timer(Duration(milliseconds: delayMs), () {
       if (_closed) return;
@@ -161,9 +178,22 @@ class RpcClient {
     });
   }
 
+  void _startHeartbeat() {
+    _stopHeartbeat();
+    _heartbeat = Timer.periodic(const Duration(seconds: 20), (_) {
+      notify('session.heartbeat', const {});
+    });
+  }
+
+  void _stopHeartbeat() {
+    _heartbeat?.cancel();
+    _heartbeat = null;
+  }
+
   void disconnect() {
     _closed = true;
     _reconnectTimer?.cancel();
+    _stopHeartbeat();
     _failPending('disconnected');
     _ws?.close();
     _ws = null;

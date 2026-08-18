@@ -16,6 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
+import '../widgets/link_actions.dart';
 import '../widgets/not_connected_view.dart';
 import 'cwd_picker.dart';
 
@@ -1098,7 +1099,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
   }
 
   Widget _chat() {
-    final display = _displayEvents(_events);
+    final display = groupAgentDisplay(_events);
     return Column(
       children: [
         Expanded(
@@ -1117,44 +1118,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                           fontStyle: FontStyle.italic)),
                 );
               }
-              return _bubble(display[i]);
+              final item = display[i];
+              if (item.tools != null) return _toolGroup(item.tools!);
+              return _bubble(item.event!);
             },
           ),
         ),
         _composer(),
       ],
     );
-  }
-
-  /// Merge tool-start + tool-end pairs so each tool shows as one compact row.
-  List<AgentEvent> _displayEvents(List<AgentEvent> events) {
-    final out = <AgentEvent>[];
-    final startIdx = <String, int>{};
-
-    for (final e in events) {
-      final ref = e.refId ?? '';
-      if (e.kind == 'tool-start' && ref.isNotEmpty) {
-        startIdx[ref] = out.length;
-        out.add(e);
-        continue;
-      }
-      if (e.kind == 'tool-end' && ref.isNotEmpty && startIdx.containsKey(ref)) {
-        final i = startIdx.remove(ref)!;
-        final start = out[i];
-        out[i] = AgentEvent(
-          seq: e.seq,
-          ts: e.ts,
-          kind: 'tool-end',
-          toolName: e.toolName ?? start.toolName,
-          toolInput: start.toolInput,
-          toolOutput: e.toolOutput,
-          refId: ref,
-        );
-        continue;
-      }
-      out.add(e);
-    }
-    return out;
   }
 
   Widget _bubble(AgentEvent e) {
@@ -1220,9 +1192,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
             ),
             child: MarkdownBody(
               data: e.text ?? '',
+              inlineSyntaxes: [IpAutolinkSyntax()],
+              builders: {'a': LinkActionBuilder()},
               styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
                   .copyWith(
                     p: const TextStyle(color: Colors.white, fontSize: 14),
+                    a: const TextStyle(
+                        color: Color(0xFF93C5FD),
+                        fontSize: 14,
+                        decoration: TextDecoration.underline),
                     code: const TextStyle(
                         color: Color(0xFF6EE7B7),
                         fontFamily: 'monospace',
@@ -1254,9 +1232,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
           padding: const EdgeInsets.all(8),
           child: MarkdownBody(
             data: e.text ?? 'error',
+            inlineSyntaxes: [IpAutolinkSyntax()],
+            builders: {'a': LinkActionBuilder()},
             styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
               p: const TextStyle(color: Color(0xFFEE5555), fontSize: 13),
-              a: const TextStyle(color: Color(0xFF93C5FD), fontSize: 13),
+              a: const TextStyle(
+                  color: Color(0xFF93C5FD),
+                  fontSize: 13,
+                  decoration: TextDecoration.underline),
               code: const TextStyle(
                   color: Color(0xFFEE5555),
                   fontFamily: 'monospace',
@@ -1269,15 +1252,60 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     }
   }
 
-  Widget _toolCard(AgentEvent e, {required bool running}) {
+  Widget _toolGroup(List<AgentEvent> tools) {
+    final running = toolGroupRunning(tools);
+    final summary = toolGroupSummary(tools);
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFF12121C),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF22223A)),
+      ),
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          key: PageStorageKey<int>(tools.first.seq),
+          initiallyExpanded: running,
+          tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+          childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+          leading: Icon(
+            running ? Icons.hourglass_top : Icons.check_circle_outline,
+            size: 18,
+            color: running
+                ? const Color(0xFFF0C040)
+                : const Color(0xFF4ADE80),
+          ),
+          title: Text(
+            toolGroupTitle(tools),
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          ),
+          subtitle: summary.isEmpty
+              ? null
+              : Text(
+                  summary,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11, color: Colors.white54),
+                ),
+          children: [
+            for (final e in tools)
+              _toolCard(e, running: e.kind == 'tool-start', nested: true),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _toolCard(AgentEvent e, {required bool running, bool nested = false}) {
     final detail = (e.toolInput ?? '').trim();
     final output = (e.toolOutput ?? '').trim();
     final showDetail = detail.isNotEmpty && detail != (e.toolName ?? '');
     return Container(
-      margin: const EdgeInsets.symmetric(vertical: 2),
+      margin: EdgeInsets.symmetric(vertical: nested ? 3 : 2),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
-        color: const Color(0xFF12121C),
+        color: nested ? const Color(0xFF0A0A10) : const Color(0xFF12121C),
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: const Color(0xFF22223A)),
       ),

@@ -8,6 +8,8 @@ import 'src/discovery/mdns_discovery.dart';
 import 'src/state/connection.dart';
 import 'src/state/last_host.dart';
 import 'src/screens/launcher_screen.dart';
+import 'src/widgets/connection_lifecycle.dart';
+import 'src/widgets/link_actions.dart';
 
 void main() {
   runApp(const ProviderScope(child: NexusLinkApp()));
@@ -30,6 +32,8 @@ class NexusLinkApp extends StatelessWidget {
         scaffoldBackgroundColor: const Color(0xFF0A0A0F),
         useMaterial3: true,
       ),
+      builder: (context, child) =>
+          ConnectionLifecycle(child: child ?? const SizedBox.shrink()),
       home: const ConnectScreen(),
     );
   }
@@ -145,7 +149,8 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                       child: ListTile(
                         leading: const Icon(Icons.computer),
                         title: Text(h.name),
-                        subtitle: Text('${h.address}:${h.port}'),
+                        subtitle: Text('${h.address}:${h.port}',
+                            style: const TextStyle(color: Color(0xFF93C5FD))),
                         trailing: _connecting
                             ? const SizedBox(
                                 width: 18,
@@ -154,6 +159,11 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                                     CircularProgressIndicator(strokeWidth: 2))
                             : const Icon(Icons.chevron_right),
                         onTap: _connecting ? null : () => _connect(h.wsUrl),
+                        onLongPress: () => showLinkActions(
+                          context,
+                          '${h.address}:${h.port}',
+                          h.wsUrl,
+                        ),
                       ),
                     )),
                 if (_hosts.isEmpty && !_scanning)
@@ -186,7 +196,9 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                       leading: const Icon(Icons.history),
                       title: Text(lastHostLabel(_lastHostUrl!)),
                       subtitle: Text(_lastHostUrl!,
-                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: Color(0xFF93C5FD))),
                       trailing: _connecting
                           ? const SizedBox(
                               width: 18,
@@ -200,6 +212,11 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                               _urlController.text = _lastHostUrl!;
                               _connect(_lastHostUrl!);
                             },
+                      onLongPress: () => showLinkActions(
+                        context,
+                        lastHostLabel(_lastHostUrl!),
+                        _lastHostUrl,
+                      ),
                     ),
                   ),
                 ],

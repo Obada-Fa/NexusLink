@@ -100,6 +100,21 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
     await connect(last);
   }
 
+  /// Silent reconnect used when the app returns to the foreground. Only runs
+  /// if this session already had a host (explicit disconnect clears it).
+  Future<void> ensureConnected() async {
+    if (_disposed) return;
+    if (state.status == RpcStatus.connected ||
+        state.status == RpcStatus.connecting) {
+      return;
+    }
+    final url = state.hostUrl?.trim();
+    if (url == null || url.isEmpty) return;
+    try {
+      await connect(url);
+    } catch (_) {}
+  }
+
   void _teardown() {
     _statusSub?.call();
     _statusSub = null;

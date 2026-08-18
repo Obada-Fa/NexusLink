@@ -322,6 +322,93 @@ class CaptureRegion {
       );
 }
 
+bool isAgentToolEvent(AgentEvent e) =>
+    e.kind == 'tool-start' || e.kind == 'tool-end';
+
+/// Collapse a tool-start + matching tool-end into one row.
+List<AgentEvent> mergeToolEvents(List<AgentEvent> events) {
+  final out = <AgentEvent>[];
+  final startIdx = <String, int>{};
+
+  for (final e in events) {
+    final ref = e.refId ?? '';
+    if (e.kind == 'tool-start' && ref.isNotEmpty) {
+      startIdx[ref] = out.length;
+      out.add(e);
+      continue;
+    }
+    if (e.kind == 'tool-end' && ref.isNotEmpty && startIdx.containsKey(ref)) {
+      final i = startIdx.remove(ref)!;
+      final start = out[i];
+      out[i] = AgentEvent(
+        seq: e.seq,
+        ts: e.ts,
+        kind: 'tool-end',
+        toolName: e.toolName ?? start.toolName,
+        toolInput: start.toolInput,
+        toolOutput: e.toolOutput,
+        refId: ref,
+      );
+      continue;
+    }
+    out.add(e);
+  }
+  return out;
+}
+
+class AgentDisplayItem {
+  final AgentEvent? event;
+  final List<AgentEvent>? tools;
+
+  const AgentDisplayItem.event(this.event) : tools = null;
+  const AgentDisplayItem.tools(this.tools) : event = null;
+
+  bool get isToolGroup => tools != null;
+}
+
+/// Consecutive tools become one expandable group so a Cursor run doesn't
+/// flood the chat with a card per edit/shell.
+List<AgentDisplayItem> groupAgentDisplay(List<AgentEvent> events) {
+  final merged = mergeToolEvents(events);
+  final out = <AgentDisplayItem>[];
+  var i = 0;
+  while (i < merged.length) {
+    if (isAgentToolEvent(merged[i])) {
+      final tools = <AgentEvent>[];
+      while (i < merged.length && isAgentToolEvent(merged[i])) {
+        tools.add(merged[i]);
+        i++;
+      }
+      out.add(AgentDisplayItem.tools(tools));
+    } else {
+      out.add(AgentDisplayItem.event(merged[i]));
+      i++;
+    }
+  }
+  return out;
+}
+
+bool toolGroupRunning(List<AgentEvent> tools) =>
+    tools.any((e) => e.kind == 'tool-start');
+
+String toolGroupTitle(List<AgentEvent> tools) {
+  final n = tools.length;
+  final steps = n == 1 ? 'step' : 'steps';
+  return toolGroupRunning(tools) ? 'Working… $n $steps' : '$n $steps';
+}
+
+String toolGroupSummary(List<AgentEvent> tools) {
+  final names = <String>[];
+  for (final e in tools) {
+    final n = (e.toolName ?? '').trim();
+    if (n.isEmpty) continue;
+    if (names.isEmpty || names.last.toLowerCase() != n.toLowerCase()) {
+      names.add(n);
+    }
+  }
+  return names.join(' · ');
+}
+
 /// "org.gnome.Calculator" → "orggnomecalculator". Dashes/dots vary between the
 /// .desktop id and the runtime WM_CLASS, so fuzzy matching normalizes both.
 /// Mirrors normClass() in apps/mobile-client/src/app/page.tsx.
