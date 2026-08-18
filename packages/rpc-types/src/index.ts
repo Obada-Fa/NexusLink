@@ -41,6 +41,7 @@ export type RpcMethod =
   | 'clipboard.set'
   | 'agent.list'
   | 'agent.createSession'
+  | 'agent.renameSession'
   | 'agent.listSessions'
   | 'agent.listHostChats'
   | 'agent.openHostChat'
@@ -157,6 +158,8 @@ export type Params<M extends RpcMethod> =
     ? {}
     : M extends 'agent.createSession'
     ? { agent: string; cwd?: string; title?: string }
+    : M extends 'agent.renameSession'
+    ? { agentSessionId: string; title: string }
     : M extends 'agent.listSessions'
     ? {}
     : M extends 'agent.listHostChats'
@@ -287,6 +290,8 @@ export type Result<M extends RpcMethod> =
     ? AgentInfo[]
     : M extends 'agent.createSession'
     ? AgentSessionInfo
+    : M extends 'agent.renameSession'
+    ? { ok: boolean; title: string }
     : M extends 'agent.listSessions'
     ? AgentSessionInfo[]
     : M extends 'agent.listHostChats'

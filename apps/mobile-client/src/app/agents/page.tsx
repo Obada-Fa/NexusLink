@@ -66,21 +66,21 @@ function parentUnixPath(path: string): string {
 }
 
 function mergeToolEvents(events: AgentEvent[]): AgentEvent[] {
-  const out: AgentEvent[] = [];
+  const mergedTools: AgentEvent[] = [];
   const startIdx = new Map<string, number>();
 
   for (const e of events) {
     const ref = e.refId ?? '';
     if (e.kind === 'tool-start' && ref) {
-      startIdx.set(ref, out.length);
-      out.push(e);
+      startIdx.set(ref, mergedTools.length);
+      mergedTools.push(e);
       continue;
     }
     if (e.kind === 'tool-end' && ref && startIdx.has(ref)) {
       const i = startIdx.get(ref)!;
       startIdx.delete(ref);
-      const start = out[i]!;
-      out[i] = {
+      const start = mergedTools[i]!;
+      mergedTools[i] = {
         ...start,
         seq: e.seq,
         ts: e.ts,
@@ -90,7 +90,29 @@ function mergeToolEvents(events: AgentEvent[]): AgentEvent[] {
       };
       continue;
     }
-    out.push(e);
+    mergedTools.push(e);
+  }
+
+  const out: AgentEvent[] = [];
+  let i = 0;
+  while (i < mergedTools.length) {
+    const cur = mergedTools[i];
+    if (cur.kind === 'text' || cur.kind === 'text-delta') {
+      let combined = cur.text ?? '';
+      let j = i + 1;
+      while (
+        j < mergedTools.length &&
+        (mergedTools[j].kind === 'text' || mergedTools[j].kind === 'text-delta')
+      ) {
+        combined += mergedTools[j].text ?? '';
+        j++;
+      }
+      out.push({ ...cur, kind: 'text', text: combined });
+      i = j;
+    } else {
+      out.push(cur);
+      i++;
+    }
   }
   return out;
 }
@@ -225,15 +247,56 @@ export default function AgentsPage() {
     [client, openSession],
   );
 
+  const renameSession = useCallback(
+    async (session: AgentSessionInfo) => {
+      const next = window.prompt('Rename chat:', session.title);
+      if (!next || !next.trim() || next.trim() === session.title) return;
+      const clean = next.trim();
+      const updated = { ...session, title: clean };
+      if (active?.agentSessionId === session.agentSessionId) {
+        setActive(updated);
+      }
+      setSessions((prev) =>
+        prev.map((s) => (s.agentSessionId === session.agentSessionId ? updated : s)),
+      );
+      if (client) {
+        try {
+          await client.request('agent.renameSession', {
+            agentSessionId: session.agentSessionId,
+            title: clean,
+          });
+        } catch {}
+      }
+    },
+    [active, client],
+  );
+
   const send = useCallback(async () => {
     const text = draft.trim();
     if (!text || !client || !active) return;
     setDraft('');
+    const currentTitle = (active.title || '').trim();
+    const isDefault =
+      !currentTitle ||
+      currentTitle === 'Agent' ||
+      currentTitle === 'Host chat' ||
+      agents.some((a) => a.name === currentTitle || a.id === currentTitle);
+    if (isDefault) {
+      const summary = text.split('\n')[0].trim();
+      const clipped = summary.length > 50 ? `${summary.slice(0, 47)}…` : summary;
+      if (clipped) {
+        const updated = { ...active, title: clipped };
+        setActive(updated);
+        setSessions((prev) =>
+          prev.map((s) => (s.agentSessionId === active.agentSessionId ? updated : s)),
+        );
+      }
+    }
     await client.request('agent.prompt', {
       agentSessionId: active.agentSessionId,
       text,
     });
-  }, [draft, client, active]);
+  }, [draft, client, active, agents]);
 
   return (
     <div style={styles.wrapper}>
@@ -241,7 +304,13 @@ export default function AgentsPage() {
         <button onClick={() => (active ? setActive(null) : router.push('/'))} style={styles.barBtn}>
           {active ? '←' : '⌂'}
         </button>
-        <span style={styles.title}>{active?.title ?? 'Agents'}</span>
+        <span
+          onClick={() => active && void renameSession(active)}
+          style={{ ...styles.title, cursor: active ? 'pointer' : 'default' }}
+          title={active ? 'Click to rename' : undefined}
+        >
+          {active?.title ?? 'Agents'} {active ? '✎' : ''}
+        </span>
         {active ? (
           <button onClick={() => setActive(null)} style={styles.barBtn} title="Select agent">
             ☰
@@ -284,10 +353,32 @@ export default function AgentsPage() {
           ))}
           {sessions.length > 0 && <h2 style={styles.section}>Recent</h2>}
           {sessions.map((s) => (
-            <button key={s.agentSessionId} onClick={() => openSession(s)} style={styles.row}>
-              <strong>{s.title}</strong>
-              <span style={styles.muted}>{s.cwd}</span>
-            </button>
+            <div
+              key={s.agentSessionId}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                marginBottom: 8,
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => openSession(s)}
+                style={{ ...styles.row, marginBottom: 0, flex: 1 }}
+              >
+                <strong>{s.title}</strong>
+                <span style={styles.muted}>{s.cwd}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void renameSession(s)}
+                title="Rename chat"
+                style={styles.barBtn}
+              >
+                ✎
+              </button>
+            </div>
           ))}
           {hostChats.length > 0 && <h2 style={styles.section}>On this PC</h2>}
           {hostChats.map((c) => (
@@ -547,11 +638,44 @@ function CwdPicker({
 }
 
 function Bubble({ e }: { e: AgentEvent }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    if (!e.text) return;
+    void navigator.clipboard.writeText(e.text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   if (e.kind === 'user') {
-    return <div style={{ ...styles.bubble, ...styles.user }}>{e.text}</div>;
+    return <div style={{ ...styles.bubble, ...styles.user, userSelect: 'text', WebkitUserSelect: 'text' }}>{e.text}</div>;
   }
   if (e.kind === 'text' || (e.kind === 'result' && e.text)) {
-    return <pre style={{ ...styles.bubble, ...styles.assistant }}>{e.text}</pre>;
+    return (
+      <div style={{ ...styles.bubble, ...styles.assistant, userSelect: 'text', WebkitUserSelect: 'text' }}>
+        <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'inherit', userSelect: 'text', WebkitUserSelect: 'text' }}>
+          {e.text}
+        </pre>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
+          <button
+            type="button"
+            onClick={handleCopy}
+            title="Copy message"
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: copied ? '#4ade80' : '#888899',
+              cursor: 'pointer',
+              fontSize: 12,
+              padding: '2px 6px',
+              borderRadius: 4,
+            }}
+          >
+            {copied ? '✓ Copied' : '📋 Copy'}
+          </button>
+        </div>
+      </div>
+    );
   }
   if (e.kind === 'thinking' || e.kind === 'status') {
     return <div style={styles.thinking}>{e.text || 'Thinking…'}</div>;

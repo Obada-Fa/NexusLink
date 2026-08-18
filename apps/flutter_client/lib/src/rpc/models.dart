@@ -241,6 +241,23 @@ class AgentSessionInfo {
         busy: j['busy'] as bool? ?? false,
         status: (j['status'] as String?) ?? 'running',
       );
+
+  AgentSessionInfo copyWith({
+    String? agentSessionId,
+    String? agent,
+    String? cwd,
+    String? title,
+    bool? busy,
+    String? status,
+  }) =>
+      AgentSessionInfo(
+        agentSessionId: agentSessionId ?? this.agentSessionId,
+        agent: agent ?? this.agent,
+        cwd: cwd ?? this.cwd,
+        title: title ?? this.title,
+        busy: busy ?? this.busy,
+        status: status ?? this.status,
+      );
 }
 
 class AgentHostChat {
@@ -366,8 +383,12 @@ class AgentDisplayItem {
   bool get isToolGroup => tools != null;
 }
 
+bool _isAssistantTextEvent(AgentEvent e) =>
+    e.kind == 'text' || e.kind == 'text-delta';
+
 /// Consecutive tools become one expandable group so a Cursor run doesn't
 /// flood the chat with a card per edit/shell.
+/// Consecutive assistant text chunks are unified into a single markdown bubble.
 List<AgentDisplayItem> groupAgentDisplay(List<AgentEvent> events) {
   final merged = mergeToolEvents(events);
   final out = <AgentDisplayItem>[];
@@ -380,6 +401,20 @@ List<AgentDisplayItem> groupAgentDisplay(List<AgentEvent> events) {
         i++;
       }
       out.add(AgentDisplayItem.tools(tools));
+    } else if (_isAssistantTextEvent(merged[i])) {
+      final first = merged[i];
+      final buffer = StringBuffer(first.text ?? '');
+      i++;
+      while (i < merged.length && _isAssistantTextEvent(merged[i])) {
+        buffer.write(merged[i].text ?? '');
+        i++;
+      }
+      out.add(AgentDisplayItem.event(AgentEvent(
+        seq: first.seq,
+        ts: first.ts,
+        kind: 'text',
+        text: buffer.toString(),
+      )));
     } else {
       out.add(AgentDisplayItem.event(merged[i]));
       i++;

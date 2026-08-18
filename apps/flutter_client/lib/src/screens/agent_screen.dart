@@ -5,9 +5,9 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
@@ -459,6 +459,28 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       }
       final photos = List<_PendingPhoto>.from(_photos);
       _input.clear();
+      final currentTitle = session.title.trim();
+      final isDefaultTitle = currentTitle.isEmpty ||
+          currentTitle == 'Agent' ||
+          currentTitle == 'Host chat' ||
+          currentTitle == 'Antigravity' ||
+          currentTitle == 'OpenCode' ||
+          currentTitle == 'Cursor CLI' ||
+          currentTitle == 'Claude Code' ||
+          currentTitle == 'Demo Agent' ||
+          _agents.any((a) => a.name == currentTitle || a.id == currentTitle);
+      if (isDefaultTitle && text.isNotEmpty) {
+        final summary = text.split('\n').first.trim();
+        final clipped =
+            summary.length > 50 ? '${summary.substring(0, 47)}…' : summary;
+        if (clipped.isNotEmpty) {
+          final updated = session.copyWith(title: clipped);
+          _active = updated;
+          final idx = _sessions
+              .indexWhere((s) => s.agentSessionId == session.agentSessionId);
+          if (idx != -1) _sessions[idx] = updated;
+        }
+      }
       setState(() {
         _busy = true;
         _pendingThumbs = photos.map((p) => p.bytes).toList();
@@ -624,6 +646,32 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         return true;
       }
     }
+    if (cmd == 'rename' || cmd == 'title') {
+      if (_active == null) return false;
+      if (arg.isNotEmpty) {
+        final updated = _active!.copyWith(title: arg);
+        setState(() {
+          _active = updated;
+          final idx = _sessions
+              .indexWhere((s) => s.agentSessionId == updated.agentSessionId);
+          if (idx != -1) _sessions[idx] = updated;
+        });
+        final client = _client;
+        if (client != null) {
+          try {
+            await client.request('agent.renameSession', {
+              'agentSessionId': _active!.agentSessionId,
+              'title': arg,
+            });
+          } catch (_) {}
+        }
+        _localStatus('Chat renamed to "$arg".');
+        return true;
+      } else {
+        await _renameSessionDialog(_active!);
+        return true;
+      }
+    }
     return false;
   }
 
@@ -643,6 +691,76 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       }
     }
     return false;
+  }
+
+  Future<void> _deleteSession(AgentSessionInfo s) async {
+    final client = _client;
+    if (client != null) {
+      try {
+        await client
+            .request('agent.close', {'agentSessionId': s.agentSessionId});
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    setState(() {
+      _sessions.removeWhere((x) => x.agentSessionId == s.agentSessionId);
+      if (_active?.agentSessionId == s.agentSessionId) {
+        _active = null;
+        _events.clear();
+        _busy = false;
+      }
+    });
+  }
+
+  Future<void> _renameSessionDialog(AgentSessionInfo s) async {
+    final controller = TextEditingController(text: s.title);
+    final newTitle = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF151522),
+        title: const Text('Rename chat', style: TextStyle(fontSize: 16)),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'Chat name',
+            isDense: true,
+          ),
+          onSubmitted: (val) => Navigator.pop(ctx, val.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (newTitle == null || newTitle.isEmpty || !mounted) return;
+    final updated = s.copyWith(title: newTitle);
+    setState(() {
+      if (_active?.agentSessionId == s.agentSessionId) {
+        _active = updated;
+      }
+      final idx =
+          _sessions.indexWhere((x) => x.agentSessionId == s.agentSessionId);
+      if (idx != -1) {
+        _sessions[idx] = updated;
+      }
+    });
+    final client = _client;
+    if (client != null) {
+      try {
+        await client.request('agent.renameSession', {
+          'agentSessionId': s.agentSessionId,
+          'title': newTitle,
+        });
+      } catch (_) {}
+    }
   }
 
   Future<void> _closeActive() async {
@@ -991,9 +1109,38 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                   icon: const Icon(Icons.arrow_back),
                   onPressed: _leaveChat,
                 ),
-          title: Text(_active?.title ?? 'Agents',
-              style: const TextStyle(fontSize: 16)),
+          title: _active == null
+              ? const Text('Agents', style: TextStyle(fontSize: 16))
+              : InkWell(
+                  onTap: () => _renameSessionDialog(_active!),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Flexible(
+                          child: Text(
+                            _active?.title ?? 'Agents',
+                            style: const TextStyle(fontSize: 16),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        const Icon(Icons.edit_outlined,
+                            size: 14, color: Colors.white38),
+                      ],
+                    ),
+                  ),
+                ),
           actions: [
+            if (_active != null)
+              IconButton(
+                tooltip: 'Rename chat',
+                icon: const Icon(Icons.edit_outlined),
+                onPressed: () => _renameSessionDialog(_active!),
+              ),
             IconButton(
               tooltip: 'Select agent',
               icon: const Icon(Icons.smart_toy_outlined),
@@ -1073,8 +1220,45 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
                 color: const Color(0xFF2A6AFF),
               ),
               title: Text(s.title),
-              subtitle: Text(s.cwd, maxLines: 1, overflow: TextOverflow.ellipsis),
+              subtitle:
+                  Text(s.cwd, maxLines: 1, overflow: TextOverflow.ellipsis),
+              trailing: PopupMenuButton<String>(
+                icon: const Icon(Icons.more_vert,
+                    size: 18, color: Colors.white38),
+                onSelected: (val) {
+                  if (val == 'rename') {
+                    _renameSessionDialog(s);
+                  } else if (val == 'delete') {
+                    _deleteSession(s);
+                  }
+                },
+                itemBuilder: (_) => [
+                  const PopupMenuItem(
+                    value: 'rename',
+                    child: Row(
+                      children: [
+                        Icon(Icons.edit_outlined, size: 16),
+                        SizedBox(width: 8),
+                        Text('Rename'),
+                      ],
+                    ),
+                  ),
+                  const PopupMenuItem(
+                    value: 'delete',
+                    child: Row(
+                      children: [
+                        Icon(Icons.delete_outline,
+                            size: 16, color: Color(0xFFEE5555)),
+                        SizedBox(width: 8),
+                        Text('Delete',
+                            style: TextStyle(color: Color(0xFFEE5555))),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
               onTap: () => _openSession(s),
+              onLongPress: () => _renameSessionDialog(s),
             ),
         ],
         if (_hostChats.isNotEmpty) ...[
@@ -1140,46 +1324,48 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         final thumbs = _thumbsBySeq[e.seq];
         return _align(
           Alignment.centerRight,
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              if (thumbs != null && thumbs.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: Wrap(
-                    spacing: 6,
-                    runSpacing: 6,
-                    alignment: WrapAlignment.end,
-                    children: [
-                      for (final b in thumbs)
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(10),
-                          child: Image.memory(b,
-                              width: 88, height: 88, fit: BoxFit.cover),
-                        ),
-                    ],
+          SelectionArea(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                if (thumbs != null && thumbs.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      alignment: WrapAlignment.end,
+                      children: [
+                        for (final b in thumbs)
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(10),
+                            child: Image.memory(b,
+                                width: 88, height: 88, fit: BoxFit.cover),
+                          ),
+                      ],
+                    ),
+                  )
+                else if (e.images.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Text(e.images.join(', '),
+                        style: const TextStyle(
+                            color: Colors.white38, fontSize: 11)),
                   ),
-                )
-              else if (e.images.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: Text(e.images.join(', '),
-                      style: const TextStyle(
-                          color: Colors.white38, fontSize: 11)),
-                ),
-              if ((e.text ?? '').isNotEmpty)
-                Container(
-                  margin: const EdgeInsets.symmetric(vertical: 4),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF2A6AFF),
-                    borderRadius: BorderRadius.circular(14),
+                if ((e.text ?? '').isNotEmpty)
+                  Container(
+                    margin: const EdgeInsets.symmetric(vertical: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF2A6AFF),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Text(e.text ?? '',
+                        style: const TextStyle(color: Colors.white)),
                   ),
-                  child: Text(e.text ?? '',
-                      style: const TextStyle(color: Colors.white)),
-                ),
-            ],
+              ],
+            ),
           ),
         );
       case 'text':
@@ -1188,29 +1374,43 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         if ((e.text ?? '').trim().isEmpty) return const SizedBox.shrink();
         return _align(
           Alignment.centerLeft,
-          Container(
-            margin: const EdgeInsets.symmetric(vertical: 4),
-            padding: const EdgeInsets.all(10),
-            decoration: BoxDecoration(
-              color: const Color(0xFF151522),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: MarkdownBody(
-              data: e.text ?? '',
-              inlineSyntaxes: [IpAutolinkSyntax()],
-              builders: {'a': LinkActionBuilder()},
-              styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
-                  .copyWith(
-                    p: const TextStyle(color: Colors.white, fontSize: 14),
-                    a: const TextStyle(
-                        color: Color(0xFF93C5FD),
-                        fontSize: 14,
-                        decoration: TextDecoration.underline),
-                    code: const TextStyle(
-                        color: Color(0xFF6EE7B7),
-                        fontFamily: 'monospace',
-                        fontSize: 12),
+          SelectionArea(
+            child: Container(
+              margin: const EdgeInsets.symmetric(vertical: 4),
+              padding: const EdgeInsets.fromLTRB(12, 10, 10, 6),
+              decoration: BoxDecoration(
+                color: const Color(0xFF151522),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  MarkdownBody(
+                    data: e.text ?? '',
+                    inlineSyntaxes: [IpAutolinkSyntax()],
+                    builders: {'a': LinkActionBuilder()},
+                    styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
+                        .copyWith(
+                          p: const TextStyle(color: Colors.white, fontSize: 14),
+                          a: const TextStyle(
+                              color: Color(0xFF93C5FD),
+                              fontSize: 14,
+                              decoration: TextDecoration.underline),
+                          code: const TextStyle(
+                              color: Color(0xFF6EE7B7),
+                              fontFamily: 'monospace',
+                              fontSize: 12),
+                        ),
                   ),
+                  const SizedBox(height: 2),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      _CopyButton(text: e.text ?? ''),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
         );
@@ -1218,9 +1418,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       case 'status':
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-          child: Text(e.text ?? 'Thinking…',
-              style: const TextStyle(
-                  color: Colors.white38, fontSize: 12, fontStyle: FontStyle.italic)),
+          child: SelectionArea(
+            child: Text(e.text ?? 'Thinking…',
+                style: const TextStyle(
+                    color: Colors.white38, fontSize: 12, fontStyle: FontStyle.italic)),
+          ),
         );
       case 'tool-start':
         return _toolCard(e, running: true);
@@ -1229,26 +1431,30 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
       case 'permission-request':
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-          child: Text(e.text ?? 'Waiting for permission…',
-              style: const TextStyle(color: Color(0xFFF0C040), fontSize: 12)),
+          child: SelectionArea(
+            child: Text(e.text ?? 'Waiting for permission…',
+                style: const TextStyle(color: Color(0xFFF0C040), fontSize: 12)),
+          ),
         );
       case 'error':
         return Padding(
           padding: const EdgeInsets.all(8),
-          child: MarkdownBody(
-            data: e.text ?? 'error',
-            inlineSyntaxes: [IpAutolinkSyntax()],
-            builders: {'a': LinkActionBuilder()},
-            styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-              p: const TextStyle(color: Color(0xFFEE5555), fontSize: 13),
-              a: const TextStyle(
-                  color: Color(0xFF93C5FD),
-                  fontSize: 13,
-                  decoration: TextDecoration.underline),
-              code: const TextStyle(
-                  color: Color(0xFFEE5555),
-                  fontFamily: 'monospace',
-                  fontSize: 12),
+          child: SelectionArea(
+            child: MarkdownBody(
+              data: e.text ?? 'error',
+              inlineSyntaxes: [IpAutolinkSyntax()],
+              builders: {'a': LinkActionBuilder()},
+              styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
+                p: const TextStyle(color: Color(0xFFEE5555), fontSize: 13),
+                a: const TextStyle(
+                    color: Color(0xFF93C5FD),
+                    fontSize: 13,
+                    decoration: TextDecoration.underline),
+                code: const TextStyle(
+                    color: Color(0xFFEE5555),
+                    fontFamily: 'monospace',
+                    fontSize: 12),
+              ),
             ),
           ),
         );
@@ -1306,61 +1512,63 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
     final detail = (e.toolInput ?? '').trim();
     final output = (e.toolOutput ?? '').trim();
     final showDetail = detail.isNotEmpty && detail != (e.toolName ?? '');
-    return Container(
-      margin: EdgeInsets.symmetric(vertical: nested ? 3 : 2),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: nested ? const Color(0xFF0A0A10) : const Color(0xFF12121C),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFF22223A)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(running ? Icons.play_arrow : Icons.check,
-                  size: 14,
-                  color: running
-                      ? const Color(0xFFF0C040)
-                      : const Color(0xFF4ADE80)),
-              const SizedBox(width: 6),
-              Expanded(
+    return SelectionArea(
+      child: Container(
+        margin: EdgeInsets.symmetric(vertical: nested ? 3 : 2),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: nested ? const Color(0xFF0A0A10) : const Color(0xFF12121C),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0xFF22223A)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(running ? Icons.play_arrow : Icons.check,
+                    size: 14,
+                    color: running
+                        ? const Color(0xFFF0C040)
+                        : const Color(0xFF4ADE80)),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    e.toolName ?? 'tool',
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w600, fontSize: 12),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            if (showDetail)
+              Padding(
+                padding: const EdgeInsets.only(top: 4, left: 20),
                 child: Text(
-                  e.toolName ?? 'tool',
-                  style: const TextStyle(
-                      fontWeight: FontWeight.w600, fontSize: 12),
+                  detail,
+                  maxLines: 2,
                   overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11, color: Colors.white54),
                 ),
               ),
-            ],
-          ),
-          if (showDetail)
-            Padding(
-              padding: const EdgeInsets.only(top: 4, left: 20),
-              child: Text(
-                detail,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 11, color: Colors.white54),
+            if (!running && output.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4, left: 20),
+                child: Text(
+                  output,
+                  maxLines: _looksLikeDiff(output) ? 12 : 4,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontFamily: _looksLikeDiff(output) ? 'monospace' : null,
+                      fontSize: 11,
+                      color: _looksLikeDiff(output)
+                          ? const Color(0xFF93C5FD)
+                          : const Color(0xFF6EE7B7)),
+                ),
               ),
-            ),
-          if (!running && output.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 4, left: 20),
-              child: Text(
-                output,
-                maxLines: _looksLikeDiff(output) ? 12 : 4,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                    fontFamily: _looksLikeDiff(output) ? 'monospace' : null,
-                    fontSize: 11,
-                    color: _looksLikeDiff(output)
-                        ? const Color(0xFF93C5FD)
-                        : const Color(0xFF6EE7B7)),
-              ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -1551,6 +1759,60 @@ class _AgentScreenState extends ConsumerState<AgentScreen> {
         side: BorderSide(
           color: active ? const Color(0xFF2A6AFF) : const Color(0xFF2A2A40),
         ),
+      ),
+    );
+  }
+}
+
+class _CopyButton extends StatefulWidget {
+  final String text;
+  const _CopyButton({required this.text});
+
+  @override
+  State<_CopyButton> createState() => _CopyButtonState();
+}
+
+class _CopyButtonState extends State<_CopyButton> {
+  bool _copied = false;
+  Timer? _timer;
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _copy() async {
+    if (widget.text.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: widget.text));
+    if (!mounted) return;
+    setState(() => _copied = true);
+    _timer?.cancel();
+    _timer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _copied = false);
+    });
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Copied to clipboard'),
+        duration: Duration(seconds: 1),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      visualDensity: VisualDensity.compact,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minWidth: 26, minHeight: 26),
+      tooltip: 'Copy message',
+      onPressed: _copy,
+      icon: Icon(
+        _copied ? Icons.check : Icons.copy_rounded,
+        size: 14,
+        color: _copied ? const Color(0xFF4ADE80) : Colors.white38,
       ),
     );
   }

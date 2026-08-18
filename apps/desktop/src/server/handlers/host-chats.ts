@@ -47,14 +47,14 @@ export function cleanMessageText(raw: string): string {
   return text;
 }
 
-function clipTitle(text: string): string {
+export function clipTitle(text: string): string {
   const cleaned = cleanMessageText(text);
   const t = cleaned.replace(/\s+/g, ' ').trim();
   if (!t) return '';
   return t.length > 72 ? `${t.slice(0, 69)}…` : t;
 }
 
-function titleFromEvents(events: HostChatDelta[], fallback: string): string {
+export function titleFromEvents(events: HostChatDelta[], fallback: string): string {
   const user = events.find((e) => e.kind === 'user' && e.text?.trim());
   return clipTitle(user?.text ?? '') || fallback;
 }
@@ -595,10 +595,16 @@ export function listAgyHostChats(): AgentHostChat[] {
         } catch {
           // keep now
         }
+        let title = 'Antigravity conversation';
+        try {
+          title = titleFromEvents(loadAgyHistory(id), title);
+        } catch {
+          // keep fallback
+        }
         out.push({
           agent: 'antigravity',
           hostChatId: id,
-          title: 'Antigravity conversation',
+          title,
           cwd: '',
           updatedAt,
           resumable: true,
