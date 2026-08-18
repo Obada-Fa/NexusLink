@@ -135,6 +135,18 @@ void main() {
       expect(toolGroupTitle(items[0].tools!), 'Working… 2 steps');
     });
 
+    test('closeOpenTools ends a dangling tool-start so Working can clear', () {
+      final events = [
+        ev(1, 'tool-start', name: 'shell', ref: 'b', input: 'kill the host'),
+      ];
+      expect(transcriptHasOpenTools(events), isTrue);
+      final settled = closeOpenTools(events, output: 'Interrupted.');
+      expect(transcriptHasOpenTools(settled), isFalse);
+      expect(groupAgentDisplay(settled).single.tools!.single.kind, 'tool-end');
+      expect(groupAgentDisplay(settled).single.tools!.single.toolOutput,
+          'Interrupted.');
+    });
+
     test('merges consecutive text deltas into a single unified assistant message', () {
       final items = groupAgentDisplay([
         AgentEvent(seq: 1, ts: 1, kind: 'user', text: 'hello'),

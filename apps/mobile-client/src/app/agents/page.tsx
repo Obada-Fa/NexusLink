@@ -30,6 +30,7 @@ interface AgentInfo {
   id: string;
   name: string;
   available: boolean;
+  icon?: string;
   capabilities?: AgentCapabilities;
 }
 
@@ -41,6 +42,7 @@ interface AgentSessionInfo {
   busy: boolean;
   status: string;
   hostChatId?: string;
+  icon?: string;
 }
 
 interface AgentHostChat {
@@ -51,6 +53,7 @@ interface AgentHostChat {
   updatedAt: number;
   resumable: boolean;
   source: string;
+  icon?: string;
 }
 
 type Picking =
@@ -91,20 +94,66 @@ function getAgentThemeBackground(agentId?: string): string {
   }
 }
 
-function AgentIcon({ agentId, name, size = 32 }: { agentId: string; name: string; size?: number }) {
+function getUserThemeBackground(agentId?: string): string {
+  switch (agentId) {
+    case 'cursor': return '#4b5563'; // gray
+    case 'antigravity': return '#9333ea'; // purple
+    case 'claude': return '#d97757'; // terracotta/orange
+    case 'opencode': return '#0d9488'; // teal
+    default: return '#2a6aff'; // default blue
+  }
+}
+
+function AgentIcon({
+  agentId,
+  name,
+  icon,
+  size = 32,
+}: {
+  agentId: string;
+  name: string;
+  icon?: string;
+  size?: number;
+}) {
+  if (icon && icon.startsWith('data:image/')) {
+    return (
+      <div
+        style={{
+          width: size,
+          height: size,
+          borderRadius: Math.round(size * 0.22),
+          overflow: 'hidden',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+        }}
+      >
+        <img
+          src={icon}
+          alt={name}
+          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+        />
+      </div>
+    );
+  }
+
   let outlinePath = null;
   switch (agentId) {
     case 'claude':
       outlinePath = (
-        <path d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4L12 2z" />
+        <path
+          fill="currentColor"
+          d="M12 2l2.4 7.6L22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4L12 2z"
+        />
       );
       break;
     case 'cursor':
       outlinePath = (
-        <>
-          <polyline points="16 18 22 12 16 6" />
-          <polyline points="8 6 2 12 8 18" />
-        </>
+        <path
+          fill="currentColor"
+          d="M19.5 2.5a.6.6 0 0 1 .6.7l-1.3 19.8a.6.6 0 0 1-.9.4l-5.6-7.3a.6.6 0 0 0-.3-.2l-9.1-1.2a.6.6 0 0 1-.4-.9l16.2-11.2a.6.6 0 0 1 .8-.1z"
+        />
       );
       break;
     case 'opencode':
@@ -117,12 +166,10 @@ function AgentIcon({ agentId, name, size = 32 }: { agentId: string; name: string
       break;
     case 'antigravity':
       outlinePath = (
-        <>
-          <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z" />
-          <path d="m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z" />
-          <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0" />
-          <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" />
-        </>
+        <path
+          fill="currentColor"
+          d="M5.39 18.3c-.18-.07-.25-.16-.25-.32 0-.22.12-.42.5-.83.8-.85 1.35-1.87 1.92-3.59.18-.54.3-.97.9-2.99.35-1.23.66-2.13.97-2.78.55-1.14 1.19-1.77 2.01-1.98.2-.05.29-.06.58-.06.74 0 1.23.21 1.77.77.28.3.52.64.76 1.13.36.71.66 1.57 1.08 3.04.13.47.33 1.18.44 1.57.55 1.94 1.04 3.16 1.64 4.08.22.34.39.55.72.9.32.34.43.53.43.75 0 .12-.01.15-.06.21-.18.22-.58.24-.96.06-.46-.22-1.23-.89-1.74-1.53-.3-.38-.69-.98-1.13-1.73-.86-1.48-1.25-1.93-1.92-2.24-.33-.16-.52-.19-1.04-.19-.48 0-.58.01-.9.13-.42.16-.79.43-1.14.87-.25.31-.41.56-.87 1.35-.45.77-.85 1.4-1.11 1.73-.65.84-1.54 1.58-2.06 1.71-.15.04-.46.04-.56 0z"
+        />
       );
       break;
   }
@@ -135,11 +182,11 @@ function AgentIcon({ agentId, name, size = 32 }: { agentId: string; name: string
           height={size * 0.75}
           viewBox="0 0 24 24"
           fill="none"
-          stroke="currentColor"
+          stroke={agentId === 'opencode' ? 'currentColor' : 'none'}
           strokeWidth="1.5"
           strokeLinecap="round"
           strokeLinejoin="round"
-          style={{ opacity: 0.8 }}
+          style={{ opacity: 0.9 }}
         >
           {outlinePath}
         </svg>
@@ -566,13 +613,27 @@ export default function AgentsPage() {
         <button onClick={() => (active ? setActive(null) : router.push('/'))} style={styles.barBtn}>
           {active ? '←' : '⌂'}
         </button>
-        <span
+        <div
           onClick={() => active && void renameSession(active)}
-          style={{ ...styles.title, cursor: active ? 'pointer' : 'default' }}
+          style={{
+            ...styles.title,
+            cursor: active ? 'pointer' : 'default',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+          }}
           title={active ? 'Click to rename' : undefined}
         >
-          {active?.title ?? 'Agents'} {active ? '✎' : ''}
-        </span>
+          {active && (
+            <AgentIcon
+              agentId={active.agent}
+              name={active.title}
+              icon={active.icon}
+              size={22}
+            />
+          )}
+          <span>{active?.title ?? 'Agents'} {active ? '✎' : ''}</span>
+        </div>
         {active ? (
           <button onClick={() => setActive(null)} style={styles.barBtn} title="Select agent">
             ☰
@@ -606,7 +667,7 @@ export default function AgentsPage() {
               onClick={() => newChat(a)}
               style={{ ...styles.row, opacity: a.available ? 1 : 0.4 }}
             >
-              <AgentIcon agentId={a.id} name={a.name} />
+              <AgentIcon agentId={a.id} name={a.name} icon={a.icon} />
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                 <strong>{a.name}</strong>
                 <span style={styles.muted}>
@@ -657,7 +718,7 @@ export default function AgentsPage() {
                     onClick={() => openSession(s)}
                     style={{ ...styles.row, marginBottom: 0, flex: 1 }}
                   >
-                    <AgentIcon agentId={s.agent} name={s.title} />
+                    <AgentIcon agentId={s.agent} name={s.title} icon={s.icon} />
                     <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                       <strong>{s.title}</strong>
                       <span style={styles.muted}>
@@ -694,7 +755,7 @@ export default function AgentsPage() {
               }
               return visible.map((c) => (
                 <button key={`${c.agent}-${c.hostChatId}`} onClick={() => openHostChat(c)} style={styles.row}>
-                  <AgentIcon agentId={c.agent} name={c.title} />
+                  <AgentIcon agentId={c.agent} name={c.title} icon={c.icon} />
                   <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                     <strong>{c.title}</strong>
                     <span style={styles.muted}>
@@ -1208,7 +1269,7 @@ function Bubble({ e, agentId }: { e: AgentEvent; agentId?: string }) {
   };
 
   if (e.kind === 'user') {
-    return <div style={{ ...styles.bubble, ...styles.user, userSelect: 'text', WebkitUserSelect: 'text' }}>{e.text}</div>;
+    return <div style={{ ...styles.bubble, ...styles.user, background: getUserThemeBackground(agentId), userSelect: 'text', WebkitUserSelect: 'text' }}>{e.text}</div>;
   }
   if (e.kind === 'text' || (e.kind === 'result' && e.text)) {
     return (
@@ -1379,7 +1440,7 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: 'pre-wrap',
     fontSize: 14,
   },
-  user: { marginLeft: 'auto', background: '#2a6aff', color: '#fff' },
+  user: { marginLeft: 'auto', background: '#9333ea', color: '#fff' },
   assistant: {
     background: '#151522',
     fontFamily: 'system-ui, sans-serif',

@@ -33,6 +33,7 @@ import {
   isInternalCliNoise,
   sanitizeCliError,
   sanitizeAgentHistory,
+  closeDanglingToolStarts,
   cursorModelFlag,
   withImageMentions,
   materializeAgentImages,
@@ -50,9 +51,25 @@ import {
   pickModelVariant,
   agyEffortFlag,
   isModelEffortSupported,
+  resolveAgentIcon,
 } from '../agents';
 
 describe('agent gateway', () => {
+  test('resolves real logo icons for agents', async () => {
+    const antigravityIcon = await resolveAgentIcon('antigravity');
+    expect(antigravityIcon).toBeDefined();
+    expect(antigravityIcon).toMatch(/^data:image\/png;base64,/);
+
+    const cursorIcon = await resolveAgentIcon('cursor');
+    expect(cursorIcon).toBeDefined();
+    expect(cursorIcon).toMatch(/^data:image\/png;base64,/);
+
+    const agents = listAgents();
+    const agy = agents.find((a) => a.id === 'antigravity');
+    expect(agy?.icon).toBeDefined();
+    expect(agy?.icon).toMatch(/^data:image\/png;base64,/);
+  });
+
   test('lists known agents with availability flags', () => {
     const agents = listAgents();
     const ids = agents.map((a) => a.id);
@@ -692,6 +709,19 @@ describe('CLI login helpers', () => {
       { seq: 2, ts: 1001, kind: 'text', text: 'hello' },
       { seq: 4, ts: 1003, kind: 'result', text: '' },
     ]);
+  });
+
+  test('closeDanglingToolStarts ends a tool-start left open after host restart', () => {
+    const history: AgentEvent[] = [
+      { seq: 1, ts: 1, kind: 'tool-start', toolName: 'shell', toolInput: 'kill', refId: 't1' },
+    ];
+    const settled = closeDanglingToolStarts(history, 'Interrupted — host restarted.');
+    expect(settled).toHaveLength(2);
+    expect(settled[1]).toMatchObject({
+      kind: 'tool-end',
+      refId: 't1',
+      toolOutput: 'Interrupted — host restarted.',
+    });
   });
 
   test('withoutDuplicateResult suppresses trailing errors if text was already streamed', () => {

@@ -34,6 +34,7 @@ import {
   normalizeHostChat,
   type HostChatDelta,
 } from './host-chats';
+import { resolveAppIcon } from './icon-resolver';
 
 type SpawnOpts = Parameters<typeof Bun.spawn>[1];
 type Proc = ReturnType<typeof Bun.spawn>;
@@ -205,6 +206,44 @@ const AGENT_DEFS: AgentDef[] = [
   },
 ];
 
+export const AGENT_ICON_NAMES: Record<string, string[]> = {
+  antigravity: ['antigravity', 'antigravity-url-handler', 'google-antigravity'],
+  cursor: ['co.anysphere.cursor', 'cursor', 'cursor-url-handler'],
+  claude: ['claude-desktop', 'com.anthropic.Claude', 'claude'],
+  opencode: ['ai.opencode.desktop', 'opencode-desktop', 'opencode'],
+};
+
+const agentIconCache = new Map<string, string | null>();
+
+export async function resolveAgentIcon(agentId: string): Promise<string | undefined> {
+  if (agentIconCache.has(agentId)) {
+    return agentIconCache.get(agentId) ?? undefined;
+  }
+  const names = AGENT_ICON_NAMES[agentId] || [agentId];
+  for (const name of names) {
+    try {
+      const icon = await resolveAppIcon(name);
+      if (icon) {
+        agentIconCache.set(agentId, icon);
+        return icon;
+      }
+    } catch {
+      // Continue searching
+    }
+  }
+  agentIconCache.set(agentId, null);
+  return undefined;
+}
+
+export function getCachedAgentIcon(agentId: string): string | undefined {
+  return agentIconCache.get(agentId) ?? undefined;
+}
+
+// Warm up agent icons eagerly
+for (const agentId of Object.keys(AGENT_ICON_NAMES)) {
+  resolveAgentIcon(agentId).catch(() => {});
+}
+
 export function listAgents(): AgentInfo[] {
   return AGENT_DEFS.map((d) => {
     const raw = modelCache.get(d.id) ?? d.capabilities.models;
@@ -215,6 +254,7 @@ export function listAgents(): AgentInfo[] {
     return {
       id: d.id,
       name: d.name,
+      icon: getCachedAgentIcon(d.id),
       available: d.bin ? which(d.bin) !== null : true,
       capabilities: {
         ...d.capabilities,
@@ -380,7 +420,7 @@ function fetchLiveModels(agentId: string, bin: string): AgentModelOption[] {
       timeout: 8000,
       env: process.env as Record<string, string>,
     });
-    const text = new TextDecoder().decode(proc.stdout ?? new Uint8Array());
+    const text = proc.stdout?.toString() ?? '';
     return parseAgentModelList(text);
   } catch {
     return [];
@@ -688,11 +728,14 @@ function loadAgentSessionsFromDisk(): void {
       const info: AgentSessionInfo = item.info;
       const def = AGENT_DEFS.find((d) => d.id === info.agent);
       if (!def) continue;
+      const history = Array.isArray(item.history)
+        ? closeDanglingToolStarts(sanitizeAgentHistory(item.history))
+        : [];
       const session: AgentSession = {
         info: { ...info, busy: false, status: 'running' },
-        history: Array.isArray(item.history) ? sanitizeAgentHistory(item.history) : [],
+        history,
         adapter: null as unknown as AgentAdapter,
-        seq: Array.isArray(item.history) && item.history.length > 0 ? (item.history[item.history.length - 1].seq ?? 0) : 0,
+        seq: history.length > 0 ? (history[history.length - 1].seq ?? 0) : 0,
         pendingPermissions: new Map(),
       };
       session.adapter = def.makeAdapter(session);
@@ -762,6 +805,7 @@ export function createAgentSession(
   const info: AgentSessionInfo = {
     agentSessionId: crypto.randomUUID(),
     agent: agentId,
+    icon: getCachedAgentIcon(agentId),
     cwd: resolveAgentCwd(cwd),
     title: title || def.name,
     createdAt: Date.now(),
@@ -784,7 +828,10 @@ export function createAgentSession(
 export function listAgentSessions(): AgentSessionInfo[] {
   loadAgentSessionsFromDisk();
   return [...agentSessions.values()]
-    .map((s) => ({ ...s.info }))
+    .map((s) => ({
+      ...s.info,
+      icon: s.info.icon ?? getCachedAgentIcon(s.info.agent),
+    }))
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
@@ -818,7 +865,13 @@ export function listHostChats(agent?: string): AgentHostChat[] {
   // New agents: append their list*HostChats() here. normalizeHostChat fills
   // source + cwd so the phone always shows `Source · /folder`.
   return out
-    .map(normalizeHostChat)
+    .map((c) => {
+      const norm = normalizeHostChat(c);
+      return {
+        ...norm,
+        icon: getCachedAgentIcon(norm.agent),
+      };
+    })
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .slice(0, 80);
 }
@@ -838,6 +891,7 @@ export function openHostChat(params: {
   if (existing) {
     existing.info.createdAt = Date.now();
     existing.info.status = 'running';
+    existing.info.icon = existing.info.icon ?? getCachedAgentIcon(agent);
     if (params.cwd?.trim()) {
       existing.info.cwd = resolveAgentCwd(params.cwd);
     }
@@ -893,6 +947,14 @@ export function agentHistory(agentSessionId: string): AgentEvent[] {
     seedHistory(session, history);
   }
   session.history = sanitizeAgentHistory(session.history);
+  if (!session.info.busy) {
+    const settled = closeDanglingToolStarts(session.history);
+    if (settled.length !== session.history.length) {
+      session.history = settled;
+      session.seq = Math.max(session.seq, settled[settled.length - 1]?.seq ?? 0);
+      saveAgentSessionsToDisk();
+    }
+  }
   return session.history.slice();
 }
 
@@ -1179,6 +1241,35 @@ export function sanitizeAgentHistory(history: AgentEvent[]): AgentEvent[] {
     }
     return true;
   });
+}
+
+/** Close tool-start events that never got a tool-end (host crash / restart). */
+export function closeDanglingToolStarts(
+  history: AgentEvent[],
+  output = 'Interrupted — host restarted.',
+): AgentEvent[] {
+  const open = new Map<string, AgentEvent>();
+  let orphan = 0;
+  for (const e of history) {
+    const ref = (e.refId ?? '').trim() || `__orphan_${++orphan}`;
+    if (e.kind === 'tool-start') open.set(ref, e);
+    else if (e.kind === 'tool-end') open.delete(ref);
+  }
+  if (open.size === 0) return history;
+  let seq = history.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
+  const extra: AgentEvent[] = [];
+  for (const [ref, start] of open) {
+    extra.push({
+      seq: ++seq,
+      ts: Date.now(),
+      kind: 'tool-end',
+      toolName: start.toolName,
+      toolInput: start.toolInput,
+      toolOutput: output,
+      refId: start.refId || ref,
+    });
+  }
+  return [...history, ...extra];
 }
 
 function asToolRecord(value: unknown): Record<string, unknown> {

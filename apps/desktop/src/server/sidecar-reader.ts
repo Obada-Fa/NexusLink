@@ -16,9 +16,11 @@ export function startSidecarReader(
 
   interval = setInterval(async () => {
     try {
+      const sessions = getSessions();
+      if (sessions.length === 0) return;
       const perf = await getPerf();
       const msg: WsMessage = { type: 'perf-update', data: perf };
-      for (const ws of getSessions()) {
+      for (const ws of sessions) {
         sendFn(ws, msg);
       }
     } catch {

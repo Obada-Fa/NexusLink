@@ -105,7 +105,7 @@ export type Params<M extends RpcMethod> =
     : M extends 'terminal.kill'
     ? { terminalId: string }
     : M extends 'screen.startCapture'
-    ? { quality: 'low' | 'medium' | 'high'; fps: number; windowId?: string; sessionId?: string }
+    ? { quality: 'low' | 'medium' | 'high' | 'full'; fps: number; windowId?: string; sessionId?: string }
     : M extends 'screen.stopCapture'
     ? { streamId: string }
     : M extends 'screen.getMetadata'
@@ -489,6 +489,7 @@ export interface AgentInfo {
   name: string
   available: boolean
   version?: string
+  icon?: string
   capabilities: AgentCapabilities
 }
 
@@ -501,6 +502,7 @@ export interface AgentSessionInfo {
   busy: boolean
   status: 'running' | 'exited'
   hostChatId?: string
+  icon?: string
 }
 
 /** A conversation that already exists on the PC (CLI or IDE), not started from the phone. */
@@ -512,6 +514,7 @@ export interface AgentHostChat {
   updatedAt: number
   resumable: boolean
   source: string
+  icon?: string
 }
 
 /** Normalized event emitted by any agent adapter (superset of stream-json). */
@@ -548,5 +551,8 @@ export type WsMessage =
   | { type: 'perf-update'; data: PerfSnapshot }
   | { type: 'webrtc-signal'; webrtcId: string; data: WebRtcSignal }
   | { type: 'app-session-update'; session: AppSessionInfo }
+  | { type: 'agent-session-update'; session: AgentSessionInfo }
+  | { type: 'agent-session-deleted'; agentSessionId: string }
   | { type: 'agent-event'; agentSessionId: string; event: AgentEvent }
   | { type: 'apps-update'; apps: AppInfo[] }
+  | { type: 'windows-update'; windows: WindowInfo[] }

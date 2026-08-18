@@ -12,6 +12,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:speech_to_text/speech_to_text.dart';
 
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
@@ -61,6 +62,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   bool _sending = false;
   int _menuTab = 0;
   String? _error;
+  final SpeechToText _speech = SpeechToText();
+  bool _isListening = false;
   final _unsubs = <void Function()>[];
   RpcClient? _boundClient;
   int _syncGen = 0;
@@ -138,6 +141,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             .whereType<Map>()
             .map((e) => AgentHostChat.fromJson(Map<String, dynamic>.from(e)))
             .toList();
+        for (final a in _agents) {
+          if (a.icon != null) registerAgentIcon(a.id, a.icon);
+        }
+        for (final s in _sessions) {
+          if (s.icon != null) registerAgentIcon(s.agent, s.icon);
+        }
+        for (final c in _hostChats) {
+          if (c.icon != null) registerAgentIcon(c.agent, c.icon);
+        }
         _loading = false;
         _error = null;
       });
@@ -186,6 +198,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             .whereType<Map>()
             .map((e) => AgentHostChat.fromJson(Map<String, dynamic>.from(e)))
             .toList();
+        for (final s in _sessions) {
+          if (s.icon != null) registerAgentIcon(s.agent, s.icon);
+        }
+        for (final c in _hostChats) {
+          if (c.icon != null) registerAgentIcon(c.agent, c.icon);
+        }
         if (activeId != null) {
           AgentSessionInfo? match;
           for (final s in _sessions) {
@@ -197,6 +215,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           if (match != null) {
             _active = match;
             _busy = match.busy;
+            if (!match.busy) {
+              final settled = closeOpenTools(_events,
+                  output: 'Interrupted — host restarted.');
+              _events
+                ..clear()
+                ..addAll(settled);
+            }
           }
           final merged = mergeAgentHistory(history, _events);
           _events
@@ -215,6 +240,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final raw = msg['session'];
     if (raw is! Map<String, dynamic>) return;
     final updated = AgentSessionInfo.fromJson(raw);
+    if (updated.icon != null) registerAgentIcon(updated.agent, updated.icon);
     if (!mounted) return;
     setState(() {
       final idx = _sessions
@@ -228,7 +254,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         _active = updated;
         // Never resurrect Working from a stale busy:true packet after
         // the turn already finished on the phone.
-        if (!updated.busy) _busy = false;
+        if (!updated.busy) {
+          _busy = false;
+          final settled = closeOpenTools(_events,
+              output: 'Interrupted — host is no longer running this turn.');
+          _events
+            ..clear()
+            ..addAll(settled);
+        }
       }
     });
   }
@@ -428,6 +461,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       _events
         ..clear()
         ..addAll(raw.map((e) => AgentEvent.fromJson(e as Map<String, dynamic>)));
+      if (!s.busy) {
+        final settled = closeOpenTools(_events,
+            output: 'Interrupted — host restarted.');
+        _events
+          ..clear()
+          ..addAll(settled);
+      }
       _photos.clear();
       _liveModels = [];
       _sessions.removeWhere((x) => x.agentSessionId == s.agentSessionId);
@@ -707,15 +747,27 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
   }
 
+  bool get _canStop => _busy || transcriptHasOpenTools(_events);
+
   Future<void> _cancel() async {
     final session = _active;
     final client = _client;
-    if (session == null || client == null) return;
-    try {
-      await client.request(
-          'agent.cancel', {'agentSessionId': session.agentSessionId});
-    } catch (_) {}
-    if (mounted) setState(() => _setBusy(false));
+    if (session == null) return;
+    if (client != null) {
+      try {
+        await client.request(
+            'agent.cancel', {'agentSessionId': session.agentSessionId});
+      } catch (_) {}
+    }
+    if (mounted) {
+      setState(() {
+        _setBusy(false);
+        final settled = closeOpenTools(_events, output: 'Stopped.');
+        _events
+          ..clear()
+          ..addAll(settled);
+      });
+    }
   }
 
   void _localStatus(String text) {
@@ -1004,8 +1056,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     });
   }
 
-  IconData _iconFor(String id) => iconForAgent(id);
-
   IconData _modeIcon(String mode) => switch (mode) {
         'plan' => Icons.checklist_outlined,
         'ask' => Icons.help_outline,
@@ -1228,7 +1278,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                 },
               ),
             ListTile(
-              leading: Icon(_iconFor(_active?.agent ?? '')),
+              leading: AgentMark(
+                agentId: _active?.agent ?? '',
+                color: agentMarkColor(_active?.agent ?? '', available: true),
+              ),
               title: const Text('Agent'),
               subtitle: Text(_activeAgent?.name ?? 'Switch agent'),
               onTap: () {
@@ -1259,11 +1312,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             ),
             for (final a in _agents)
               ListTile(
-                leading: Icon(
-                  _iconFor(a.id),
-                  color: a.available
-                      ? const Color(0xFF2A6AFF)
-                      : Colors.white24,
+                leading: AgentMark(
+                  agentId: a.id,
+                  color: agentMarkColor(a.id, available: a.available),
                 ),
                 title: Text(a.name),
                 enabled: a.available,
@@ -1529,6 +1580,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        AgentActivityIcon(
+                          agentId: _active!.agent,
+                          icon: _active!.icon,
+                          active: _busy,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
                         Flexible(
                           child: Text(
                             _active?.title ?? 'Agents',
@@ -1586,11 +1644,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         const SizedBox(height: 8),
         for (final a in _agents)
           ListTile(
-            leading: Icon(
-              _iconFor(a.id),
-              color: a.available
-                  ? const Color(0xFF2A6AFF)
-                  : Colors.white24,
+            leading: AgentMark(
+              agentId: a.id,
+              icon: a.icon,
+              color: agentMarkColor(a.id, available: a.available),
             ),
             title: Text(a.name),
             subtitle: Text(a.available
@@ -1625,6 +1682,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               ListTile(
                 leading: AgentActivityIcon(
                   agentId: s.agent,
+                  icon: s.icon,
                   active: s.busy ||
                       (_active?.agentSessionId == s.agentSessionId && _busy),
                 ),
@@ -1699,7 +1757,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           else
             for (final c in _hostChats)
               ListTile(
-                leading: AgentActivityIcon(agentId: c.agent),
+                leading: AgentActivityIcon(
+                  agentId: c.agent,
+                  icon: c.icon,
+                ),
                 title: Text(c.title),
                 subtitle: Text(
                   chatListSubtitle(
@@ -1819,7 +1880,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          AgentActivityIcon(agentId: agentId, active: true, size: 22),
+          AgentActivityIcon(
+            agentId: agentId,
+            icon: _active?.icon,
+            active: true,
+            size: 22,
+          ),
           const SizedBox(width: 10),
           const Text(
             'Working…',
@@ -1846,6 +1912,21 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         return const Color(0xFF1C3330);
       default:
         return const Color(0xFF151522);
+    }
+  }
+
+  Color _userBubbleColor(String? agentId) {
+    switch (agentId) {
+      case 'cursor':
+        return const Color(0xFF4B5563); // gray
+      case 'antigravity':
+        return const Color(0xFF9333EA); // purple
+      case 'claude':
+        return const Color(0xFFD97757); // terracotta/orange
+      case 'opencode':
+        return const Color(0xFF0D9488); // teal
+      default:
+        return const Color(0xFF2A6AFF); // default blue
     }
   }
 
@@ -1889,7 +1970,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                     padding:
                         const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF2A6AFF),
+                      color: _userBubbleColor(_active?.agent),
                       borderRadius: BorderRadius.circular(14),
                     ),
                     child: Text(e.text ?? '',
@@ -1910,7 +1991,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               margin: const EdgeInsets.symmetric(vertical: 4),
               padding: const EdgeInsets.fromLTRB(12, 10, 10, 6),
               decoration: BoxDecoration(
-                color: _agentBubbleColor(_active?.agent),
+                color: const Color(0xFFF5F5F5),
                 borderRadius: BorderRadius.circular(14),
               ),
               child: Column(
@@ -1925,13 +2006,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                     },
                     styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
                         .copyWith(
-                          p: const TextStyle(color: Colors.white, fontSize: 14),
+                          p: const TextStyle(color: Colors.black, fontSize: 14),
                           a: const TextStyle(
-                              color: Color(0xFF93C5FD),
+                              color: Color(0xFF0055CC),
                               fontSize: 14,
                               decoration: TextDecoration.underline),
                           code: const TextStyle(
-                              color: Color(0xFF6EE7B7),
+                              color: Colors.black87,
                               fontFamily: 'monospace',
                               fontSize: 12),
                         ),
@@ -2020,8 +2101,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           initiallyExpanded: false,
           tilePadding: const EdgeInsets.symmetric(horizontal: 12),
           childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-          leading: running && _active != null
-              ? AgentActivityIcon(agentId: _active!.agent, active: true, size: 18)
+          leading: running && _busy && _active != null
+              ? AgentActivityIcon(
+                  agentId: _active!.agent,
+                  icon: _active!.icon,
+                  active: true,
+                  size: 18,
+                )
               : Icon(
                   running ? Icons.hourglass_top : Icons.check_circle_outline,
                   size: 18,
@@ -2041,6 +2127,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 11, color: Colors.white54),
                 ),
+          trailing: running
+              ? IconButton(
+                  tooltip: 'Stop',
+                  icon: const Icon(Icons.stop, size: 20),
+                  onPressed: _cancel,
+                )
+              : null,
           children: [
             for (final e in tools)
               _toolCard(e, running: e.kind == 'tool-start', nested: true),
@@ -2125,6 +2218,34 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           child: child,
         ),
       );
+
+  Future<void> _toggleListen() async {
+    if (!_isListening) {
+      bool available = await _speech.initialize(
+        onStatus: (val) {
+          if (mounted) setState(() => _isListening = (val == 'listening'));
+        },
+        onError: (val) {
+          if (mounted) setState(() => _isListening = false);
+        },
+      );
+      if (available) {
+        if (mounted) setState(() => _isListening = true);
+        _speech.listen(
+          onResult: (val) {
+            if (mounted) {
+              setState(() {
+                _input.text = val.recognizedWords;
+              });
+            }
+          },
+        );
+      }
+    } else {
+      if (mounted) setState(() => _isListening = false);
+      _speech.stop();
+    }
+  }
 
   Widget _composer() {
     return SafeArea(
@@ -2233,10 +2354,18 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                       ),
                       const SizedBox(width: 4),
                       const Spacer(),
+                      IconButton(
+                        tooltip: _isListening ? 'Stop listening' : 'Voice to text',
+                        onPressed: _toggleListen,
+                        icon: Icon(
+                          Icons.mic,
+                          color: _isListening ? Colors.red : Colors.white70,
+                        ),
+                      ),
                       IconButton.filled(
-                        tooltip: _busy ? 'Stop' : 'Send',
-                        onPressed: _busy ? _cancel : _send,
-                        icon: Icon(_busy ? Icons.stop : Icons.arrow_upward),
+                        tooltip: _canStop ? 'Stop' : 'Send',
+                        onPressed: _canStop ? _cancel : _send,
+                        icon: Icon(_canStop ? Icons.stop : Icons.arrow_upward),
                       ),
                     ],
                   ),

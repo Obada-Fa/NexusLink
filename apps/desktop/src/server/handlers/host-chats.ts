@@ -361,7 +361,7 @@ function runCli(argv: string[], timeout = 12000): string {
     timeout,
     env: process.env as Record<string, string>,
   });
-  return new TextDecoder().decode(proc.stdout ?? new Uint8Array()).trim();
+  return proc.stdout?.toString()?.trim() ?? '';
 }
 
 function parseJson(text: string): unknown {

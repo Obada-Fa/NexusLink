@@ -7,10 +7,8 @@
     "sidecar/*"
   ],
   "scripts": {
-    "dev": "turbo run dev",
-    "build": "turbo run build",
-    "lint": "turbo run lint",
-    "typecheck": "turbo run typecheck",
+    "build": "bun run --cwd apps/mobile-client build && bun run --cwd apps/desktop build && bun run --cwd apps/relay build",
+    "test": "bun test",
     "lan": "bun run --cwd apps/mobile-client build && cd apps/desktop && bun run src/server/index.ts"
   },
   "devDependencies": {
