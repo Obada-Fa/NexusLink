@@ -1,150 +1,109 @@
 # NexusLink
 
-Remote desktop that feels like a phone OS: the PC runs the apps, the phone is the
-screen. Tapping an app opens it in a **phone-shaped virtual display** on the host
-(your real desktop is never resized). Chrome launches with a mobile user-agent so
-sites reflow like native Chrome. Claude Code, Cursor CLI, OpenCode, and Antigravity run on the PC and
-show up as a chat UI on the phone. Existing OpenCode, Antigravity, and Cursor CLI/IDE
-chats on the PC appear under **On this PC** and can be opened (CLI chats resume; Cursor IDE chats are history-only).
+Remote desktop and AI agent controller that feels like a native phone OS: the PC runs the apps and AI agents, and your phone acts as the mobile cockpit.
 
-## Architecture
+* **AI Agent Control**: Seamless mobile chat interface for **Antigravity**, **Cursor CLI**, **Claude Code**, and **OpenCode** running on your PC.
+* **Per-App Virtual Display**: Tapping an app opens it in a phone-shaped virtual display on the host (your physical desktop is never resized).
+* **Remote Terminal & Files**: PTY terminal, live file browser, Git working tree inspector, and process manager.
 
+---
+
+## Supported Platforms
+
+### 📱 Mobile Clients (Phone Controller)
+| Platform | Client Type | Status | How to Test / Run |
+| :--- | :--- | :--- | :--- |
+| **Android** | Flutter App | **Production Ready** | Install `NexusLink-Android.apk` from GitHub Releases. |
+| **iOS** | Flutter App | **Testing Ready** | Sideload `NexusLink-iOS.ipa` via AltStore/Sideloadly or build via Xcode. |
+| **Any Device (iOS/Android/Desktop)** | Next.js PWA | **Production Ready** | Open browser → Tap *Add to Home Screen* (Full screen, zero install). |
+
+### 💻 Desktop Hosts (Running the Agents & Apps)
+| Host OS | Agent Control | Screen Mirroring | Terminal / Files | Notes |
+| :--- | :---: | :---: | :---: | :--- |
+| **Windows** (`apps/windows-host`) | ✅ Full | ✅ Full | ✅ Full | Native Windows PowerShell & RPC service. |
+| **Linux/X11** (`apps/desktop`) | ✅ Full | ✅ Full (Xvfb/WebRTC) | ✅ Full | X11 virtual displays with GStreamer WebRTC. |
+| **macOS** (`apps/desktop`) | ✅ Full | ⚠️ In Progress | ✅ Full | Agent chat, zsh terminal, and file manager work via `bun run server`. |
+
+---
+
+## Quick Start for Testing
+
+### 1. Start the Host on your PC
+
+#### Windows Host:
+```powershell
+bun run windows
+# Or double-click run-host.cmd from the release zip
 ```
-phone (PWA or Flutter)
-  launcher ── WS RPC :45678 ── PC host
-                 │
-                 ├── Linux (apps/desktop): Xvfb + ffmpeg x11grab + xdotool
-                 └── Windows (apps/windows-host): agents, files, terminal
+
+#### Linux Host:
+```bash
+bun run lan
 ```
 
-Control plane is the existing ECDH-paired JSON WebSocket. Video upgrades to
-WebRTC when GStreamer is present; MJPEG stays as the automatic fallback.
+#### macOS Host (Agent & Terminal control):
+```bash
+bun run server
+```
 
-## Install
+The host prints a **QR code** for local Wi-Fi and **Tailscale** addresses.
+
+---
+
+### 2. Connect from your Phone
+
+1. **Android**: Download and install the latest `NexusLink-*.apk` from the GitHub Releases page. Launch the app and scan the QR code (or let mDNS auto-discover the PC).
+2. **iOS (Web PWA - Instant)**: Open Safari, navigate to `http://<your-pc-ip>:45678`, and tap **Share → Add to Home Screen**.
+3. **iOS (Native IPA)**: Sideload the provided `NexusLink-iOS-unsigned.ipa` using AltStore, Sideloadly, or TrollStore.
+
+---
+
+## AI Agent Integration
+
+NexusLink provides native mobile chat surfaces for major developer AI agents running locally on your workstation:
+
+* **Antigravity**: Full tool execution view, diff review, permission approvals, and model picker.
+* **Cursor CLI**: Sleek zinc/charcoal dark theme matching the Cursor IDE palette, multi-model selection (Composer, Codex, Grok, Claude).
+* **Claude Code**: Native markdown rendering, code block syntax highlighting, and bash tool inspection.
+* **OpenCode**: DeepSeek / MiMo model switching with real-time reasoning transcript streaming.
+
+---
+
+## Development
 
 ```bash
 bun install
+bun run dev          # Runs all workspaces concurrently
 ```
 
-Linux/X11 host needs:
+### Workspace Commands:
+* `apps/windows-host`: Windows RPC daemon (`bun run start`)
+* `apps/desktop`: Linux/macOS host UI and server (`bun run dev`)
+* `apps/flutter_client`: Flutter mobile app (`flutter run`)
+* `apps/mobile-client`: Next.js PWA client (`bun run dev`)
+* `apps/relay`: Signaling server for remote NAT traversal (`bun run start`)
 
-- `ffmpeg`, `xdotool`, `wmctrl`, `xclip` (already used by the LAN path)
-- `xvfb`, `openbox` (per-app virtual displays)
-- `python3` + GStreamer (`gstreamer1.0-tools`, `gstreamer1.0-plugins-{good,bad}`,
-  `gir1.2-gst-plugins-bad-1.0`) for H.264 WebRTC
-- `pulseaudio-utils` for per-session audio sinks
+---
 
-## Quick Start (LAN) — scan & go
+## Building Releases
 
+### Android APK:
 ```bash
-bun run lan          # Linux/X11: builds the PWA, then starts apps/desktop on :45678
-bun run windows      # Windows: builds the PWA, then starts apps/windows-host on :45678
-                     # Folder pickers show This PC (C:/, D:/). Other PCs: packaging/windows/build.ps1
-
+cd apps/flutter_client
+flutter build apk --release
+# Output: apps/flutter_client/build/app/outputs/flutter-apk/app-release.apk
 ```
 
-The host prints a **QR code** for every address it is reachable at:
-
-- **Local Wi-Fi** (same network)
-- **Tailscale** (any network, as long as the phone and PC are on the same tailnet)
-
-Scan either square — the page auto-connects. Example: `http://192.168.2.30:45678` and `http://100.x.y.z:45678`.
-
-- **Phone**: scan the **local** QR on the same Wi-Fi, or the **Tailscale** QR from anywhere
-  on the tailnet — the browser opens and auto-connects. Tap an app — it opens full-screen
-  on the phone, nothing moves on the PC. The dock has Terminal and Agents.
-- **PC**: open `http://localhost:45678`. Your desktop stays fully usable.
-
-One port serves the app *and* the control WebSocket. The client derives the host from the
-page it was served from, so there is no address to enter.
-
-## Dev
-
+### iOS Unsigned IPA (macOS):
 ```bash
-bun run dev          # all apps in parallel (turbo)
+cd apps/flutter_client
+flutter create . --platforms=ios
+flutter build ios --release --no-codesign
+mkdir -p Payload && cp -r build/ios/iphoneos/Runner.app Payload/
+zip -r NexusLink-iOS-unsigned.ipa Payload
 ```
 
-Per-app:
-
-```bash
-cd apps/desktop && bun run dev         # http://localhost:3000 (Linux/X11 host UI)
-cd apps/windows-host && bun run start  # Windows host on :45678
-cd apps/mobile-client && bun run dev   # http://localhost:3001
-cd apps/relay && bun run dev           # ws://localhost:3033
-```
-
-## Build
-
-```bash
-bun run build        # all apps (turbo)
-```
-
-Per-app:
-
-```bash
-cd apps/desktop && bun run build         # Next.js static export
-cd apps/mobile-client && bun run build   # Next.js static export + PWA
-cd apps/relay && bun run build           # bun build --target=bun
-cd sidecar && cargo build --release      # Rust sidecar binary
-```
-
-## Test
-
-```bash
-bun test              # workspace-wide
-```
-
-Per-package:
-
-```bash
-bun test              # in each package/app directory
-```
-
-## Relay
-
-```bash
-cd apps/relay
-RELAY_PORT=3033 bun run start
-```
-
-- WebSocket at `ws://localhost:3033/room/<roomId>`
-- Health check at `http://localhost:3033/health`
-- Max 2 peers per room (1 host + 1 client), 30-minute room expiry
-
-## Pairing Flow
-
-1. Desktop opens `/pair`, clicks "Start Pairing" to connect to signaling server
-2. Desktop sends `session.pair` with ECDH public key, receives TOTP URI
-3. Mobile opens `/pair`, enters server URL, receives pairing code (first 8 chars of TOTP secret)
-4. User enters pairing code on desktop, desktop generates TOTP and sends `session.authenticate`
-5. Desktop returns session token, connection established
-6. In development, localhost connections bypass TOTP with dev tokens
-
-## Stack
-
-- **Desktop (Linux)**: Tauri 2.0, Next.js 14, Bun RPC server (port 45678)
-- **Windows host**: Bun RPC server (port 45678) in `apps/windows-host`
-- **Mobile**: Next.js 14 PWA + Flutter (Riverpod, flutter_webrtc, xterm, markdown)
-- **Relay**: Bun WebSocket server (port 3033)
-- **Packages**: TypeScript types, touch gesture engine, SVG UI components
-- **Sidecar**: Rust (Tokio, Serde) JSON-RPC helper
-- **Host extras**: Xvfb virtual displays, GStreamer webrtcbin, PTY helper, agent gateway
-
-## Project Layout
-
-```
-apps/
-  desktop/          Linux/X11 host (virtual sessions, WebRTC, agents)
-  windows-host/     Windows host (agents, files, terminal; same phone RPC)
-  mobile-client/    Next.js PWA client
-  flutter_client/   Flutter Android client
-  relay/            Bun WebSocket signaling relay
-packages/
-  rpc-types/        Shared TypeScript RPC types
-  gesture-engine/   Touch-to-input translation
-  ui-components/    React SVG components
-sidecar/            Rust sidecar binary
-```
+---
 
 ## License
 

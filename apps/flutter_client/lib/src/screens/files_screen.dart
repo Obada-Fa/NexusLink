@@ -3,9 +3,11 @@
 // large payloads stay off the RPC WebSocket. Download picks a save location
 // via the platform SAF dialog; upload picks a file and POSTs it to the CWD.
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
@@ -32,7 +34,8 @@ class FilesScreen extends ConsumerStatefulWidget {
   ConsumerState<FilesScreen> createState() => _FilesScreenState();
 }
 
-class _FilesScreenState extends ConsumerState<FilesScreen> {
+class _FilesScreenState extends ConsumerState<FilesScreen>
+    with WidgetsBindingObserver {
   String? _cwd;
   List<FileEntry> _entries = [];
   bool _loading = true;
@@ -44,7 +47,31 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _init();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_onResumed());
+    }
+  }
+
+  Future<void> _onResumed() async {
+    await ref.read(connectionProvider.notifier).ensureConnected();
+    if (!mounted) return;
+    if (_cwd != null) {
+      await _navigate(_cwd!);
+    } else {
+      await _init();
+    }
   }
 
   Future<void> _init() async {
@@ -224,23 +251,129 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
     );
   }
 
+  Future<void> _copyCurrentPath() async {
+    final path = _cwd ?? '/';
+    await Clipboard.setData(ClipboardData(text: path));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Copied: $path'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _pasteAndGo() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text?.trim();
+    if (text != null && text.isNotEmpty) {
+      await _navigate(text);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Opened: $text'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } else {
+      await _editPath();
+    }
+  }
+
+  Future<void> _editPath() async {
+    final controller = TextEditingController(text: _cwd ?? '/');
+    final path = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1C2A),
+        title: const Text('Go to folder'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: InputDecoration(
+            hintText: 'D:/projects/foo or ~/code',
+            helperText: 'Any folder on the PC. ~ is home. / is This PC.',
+            suffixIcon: IconButton(
+              icon: const Icon(Icons.content_paste, size: 20),
+              tooltip: 'Paste from clipboard',
+              onPressed: () async {
+                final data = await Clipboard.getData(Clipboard.kTextPlain);
+                if (data?.text != null && data!.text!.trim().isNotEmpty) {
+                  controller.text = data.text!.trim();
+                  controller.selection = TextSelection.fromPosition(
+                    TextPosition(offset: controller.text.length),
+                  );
+                }
+              },
+            ),
+          ),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Go'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (path != null && path.isNotEmpty && mounted) {
+      await _navigate(path);
+    }
+  }
+
   Widget _pathBar() {
     return Container(
       width: double.infinity,
       color: const Color(0xFF12121C),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
       child: Row(
         children: [
           IconButton(
             icon: const Icon(Icons.arrow_upward, size: 18),
             onPressed: _cwd == null || isThisPcPath(_cwd!) ? null : _up,
             visualDensity: VisualDensity.compact,
+            tooltip: 'Parent folder',
           ),
           Expanded(
-            child: Text(
-                isThisPcPath(_cwd ?? '/') ? 'This PC' : (_cwd ?? ''),
-                style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
-                overflow: TextOverflow.ellipsis),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(6),
+              onTap: _editPath,
+              onLongPress: _copyCurrentPath,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        isThisPcPath(_cwd ?? '/') ? 'This PC' : (_cwd ?? ''),
+                        style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    const Icon(Icons.edit_outlined, size: 14, color: Colors.white38),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.copy_outlined, size: 18),
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Copy path',
+            onPressed: _copyCurrentPath,
+          ),
+          IconButton(
+            icon: const Icon(Icons.content_paste_outlined, size: 18),
+            visualDensity: VisualDensity.compact,
+            tooltip: 'Paste / Go to path',
+            onPressed: _pasteAndGo,
           ),
         ],
       ),

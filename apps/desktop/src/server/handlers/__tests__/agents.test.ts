@@ -269,6 +269,28 @@ describe('composer flags and attachments', () => {
       'cursor-grok-4.6-xhigh',
     );
   });
+
+  test('resolves Grok 4.6 to a concrete CLI slug, never bare family id', () => {
+    const liveLike = [
+      { id: 'cursor-grok-4.6-low', name: 'Grok 4.6 Low' },
+      { id: 'cursor-grok-4.6-medium', name: 'Grok 4.6 Medium' },
+      { id: 'cursor-grok-4.6-high', name: 'Grok 4.6 High' },
+      { id: 'cursor-grok-4.6-xhigh', name: 'Grok 4.6 Extra High' },
+    ];
+    expect(pickModelVariant('cursor-grok-4.6', 'medium', liveLike)).toBe(
+      'cursor-grok-4.6-medium',
+    );
+    const argv = buildCursorArgv({
+      bin: 'cursor-agent',
+      cwd: '/tmp/proj',
+      text: 'hi',
+      model: 'cursor-grok-4.6',
+      thinking: 'medium',
+      catalog: liveLike,
+    });
+    expect(argv).toContain('cursor-grok-4.6-medium');
+    expect(argv).not.toContain('cursor-grok-4.6');
+  });
   test('maps thinking levels onto Cursor --model effort brackets', () => {
     expect(thinkingToEffort('extra-high')).toBe('high');
     expect(cursorModelFlag('auto', 'high')).toBeUndefined();

@@ -210,7 +210,14 @@ class RpcClient {
     String method, [
     Map<String, dynamic> params = const {},
     Duration timeout = const Duration(seconds: 10),
-  ]) {
+  ]) async {
+    if (_currentStatus == RpcStatus.connecting) {
+      try {
+        await statusStream
+            .firstWhere((s) => s != RpcStatus.connecting)
+            .timeout(timeout);
+      } catch (_) {}
+    }
     if (_ws == null || _currentStatus != RpcStatus.connected) {
       throw RpcException('not connected');
     }

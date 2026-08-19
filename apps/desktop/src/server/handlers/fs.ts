@@ -37,7 +37,34 @@ export async function handleFsRead(rawPath: string): Promise<string> {
   return await fs.readFile(p, 'utf-8');
 }
 
+export function getWindowsDrives(): FileEntry[] {
+  const drives: FileEntry[] = [];
+  for (let i = 65; i <= 90; i++) {
+    const letter = String.fromCharCode(i);
+    const drivePath = `${letter}:\\`;
+    try {
+      if (existsSync(drivePath)) {
+        drives.push({
+          name: `${letter}:`,
+          path: `${letter}:/`,
+          size: 0,
+          isDirectory: true,
+          modifiedAt: new Date().toISOString(),
+          mimeType: 'directory',
+        });
+      }
+    } catch {
+      // Skip inaccessible drives
+    }
+  }
+  return drives;
+}
+
 export async function handleFsList(path: string, showHidden = false): Promise<FileEntry[]> {
+  const trimmed = (path || '').trim();
+  if (process.platform === 'win32' && (trimmed === '/' || trimmed === '' || trimmed.toLowerCase() === 'this pc')) {
+    return getWindowsDrives();
+  }
   const dir = expandHostPath(path);
   const entries = await fs.readdir(dir, { withFileTypes: true, recursive: false });
   const out: FileEntry[] = [];

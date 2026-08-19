@@ -26,9 +26,9 @@ const CURSOR_MODELS: AgentModelOption[] = [
   { id: 'auto', name: 'Auto' },
   { id: 'composer-2.5', name: 'Composer 2.5' },
   { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex' },
-  { id: 'cursor-grok-4.6', name: 'Grok 4.6' },
-  { id: 'claude-opus-5', name: 'Claude Opus 5' },
-  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5' },
+  { id: 'cursor-grok-4.6-medium', name: 'Grok 4.6' },
+  { id: 'claude-opus-5-medium', name: 'Claude Opus 5' },
+  { id: 'claude-sonnet-5-thinking-medium', name: 'Claude Sonnet 5' },
 ];
 
 const OPENCODE_MODELS: AgentModelOption[] = [

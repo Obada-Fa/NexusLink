@@ -5,9 +5,12 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
+import '../state/connection.dart';
 import '../state/last_cwd.dart';
 import '../util/host_path.dart';
 
@@ -34,15 +37,16 @@ class _ProjectHint {
   const _ProjectHint(this.name, this.path);
 }
 
-class _CwdPickerSheet extends StatefulWidget {
+class _CwdPickerSheet extends ConsumerStatefulWidget {
   final RpcClient client;
-  const _CwdPickerSheet({required this.client});
+  const _CwdPickerSheet({super.key, required this.client});
 
   @override
-  State<_CwdPickerSheet> createState() => _CwdPickerSheetState();
+  ConsumerState<_CwdPickerSheet> createState() => _CwdPickerSheetState();
 }
 
-class _CwdPickerSheetState extends State<_CwdPickerSheet> {
+class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
+    with WidgetsBindingObserver {
   bool _browse = false;
   String _home = '/';
   String _cwd = '/';
@@ -52,27 +56,73 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
   bool _loading = true;
   String? _error;
 
+  RpcClient? get _activeClient =>
+      ref.read(activeClientProvider) ?? widget.client;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadSuggestions();
   }
 
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_onResumed());
+    }
+  }
+
+  Future<void> _onResumed() async {
+    await ref.read(connectionProvider.notifier).ensureConnected();
+    if (!mounted) return;
+    if (_browse) {
+      await _listDir(_cwd);
+    } else {
+      await _loadSuggestions();
+    }
+  }
+
   Future<void> _loadSuggestions() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
+      await ref.read(connectionProvider.notifier).ensureConnected();
+    } catch (_) {}
+
+    final client = _activeClient;
+    if (client == null) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'Not connected to the PC.';
+      });
+      return;
+    }
+
     String home = '/';
     try {
       final info =
-          await widget.client.request('system.getInfo') as Map<String, dynamic>;
+          await client.request('system.getInfo') as Map<String, dynamic>;
       home = (info['homeDir'] as String?)?.trim().isNotEmpty == true
           ? info['homeDir'] as String
           : '/';
     } catch (_) {}
 
     final recent = await loadRecentAgentCwds();
-    final seen = <String>{home, ...recent};
+    final seen = <String>{if (home != '/') home, ...recent};
     var projects = <_ProjectHint>[];
     try {
-      final raw = await widget.client.requestList('fs.listProjects');
+      final raw = await client.requestList('fs.listProjects');
       for (final e in raw) {
         if (e is! Map) continue;
         final name = '${e['name'] ?? ''}';
@@ -83,7 +133,9 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
       }
     } catch (_) {}
     projects.sort((a, b) => comparePathNames(a.name, b.name));
-    projects.add(_ProjectHint('Home', home));
+    if (home != '/') {
+      projects.add(_ProjectHint('Home', home));
+    }
 
     if (!mounted) return;
     setState(() {
@@ -96,11 +148,12 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
   }
 
   Future<void> _openBrowse([String? start]) async {
+    final target = start ?? (_home != '/' ? _home : '/');
     setState(() {
       _browse = true;
-      _cwd = start ?? _home;
+      _cwd = target;
     });
-    await _listDir(_cwd);
+    await _listDir(target);
   }
 
   Future<void> _listDir(String path) async {
@@ -109,8 +162,24 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
       _error = null;
       _cwd = path;
     });
+
     try {
-      final raw = await widget.client.request(
+      await ref.read(connectionProvider.notifier).ensureConnected();
+    } catch (_) {}
+
+    final client = _activeClient;
+    if (client == null) {
+      if (!mounted) return;
+      setState(() {
+        _dirs = const [];
+        _loading = false;
+        _error = 'Not connected to the PC.';
+      });
+      return;
+    }
+
+    try {
+      final raw = await client.request(
         'fs.list',
         {'path': path},
       ) as List<dynamic>;
@@ -130,8 +199,84 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
       setState(() {
         _dirs = const [];
         _loading = false;
-        _error = e.toString();
+        _error = friendlyLaunchError(e);
       });
+    }
+  }
+
+  Future<void> _copyCurrentPath() async {
+    final path = _cwd;
+    await Clipboard.setData(ClipboardData(text: path));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Copied: $path'),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _pasteAndGo() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text?.trim();
+    if (text != null && text.isNotEmpty) {
+      await _listDir(text);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Opened: $text'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } else {
+      await _editBrowsePath();
+    }
+  }
+
+  Future<void> _editBrowsePath() async {
+    final controller = TextEditingController(text: _cwd == '/' ? _home : _cwd);
+    final path = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1C2A),
+        title: const Text('Go to folder'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: InputDecoration(
+            hintText: 'D:/projects/foo or ~/code',
+            helperText: 'Any folder on the PC. ~ is home. / is This PC.',
+            suffixIcon: IconButton(
+              icon: const Icon(Icons.content_paste, size: 20),
+              tooltip: 'Paste from clipboard',
+              onPressed: () async {
+                final data = await Clipboard.getData(Clipboard.kTextPlain);
+                if (data?.text != null && data!.text!.trim().isNotEmpty) {
+                  controller.text = data.text!.trim();
+                  controller.selection = TextSelection.fromPosition(
+                    TextPosition(offset: controller.text.length),
+                  );
+                }
+              },
+            ),
+          ),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Go'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (path != null && path.isNotEmpty && mounted) {
+      await _listDir(path);
     }
   }
 
@@ -145,9 +290,22 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
         content: TextField(
           controller: controller,
           autofocus: true,
-          decoration: const InputDecoration(
+          decoration: InputDecoration(
             hintText: 'D:/projects/foo or ~/code',
             helperText: 'Any folder on the PC. ~ is home. / is This PC.',
+            suffixIcon: IconButton(
+              icon: const Icon(Icons.content_paste, size: 20),
+              tooltip: 'Paste from clipboard',
+              onPressed: () async {
+                final data = await Clipboard.getData(Clipboard.kTextPlain);
+                if (data?.text != null && data!.text!.trim().isNotEmpty) {
+                  controller.text = data.text!.trim();
+                  controller.selection = TextSelection.fromPosition(
+                    TextPosition(offset: controller.text.length),
+                  );
+                }
+              },
+            ),
           ),
           onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
         ),
@@ -220,8 +378,10 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
             ),
           ),
           if (_browse)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(8, 0, 16, 0),
+            Container(
+              color: const Color(0xFF12121C),
+              margin: const EdgeInsets.only(top: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
               child: Row(
                 children: [
                   IconButton(
@@ -230,15 +390,47 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
                         ? null
                         : () => _listDir(parentHostPath(_cwd)),
                     icon: const Icon(Icons.arrow_upward, size: 20),
+                    visualDensity: VisualDensity.compact,
                   ),
                   Expanded(
-                    child: Text(
-                      _cwd,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                          fontSize: 12, fontFamily: 'monospace', color: Color(0xFF8899AA)),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(6),
+                      onTap: _editBrowsePath,
+                      onLongPress: _copyCurrentPath,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                isThisPcPath(_cwd) ? 'This PC' : _cwd,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontFamily: 'monospace',
+                                  color: Color(0xFF8899AA),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            const Icon(Icons.edit_outlined, size: 14, color: Colors.white38),
+                          ],
+                        ),
+                      ),
                     ),
+                  ),
+                  IconButton(
+                    tooltip: 'Copy path',
+                    icon: const Icon(Icons.copy_outlined, size: 18),
+                    visualDensity: VisualDensity.compact,
+                    onPressed: _copyCurrentPath,
+                  ),
+                  IconButton(
+                    tooltip: 'Paste / Go to path',
+                    icon: const Icon(Icons.content_paste_outlined, size: 18),
+                    visualDensity: VisualDensity.compact,
+                    onPressed: _pasteAndGo,
                   ),
                 ],
               ),
@@ -255,11 +447,39 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
     return ListView(
       padding: const EdgeInsets.symmetric(vertical: 8),
       children: [
+        if (_error != null)
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFF2A1616),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.redAccent.withValues(alpha: 0.3)),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.error_outline, color: Colors.redAccent, size: 20),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      _error!,
+                      style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: _loadSuggestions,
+                    child: const Text('Retry'),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ListTile(
           leading: const Icon(Icons.folder_open, color: Color(0xFF6B8CFF)),
           title: const Text('Browse folders'),
           subtitle: const Text('Any directory on the PC'),
-          onTap: _openBrowse,
+          onTap: () => _openBrowse(),
         ),
         ListTile(
           leading: const Icon(Icons.computer, color: Color(0xFF6B8CFF)),
@@ -294,29 +514,31 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
               onTap: () => _use(path),
             ),
         ],
-        const Padding(
-          padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
-          child: Text(
-            'SUGGESTIONS',
-            style: TextStyle(
-                fontSize: 11, letterSpacing: 0.8, color: Color(0xFF666677)),
-          ),
-        ),
-        for (final p in _projects)
-          if (!_recentPaths.contains(p.path))
-            ListTile(
-              leading: Icon(
-                p.path == _home ? Icons.home_outlined : Icons.folder,
-                color: const Color(0xFF6B8CFF),
-              ),
-              title: Text(p.name),
-              subtitle: Text(
-                p.path == _home ? 'Your user folder — not a project' : p.path,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              onTap: () => _use(p.path),
+        if (_projects.isNotEmpty) ...[
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 16, 16, 4),
+            child: Text(
+              'SUGGESTIONS',
+              style: TextStyle(
+                  fontSize: 11, letterSpacing: 0.8, color: Color(0xFF666677)),
             ),
+          ),
+          for (final p in _projects)
+            if (!_recentPaths.contains(p.path))
+              ListTile(
+                leading: Icon(
+                  p.path == _home ? Icons.home_outlined : Icons.folder,
+                  color: const Color(0xFF6B8CFF),
+                ),
+                title: Text(p.name),
+                subtitle: Text(
+                  p.path == _home ? 'Your user folder — not a project' : p.path,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                onTap: () => _use(p.path),
+              ),
+        ],
       ],
     );
   }
@@ -327,14 +549,36 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Text(_error!,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.redAccent)),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(_error!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.redAccent)),
+              const SizedBox(height: 12),
+              FilledButton.tonal(
+                onPressed: () => _listDir(_cwd),
+                child: const Text('Retry'),
+              ),
+            ],
+          ),
         ),
       );
     }
     if (_dirs.isEmpty) {
-      return const Center(child: Text('No subfolders — use this folder, or go up.'));
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('No subfolders — use this folder, or go up.'),
+            const SizedBox(height: 12),
+            FilledButton.tonal(
+              onPressed: () => _listDir(_cwd),
+              child: const Text('Refresh'),
+            ),
+          ],
+        ),
+      );
     }
     return ListView.builder(
       itemCount: _dirs.length,
