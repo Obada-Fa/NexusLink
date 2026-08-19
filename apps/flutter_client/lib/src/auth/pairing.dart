@@ -40,7 +40,7 @@ BigInt _bytesToBigInt(Uint8List bytes) {
 
 String _hotp(List<int> key, int counter, {int digits = 6}) {
   final counterBytes = Uint8List(8);
-  ByteData.sublistView(counterBytes).setUint64(0, counter);
+  ByteData.sublistView(counterBytes).setUint64(0, counter, Endian.big);
   final mac = Hmac(sha1, key).convert(counterBytes).bytes;
   final offset = mac[mac.length - 1] & 0x0f;
   final binary = ((mac[offset] & 0x7f) << 24) |

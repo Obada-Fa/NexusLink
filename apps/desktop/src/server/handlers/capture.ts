@@ -237,6 +237,9 @@ export function startCapture(
     grab = clampRegion(want);
   }
 
+  if (process.platform === 'win32') {
+    throw new Error('Screen capture is not available on Windows yet. Use Agents from the dock.');
+  }
   const proc = spawnGrabber(grab, ffArgs, display);
   const session: CaptureSession = {
     id, key, proc, ws, region: grab, ffArgs, resolveRegion,

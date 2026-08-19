@@ -10,6 +10,7 @@ import {
   loadRecentAgentCwds,
   saveLastAgentCwd,
 } from '@/lib/last-cwd';
+import { isThisPcPath, parentHostPath } from '@/lib/host-path';
 import { chatListSubtitle } from '@/lib/agent-labels';
 import { mergeAgentHistory } from '@/lib/agent-history';
 import {
@@ -218,10 +219,7 @@ function AgentIcon({
 }
 
 function parentUnixPath(path: string): string {
-  if (!path || path === '/') return '/';
-  const trimmed = path.endsWith('/') && path !== '/' ? path.slice(0, -1) : path;
-  const i = trimmed.lastIndexOf('/');
-  return i <= 0 ? '/' : trimmed.slice(0, i);
+  return parentHostPath(path);
 }
 
 function mergeToolEvents(events: AgentEvent[]): AgentEvent[] {
@@ -900,6 +898,7 @@ export default function AgentsPage() {
       {picking && client && (
         <CwdPicker
           client={client}
+          hostUrl={hostUrl}
           onCancel={() => setPicking(null)}
           onPick={(cwd) => void applyPickedCwd(cwd)}
         />
@@ -1041,10 +1040,12 @@ function ComposerMenu({
 
 function CwdPicker({
   client,
+  hostUrl,
   onPick,
   onCancel,
 }: {
   client: RpcClient;
+  hostUrl: string;
   onPick: (cwd: string) => void;
   onCancel: () => void;
 }) {
@@ -1061,10 +1062,10 @@ function CwdPicker({
 
   const pick = useCallback(
     (path: string) => {
-      saveLastAgentCwd(path);
+      saveLastAgentCwd(path, hostUrl);
       onPick(path);
     },
-    [onPick],
+    [onPick, hostUrl],
   );
 
   useEffect(() => {
@@ -1075,7 +1076,7 @@ function CwdPicker({
         const info = (await client.request('system.getInfo')) as { homeDir?: string };
         if (info.homeDir) homeDir = info.homeDir;
       } catch { /* keep / */ }
-      const recent = loadRecentAgentCwds();
+      const recent = loadRecentAgentCwds(hostUrl);
       const seen = new Set<string>();
       const hints: ProjectInfo[] = [];
       seen.add(homeDir);
@@ -1158,8 +1159,8 @@ function CwdPicker({
           <div style={styles.pathRow}>
             <button
               type="button"
-              disabled={cwd === '/'}
-              onClick={() => void listDir(parentUnixPath(cwd))}
+              disabled={isThisPcPath(cwd)}
+              onClick={() => void listDir(parentHostPath(cwd))}
               style={styles.barBtn}
             >
               ↑
@@ -1194,7 +1195,7 @@ function CwdPicker({
                 autoFocus
                 value={typed}
                 onChange={(e) => setTyped(e.target.value)}
-                placeholder="/home/you/project or ~/code"
+                placeholder="D:/projects/foo or ~/code"
                 style={{ ...styles.input, width: '100%', marginBottom: 8 }}
               />
               <button type="submit" style={styles.send}>
@@ -1206,6 +1207,10 @@ function CwdPicker({
               <button type="button" onClick={openBrowse} style={styles.row}>
                 <strong>Browse folders</strong>
                 <span style={styles.muted}>Any directory on the PC</span>
+              </button>
+              <button type="button" onClick={() => { setBrowse(true); void listDir('/'); }} style={styles.row}>
+                <strong>This PC</strong>
+                <span style={styles.muted}>C:/, D:/ and other drives</span>
               </button>
               <button
                 type="button"

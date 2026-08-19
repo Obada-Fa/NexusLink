@@ -7,9 +7,13 @@
     "sidecar/*"
   ],
   "scripts": {
-    "build": "bun run --cwd apps/mobile-client build && bun run --cwd apps/desktop build && bun run --cwd apps/relay build",
+    "build": "bun run build:linux",
+    "check:desktop-linux-targets": "node scripts/check-desktop-linux-targets.mjs",
+    "build:linux": "bun run check:desktop-linux-targets && bun run --cwd apps/mobile-client build && bun run --cwd apps/desktop build && bun run --cwd apps/relay build",
+    "build:windows": "bun run --cwd apps/mobile-client build",
     "test": "bun test",
-    "lan": "bun run --cwd apps/mobile-client build && cd apps/desktop && bun run src/server/index.ts"
+    "lan": "bun run --cwd apps/mobile-client build && cd apps/desktop && bun run src/server/index.ts",
+    "windows": "bun run --cwd apps/mobile-client build && bun run --cwd apps/windows-host start"
   },
   "devDependencies": {
     "turbo": "latest"

@@ -1,0 +1,48 @@
+name: Windows host release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows-host:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Build host and installer
+        shell: pwsh
+        run: ./packaging/windows/build.ps1
+      - name: Authenticode (optional)
+        if: ${{ secrets.NEXUSLINK_PFX_B64 != '' }}
+        shell: pwsh
+        env:
+          NEXUSLINK_PFX_B64: ${{ secrets.NEXUSLINK_PFX_B64 }}
+          NEXUSLINK_PFX_PASSWORD: ${{ secrets.NEXUSLINK_PFX_PASSWORD }}
+        run: |
+          $bytes = [Convert]::FromBase64String($env:NEXUSLINK_PFX_B64)
+          $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
+          [IO.File]::WriteAllBytes($pfx, $bytes)
+          $env:NEXUSLINK_PFX = $pfx
+          ./packaging/windows/sign.ps1
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: NexusLink-Host-Windows
+          path: |
+            dist/NexusLink-Host-Setup.exe
+            dist/windows/**
+      - name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/NexusLink-Host-Setup.exe
+          generate_release_notes: true

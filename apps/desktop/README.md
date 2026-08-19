@@ -1,6 +1,8 @@
 # @nexuslink/desktop
 
-NexusLink host desktop application. Next.js UI + Tauri 2 shell + Bun RPC server.
+Linux/X11 NexusLink host. Next.js UI + Tauri 2 shell + Bun RPC server.
+
+On Windows, run the dedicated host instead: `bun run windows` (`apps/windows-host`). Do not add further `win32` branches here.
 
 ## Start
 

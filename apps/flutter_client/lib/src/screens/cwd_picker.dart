@@ -9,6 +9,9 @@ import 'package:flutter/material.dart';
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
 import '../state/last_cwd.dart';
+import '../util/host_path.dart';
+
+export '../util/host_path.dart' show parentHostPath, parentUnixPath;
 
 Future<String?> pickWorkingDirectory({
   required BuildContext context,
@@ -23,15 +26,6 @@ Future<String?> pickWorkingDirectory({
       child: _CwdPickerSheet(client: client),
     ),
   );
-}
-
-String parentUnixPath(String path) {
-  if (path.isEmpty || path == '/') return '/';
-  final trimmed =
-      path.endsWith('/') && path != '/' ? path.substring(0, path.length - 1) : path;
-  final i = trimmed.lastIndexOf('/');
-  if (i <= 0) return '/';
-  return trimmed.substring(0, i);
 }
 
 class _ProjectHint {
@@ -152,8 +146,8 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
           controller: controller,
           autofocus: true,
           decoration: const InputDecoration(
-            hintText: '/home/you/project',
-            helperText: 'Any folder on the PC. ~ is the home directory.',
+            hintText: 'D:/projects/foo or ~/code',
+            helperText: 'Any folder on the PC. ~ is home. / is This PC.',
           ),
           onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
         ),
@@ -232,7 +226,9 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
                 children: [
                   IconButton(
                     tooltip: 'Parent folder',
-                    onPressed: _cwd == '/' ? null : () => _listDir(parentUnixPath(_cwd)),
+                    onPressed: isThisPcPath(_cwd)
+                        ? null
+                        : () => _listDir(parentHostPath(_cwd)),
                     icon: const Icon(Icons.arrow_upward, size: 20),
                   ),
                   Expanded(
@@ -264,6 +260,12 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
           title: const Text('Browse folders'),
           subtitle: const Text('Any directory on the PC'),
           onTap: _openBrowse,
+        ),
+        ListTile(
+          leading: const Icon(Icons.computer, color: Color(0xFF6B8CFF)),
+          title: const Text('This PC'),
+          subtitle: const Text('C:/, D:/ and other drives'),
+          onTap: () => _openBrowse('/'),
         ),
         ListTile(
           leading: const Icon(Icons.edit_outlined, color: Color(0xFF6B8CFF)),
@@ -339,7 +341,10 @@ class _CwdPickerSheetState extends State<_CwdPickerSheet> {
       itemBuilder: (_, i) {
         final d = _dirs[i];
         return ListTile(
-          leading: const Icon(Icons.folder, color: Color(0xFF6B8CFF)),
+          leading: Icon(
+            isWindowsDriveRoot(d.path) ? Icons.storage : Icons.folder,
+            color: const Color(0xFF6B8CFF),
+          ),
           title: Text(d.name),
           trailing: const Icon(Icons.chevron_right, size: 18),
           onTap: () => _listDir(d.path),

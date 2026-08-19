@@ -43,11 +43,27 @@ interface PairingSession {
 
 const pairings = new Map<string, PairingSession>();
 
-function counterToBuffer(counter: number): ArrayBuffer {
+function counterToBuffer(counter: number, littleEndian = false): ArrayBuffer {
   const buf = new ArrayBuffer(8);
   const view = new DataView(buf);
-  view.setBigUint64(0, BigInt(counter));
+  view.setBigUint64(0, BigInt(counter), littleEndian);
   return buf;
+}
+
+/** RFC1918 / Tailscale / loopback — the phone on the same LAN as this host. */
+export function isTrustedLan(address?: string): boolean {
+  if (!address) return false;
+  const ip = address.replace(/^::ffff:/i, '');
+  if (ip === '127.0.0.1' || ip === '::1' || ip === 'localhost') return true;
+  const m = ip.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (!m) return false;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  if (a === 10) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // Tailscale CGNAT
+  return false;
 }
 
 function hotpTruncate(hmacResult: ArrayBuffer, digits: number): string {
@@ -105,22 +121,24 @@ export async function validateSessionTOTP(
   pairingReference: string,
   code: string,
   stepMs = 30000,
-  // ±2 steps = ±60s: phones and PCs are rarely more than a minute apart even
-  // without NTP, and the pairing secret is ephemeral so the wider window is
-  // not a meaningful weakening.
-  tolerance = 2,
+  // ±10 steps = ±5min: phone clocks are often still skewed after a manual
+  // timezone fix, and the pairing secret is ephemeral.
+  tolerance = 10,
 ): Promise<boolean> {
   const session = pairings.get(pairingReference);
   if (!session || !session.secret) return false;
 
   const currentStep = Math.floor(Date.now() / stepMs);
+  const received = String(code ?? '').trim();
 
-  for (let offset = -tolerance; offset <= tolerance; offset++) {
-    const counter = currentStep + offset;
-    const counterBuf = counterToBuffer(counter);
-    const hmac = await crypto.subtle.sign({ name: 'HMAC' }, session.secret, counterBuf);
-    const expected = hotpTruncate(hmac, 6);
-    if (expected === code) return true;
+  // Big-endian is RFC 4226; also try little-endian — Dart ByteData on some
+  // devices uses host endian for setUint64, which is LE on Android.
+  for (const littleEndian of [false, true]) {
+    for (let offset = -tolerance; offset <= tolerance; offset++) {
+      const counterBuf = counterToBuffer(currentStep + offset, littleEndian);
+      const hmac = await crypto.subtle.sign({ name: 'HMAC' }, session.secret, counterBuf);
+      if (hotpTruncate(hmac, 6) === received) return true;
+    }
   }
 
   return false;

@@ -1,0 +1,67 @@
+; NexusLink IddCx virtual display
+; Build with WDK 10 + Visual Studio 2022 (see README.md). Test-sign for local use.
+; Friends need Microsoft attestation signing — see packaging/windows/sign.ps1.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Display
+ClassGuid   = {4d36e968-e325-11ce-bfc1-08002be10318}
+Provider    = %Mfg%
+DriverVer   = 08/19/2026,10.0.0.1
+CatalogFile = NexusLinkIdd.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+NexusLinkIdd.dll = 1
+
+[Manufacturer]
+%Mfg% = Standard,NTamd64.10.0...16299,NTarm64.10.0...16299
+
+[Standard.NTamd64.10.0...16299]
+%DeviceDesc% = Idd_Install, NexusLink\IddDevice
+
+[Standard.NTarm64.10.0...16299]
+%DeviceDesc% = Idd_Install, NexusLink\IddDevice
+
+[Idd_Install]
+CopyFiles = IddCopy
+AddReg = Idd_AddReg
+
+[IddCopy]
+NexusLinkIdd.dll
+
+[Idd_AddReg]
+HKR,,HardwareId,,"NexusLink\IddDevice"
+
+[Idd_Install.Wdf]
+UmdfService = NexusLinkIdd, NexusLinkIdd_Install
+UmdfServiceOrder = NexusLinkIdd
+UmdfKernelModeClientPolicy = AllowKernelModeClients
+
+[NexusLinkIdd_Install]
+UmdfLibraryVersion = 2.31.0
+ServiceBinary = %13%\NexusLinkIdd.dll
+
+[Idd_Install.hw]
+AddReg = Idd_AddReg
+
+[Idd_Install.Services]
+AddService = NexusLinkIdd,0x00000002,NexusLinkIdd_Service
+
+[NexusLinkIdd_Service]
+DisplayName    = %DeviceDesc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %13%\NexusLinkIdd.dll
+
+[Strings]
+Mfg = "NexusLink"
+DeviceDesc = "NexusLink phone virtual display"
+DiskName = "NexusLink IddCx"
