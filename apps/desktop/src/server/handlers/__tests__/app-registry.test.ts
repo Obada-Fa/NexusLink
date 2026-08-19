@@ -30,7 +30,7 @@ describe('listProjects', () => {
     expect(Array.isArray(projects)).toBe(true);
     for (const p of projects) {
       expect(p.name.length).toBeGreaterThan(0);
-      expect(p.path.startsWith('/')).toBe(true);
+      expect(p.path.startsWith('/') || /^[A-Za-z]:\//.test(p.path)).toBe(true);
     }
   });
 });

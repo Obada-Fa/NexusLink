@@ -64,6 +64,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   String? _error;
   final SpeechToText _speech = SpeechToText();
   bool _isListening = false;
+  String _preListeningText = '';
   final _unsubs = <void Function()>[];
   RpcClient? _boundClient;
   int _syncGen = 0;
@@ -442,8 +443,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (client == null) return;
     cwd ??= await _pickProject();
     if (cwd == null) return;
+    final activeClient = _client ?? client;
     try {
-      final created = await client.request('agent.createSession', {
+      final created = await activeClient.request('agent.createSession', {
         'agent': agent.id,
         'title': agent.name,
         'cwd': cwd,
@@ -579,9 +581,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             AgentModelOption(id: 'auto', name: 'Auto'),
             AgentModelOption(id: 'composer-2.5', name: 'Composer 2.5'),
             AgentModelOption(id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex'),
-            AgentModelOption(id: 'cursor-grok-4.6', name: 'Grok 4.6'),
-            AgentModelOption(id: 'claude-opus-5', name: 'Claude Opus 5'),
-            AgentModelOption(id: 'claude-sonnet-5', name: 'Claude Sonnet 5'),
+            AgentModelOption(id: 'cursor-grok-4.6-medium', name: 'Grok 4.6'),
+            AgentModelOption(id: 'claude-opus-5-medium', name: 'Claude Opus 5'),
+            AgentModelOption(id: 'claude-sonnet-5-thinking-medium', name: 'Claude Sonnet 5'),
           ],
           images: true,
         );
@@ -1567,6 +1569,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       u();
     }
     _unsubs.clear();
+    _speech.stop();
     _input.dispose();
     _scroll.dispose();
     super.dispose();
@@ -1879,7 +1882,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   Color _chatBackgroundColor(String? agentId) {
     switch (agentId) {
-      case 'cursor': return const Color(0xFFF3F3F5); // Soft white
+      case 'cursor': return const Color(0xFF0E0E12); // Sleek charcoal dark
       case 'antigravity': return const Color(0xFF0D0717); // Slightly lighter deep purple
       case 'claude': return const Color(0xFF140B08); // Slightly lighter deep brown
       case 'opencode': return const Color(0xFF060F0D); // Slightly lighter deep teal
@@ -1928,10 +1931,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             size: 22,
           ),
           const SizedBox(width: 10),
-          Text(
+          const Text(
             'Working…',
             style: TextStyle(
-              color: agentId == 'cursor' ? Colors.black54 : Colors.white38,
+              color: Colors.white38,
               fontSize: 12,
               fontStyle: FontStyle.italic,
             ),
@@ -1944,7 +1947,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   Color _agentBubbleColor(String? agentId) {
     switch (agentId) {
       case 'cursor':
-        return const Color(0xFF111111); // Very dark gray/black
+        return const Color(0xFF18181C); // Clean neutral zinc
       case 'antigravity':
         return const Color(0xFF1D0E38); // Darker purple
       case 'claude':
@@ -1959,7 +1962,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   Color _userBubbleColor(String? agentId) {
     switch (agentId) {
       case 'cursor':
-        return const Color(0xFFD4D4D8); // Soft off-white
+        return const Color(0xFF2B2D37); // Sleek zinc/slate
       case 'antigravity':
         return const Color(0xFF9F54FF); // Bright purple
       case 'claude':
@@ -1973,8 +1976,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   Color _userBubbleTextColor(String? agentId) {
     switch (agentId) {
-      case 'cursor':
-        return Colors.black87; // Dark text on soft white
       default:
         return Colors.white; // White text for colored bubbles
     }
@@ -2002,7 +2003,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   Color _borderColor(String? agentId) {
     switch (agentId) {
-      case 'cursor': return const Color(0xFF333333); // Medium gray
+      case 'cursor': return const Color(0xFF27272E); // Subtle dark border
       case 'antigravity': return const Color(0xFF281845); // Dark purple border
       case 'claude': return const Color(0xFF3A2015); // Dark terracotta border
       case 'opencode': return const Color(0xFF15332E); // Dark teal border
@@ -2012,7 +2013,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   Color _inputBorderColor(String? agentId) {
     switch (agentId) {
-      case 'cursor': return const Color(0xFF444444); // Lighter gray
+      case 'cursor': return const Color(0xFF383842); // Lighter dark border
       case 'antigravity': return const Color(0xFF352055); // Lighter purple border
       case 'claude': return const Color(0xFF4A2B1C); // Lighter terracotta border
       case 'opencode': return const Color(0xFF1C453E); // Lighter teal border
@@ -2022,7 +2023,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   Color _chipBackgroundColor(String? agentId) {
     switch (agentId) {
-      case 'cursor': return const Color(0xFF2A2A2A); // Dark gray
+      case 'cursor': return const Color(0xFF222228); // Dark neutral gray
       case 'antigravity': return const Color(0xFF1F1235); // Dark purple
       case 'claude': return const Color(0xFF2A150D); // Dark terracotta
       case 'opencode': return const Color(0xFF102824); // Dark teal
@@ -2061,8 +2062,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   Padding(
                     padding: const EdgeInsets.only(bottom: 6),
                     child: Text(e.images.join(', '),
-                        style: TextStyle(
-                            color: _active?.agent == 'cursor' ? Colors.black38 : Colors.white38, 
+                        style: const TextStyle(
+                            color: Colors.white38, 
                             fontSize: 11)),
                   ),
                 if ((e.text ?? '').isNotEmpty)
@@ -2136,8 +2137,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
           child: SelectionArea(
             child: Text(e.text ?? 'Thinking…',
-                style: TextStyle(
-                    color: _active?.agent == 'cursor' ? Colors.black38 : Colors.white38, fontSize: 12, fontStyle: FontStyle.italic)),
+                style: const TextStyle(
+                    color: Colors.white38, fontSize: 12, fontStyle: FontStyle.italic)),
           ),
         );
       case 'tool-start':
@@ -2476,29 +2477,74 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   Future<void> _toggleListen() async {
     if (!_isListening) {
-      bool available = await _speech.initialize(
-        onStatus: (val) {
-          if (mounted) setState(() => _isListening = (val == 'listening'));
-        },
-        onError: (val) {
-          if (mounted) setState(() => _isListening = false);
-        },
-      );
-      if (available) {
-        if (mounted) setState(() => _isListening = true);
-        _speech.listen(
-          onResult: (val) {
-            if (mounted) {
-              setState(() {
-                _input.text = val.recognizedWords;
-              });
-            }
-          },
-        );
+      try {
+        bool available = _speech.isAvailable;
+        if (!available) {
+          available = await _speech.initialize(
+            onStatus: (val) {
+              if (mounted) {
+                setState(() => _isListening = (val == 'listening' || val == 'recording'));
+              }
+            },
+            onError: (val) {
+              if (mounted) {
+                setState(() => _isListening = false);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('Speech recognition error: ${val.errorMsg}'),
+                    duration: const Duration(seconds: 3),
+                  ),
+                );
+              }
+            },
+          );
+        }
+
+        if (available) {
+          _preListeningText = _input.text.isNotEmpty && !_input.text.endsWith(' ')
+              ? '${_input.text} '
+              : _input.text;
+          if (mounted) setState(() => _isListening = true);
+
+          await _speech.listen(
+            onResult: (val) {
+              if (mounted) {
+                setState(() {
+                  _input.text = '$_preListeningText${val.recognizedWords}';
+                  _input.selection = TextSelection.fromPosition(
+                    TextPosition(offset: _input.text.length),
+                  );
+                });
+              }
+            },
+            listenMode: ListenMode.dictation,
+            partialResults: true,
+            cancelOnError: true,
+            pauseFor: const Duration(seconds: 3),
+            listenFor: const Duration(seconds: 60),
+          );
+        } else {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'Microphone or speech recognition unavailable. Please check permissions.',
+                ),
+              ),
+            );
+          }
+        }
+      } catch (e) {
+        if (mounted) {
+          setState(() => _isListening = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to start voice input: $e')),
+          );
+        }
       }
     } else {
       if (mounted) setState(() => _isListening = false);
-      _speech.stop();
+      await _speech.stop();
     }
   }
 

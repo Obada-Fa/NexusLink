@@ -1162,10 +1162,50 @@ function CwdPicker({
               disabled={isThisPcPath(cwd)}
               onClick={() => void listDir(parentHostPath(cwd))}
               style={styles.barBtn}
+              title="Parent folder"
             >
               ↑
             </button>
-            <span style={styles.pathText}>{cwd}</span>
+            <span
+              style={{ ...styles.pathText, cursor: 'pointer' }}
+              title="Click to edit path"
+              onClick={() => {
+                const target = window.prompt('Go to folder:', cwd);
+                if (target?.trim()) void listDir(target.trim());
+              }}
+            >
+              {cwd} ✎
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                void navigator.clipboard.writeText(cwd);
+              }}
+              style={styles.barBtn}
+              title="Copy path"
+            >
+              📋
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  const text = await navigator.clipboard.readText();
+                  if (text?.trim()) void listDir(text.trim());
+                  else {
+                    const target = window.prompt('Go to folder:', cwd);
+                    if (target?.trim()) void listDir(target.trim());
+                  }
+                } catch {
+                  const target = window.prompt('Go to folder:', cwd);
+                  if (target?.trim()) void listDir(target.trim());
+                }
+              }}
+              style={styles.barBtn}
+              title="Paste / Go to path"
+            >
+              📥
+            </button>
           </div>
         )}
         <div style={styles.sheetBody}>

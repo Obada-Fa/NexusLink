@@ -165,14 +165,15 @@ function which(bin: string): string | null {
 const MAX_IMAGES = 4;
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 
+/** Fallback when `cursor-agent models` cannot run — ids must be valid CLI model slugs. */
 const CURSOR_MODELS: AgentModelOption[] = [
   { id: 'auto', name: 'Auto', supportsEffort: false },
   { id: 'composer-2.5', name: 'Composer 2.5', supportsEffort: true },
   { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', supportsEffort: true },
-  { id: 'cursor-grok-4.6', name: 'Grok 4.6', supportsEffort: true },
-  { id: 'claude-opus-5', name: 'Claude Opus 5', supportsEffort: true },
-  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', supportsEffort: true },
-  { id: 'gpt-5.6-sol', name: 'GPT-5.6', supportsEffort: true },
+  { id: 'cursor-grok-4.6-medium', name: 'Grok 4.6', supportsEffort: true },
+  { id: 'claude-opus-5-medium', name: 'Claude Opus 5', supportsEffort: true },
+  { id: 'claude-sonnet-5-thinking-medium', name: 'Claude Sonnet 5', supportsEffort: true },
+  { id: 'gpt-5.6-sol-medium', name: 'GPT-5.6', supportsEffort: true },
 ];
 
 const OPENCODE_MODELS: AgentModelOption[] = [
@@ -305,8 +306,8 @@ for (const agentId of Object.keys(AGENT_ICON_NAMES)) {
 
 export function listAgents(): AgentInfo[] {
   return AGENT_DEFS.map((d) => {
-    const raw = modelCache.get(d.id) ?? d.capabilities.models;
-    const models = raw.map((m) => ({
+    const catalog = listAgentModels(d.id);
+    const models = collapseModelFamilies(catalog).map((m) => ({
       ...m,
       supportsEffort: m.supportsEffort ?? isModelEffortSupported(d.id, m.id),
     }));
@@ -324,6 +325,10 @@ export function listAgents(): AgentInfo[] {
 }
 
 const modelCache = new Map<string, AgentModelOption[]>();
+const modelCacheLive = new Map<string, boolean>();
+
+const MODEL_VARIANT_SUFFIX =
+  /-(?:low|medium|high|xhigh|max)(?:-fast)?$/i;
 
 /** Parse `opencode models` / `cursor-agent models` stdout into picker rows. */
 export function parseAgentModelList(text: string): AgentModelOption[] {
@@ -457,9 +462,13 @@ export function pickModelVariant(
   const fam = modelFamilyId(m);
   const family = catalog.filter((x) => modelFamilyId(x.id) === fam || x.id === m);
   if (!family.length) return m;
-  let best = family[0]!;
+  const suffixed = family.filter(
+    (x) => x.id !== fam && (MODEL_VARIANT_SUFFIX.test(x.id) || /-thinking/i.test(x.id)),
+  );
+  const pool = suffixed.length ? suffixed : family;
+  let best = pool[0]!;
   let bestScore = variantScore(best.id, thinking);
-  for (const c of family.slice(1)) {
+  for (const c of pool.slice(1)) {
     const score = variantScore(c.id, thinking);
     if (score > bestScore) {
       bestScore = score;
@@ -486,31 +495,56 @@ function fetchLiveModels(agentId: string, bin: string): AgentModelOption[] {
   }
 }
 
+function augmentAgentModels(agentId: string, models: AgentModelOption[]): AgentModelOption[] {
+  return models.map((m) => ({
+    ...m,
+    supportsEffort: m.supportsEffort ?? isModelEffortSupported(agentId, m.id),
+  }));
+}
+
 export function listAgentModels(agentId: string): AgentModelOption[] {
   const def = AGENT_DEFS.find((d) => d.id === agentId);
   if (!def) return [];
-  const cached = modelCache.get(agentId);
-  if (cached?.length) {
-    return cached.map((m) => ({
-      ...m,
-      supportsEffort: m.supportsEffort ?? isModelEffortSupported(agentId, m.id),
-    }));
+
+  if (modelCacheLive.get(agentId) && modelCache.has(agentId)) {
+    return augmentAgentModels(agentId, modelCache.get(agentId)!);
   }
-  let models = def.capabilities.models;
+
   if (def.bin) {
     const bin = which(def.bin);
     if (bin) {
       const live = fetchLiveModels(agentId, bin);
-      if (live.length) models = live;
+      if (live.length) {
+        const augmented = augmentAgentModels(agentId, live);
+        modelCache.set(agentId, augmented);
+        modelCacheLive.set(agentId, true);
+        return augmented;
+      }
     }
   }
-  const augmented = models.map((m) => ({
-    ...m,
-    supportsEffort: m.supportsEffort ?? isModelEffortSupported(agentId, m.id),
-  }));
+
+  if (modelCache.has(agentId)) {
+    return augmentAgentModels(agentId, modelCache.get(agentId)!);
+  }
+
+  const augmented = augmentAgentModels(agentId, def.capabilities.models);
   modelCache.set(agentId, augmented);
+  modelCacheLive.set(agentId, false);
   return augmented;
 }
+
+function warmAgentModelCatalogs(): void {
+  for (const def of AGENT_DEFS) {
+    if (!def.bin || !which(def.bin)) continue;
+    try {
+      listAgentModels(def.id);
+    } catch {
+      // Offline host — fallback catalog still works.
+    }
+  }
+}
+
+warmAgentModelCatalogs();
 
 export function thinkingToEffort(thinking?: string): 'low' | 'medium' | 'high' | undefined {
   if (!thinking) return undefined;

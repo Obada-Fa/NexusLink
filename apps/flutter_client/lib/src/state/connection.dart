@@ -148,7 +148,10 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
       await _waitWhileConnecting();
       return;
     }
-    final url = state.hostUrl?.trim();
+    var url = state.hostUrl?.trim();
+    if (url == null || url.isEmpty) {
+      url = await loadLastHostUrl();
+    }
     if (url == null || url.isEmpty) return;
     try {
       await connect(url);

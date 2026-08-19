@@ -7,3 +7,4 @@ target/
 *.apk
 tsconfig.tsbuildinfo
 .tools/
+.claude/
