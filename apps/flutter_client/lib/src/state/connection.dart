@@ -121,7 +121,22 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
   /// if this session already had a host (explicit disconnect clears it).
   Future<void> ensureConnected() async {
     if (_disposed) return;
-    if (state.status == RpcStatus.connected) return;
+    if (state.status == RpcStatus.connected) {
+      final client = state.client;
+      if (client == null) return;
+      try {
+        // Foregrounding can leave a half-open socket that still reports
+        // "connected". Probe once so resume paths can recover and catch up.
+        await client.request(
+          'session.heartbeat',
+          const {},
+          const Duration(seconds: 3),
+        );
+        return;
+      } catch (_) {
+        // Force a clean reconnect below using the last known host URL.
+      }
+    }
     final inflight = _inFlightConnect;
     if (inflight != null) {
       try {

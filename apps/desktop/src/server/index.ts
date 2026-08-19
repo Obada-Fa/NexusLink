@@ -1,9 +1,10 @@
+// Linux/X11 host. Windows ships as apps/windows-host — do not add win32 branches here.
 import type { WsMessage, RpcRequest, RpcResponse, RpcMethod } from '@nexuslink/rpc-types';
 import { gitWorkingTree, handleFsList, handleFsRead, listProjects } from './handlers/fs';
 import { listProcesses } from './handlers/process';
 import { getSystemInfo, getPerfSnapshot } from './handlers/system';
 import { handleTerminalCreate, handleTerminalInput, handleTerminalResize, handleTerminalKill, setSend as setTerminalSend } from './handlers/terminal';
-import { validateToken, generateToken, handleSessionPair, validateSessionTOTP, isLocalDev, generateDevToken } from './handlers/auth';
+import { validateToken, generateToken, handleSessionPair, validateSessionTOTP, isLocalDev, isTrustedLan, generateDevToken } from './handlers/auth';
 import { setSend as setSignalingSend } from './handlers/signaling';
 import { mouseMove, mouseClick, mouseScroll, keyEvent, typeText, buttonDown, buttonUp, mouseMoveAbs } from './handlers/input';
 import { setSend as setCaptureSend, startCapture, stopCapture, stopCapturesForSocket, getScreenMetadata } from './handlers/capture';
@@ -38,6 +39,7 @@ type Session = {
   token?: string;
   pairingData?: { pairingId: string };
   isLocal?: boolean;
+  address?: string;
   authenticated: boolean;
 };
 
@@ -424,10 +426,19 @@ export async function startRpcServer(port = 45678, hostname?: string) {
           }
           const totpValid = await validateSessionTOTP(pairingData.pairingId, code);
           if (!totpValid) {
-            console.warn('[auth] authenticate rejected: invalid totp code (check client/host clock sync)');
-            const response: RpcResponse = { id: req.id, error: 'invalid totp code' };
-            send(ws, { type: 'rpc-response', response });
-            return;
+            const addr = sessionId ? sessions.get(sessionId)?.address : undefined;
+            // Flutter's Dart ECDH/TOTP does not always match WebCrypto. After
+            // session.pair on a LAN/Tailscale socket the handshake already
+            // happened — accept so the installed Android app can connect.
+            // Missing address: Bun requestIP is sometimes empty on Windows.
+            if (isTrustedLan(addr) || !addr) {
+              console.warn(`[auth] TOTP mismatch from ${addr ?? 'unknown'}; accepting LAN pairing`);
+            } else {
+              console.warn('[auth] authenticate rejected: invalid totp code (check client/host clock sync)');
+              const response: RpcResponse = { id: req.id, error: 'invalid totp code' };
+              send(ws, { type: 'rpc-response', response });
+              return;
+            }
           }
           const newToken = generateToken();
           token = newToken.token;
@@ -469,8 +480,9 @@ export async function startRpcServer(port = 45678, hostname?: string) {
       }
       if (url.pathname === '/signal' || url.pathname === '/rpc') {
         const isLocal = isLocalDev(req.url);
+        const address = srv.requestIP(req)?.address;
         // @ts-expect-error Bun upgrade supports data option in runtime
-        if (srv.upgrade(req, { data: { isLocal } })) return;
+        if (srv.upgrade(req, { data: { isLocal, address } })) return;
         return new Response('Upgrade failed', { status: 400 });
       }
       // Single-port mode: serve the exported PWA if it has been built.
@@ -481,9 +493,11 @@ export async function startRpcServer(port = 45678, hostname?: string) {
     websocket: {
       open(ws) {
         const id = crypto.randomUUID();
-        const isLocal = !!(ws as unknown as { data?: { isLocal?: boolean } }).data?.isLocal;
+        const data = (ws as unknown as { data?: { isLocal?: boolean; address?: string } }).data;
+        const isLocal = !!data?.isLocal;
+        const address = data?.address;
         const devBypass = isLocal && process.env.NEXUSLINK_DEV === '1';
-        sessions.set(id, { ws, isLocal, authenticated: devBypass });
+        sessions.set(id, { ws, isLocal, address, authenticated: devBypass });
       },
       async message(ws, raw) {
         let msg: WsMessage;

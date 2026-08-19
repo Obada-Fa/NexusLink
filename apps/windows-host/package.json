@@ -1,0 +1,21 @@
+{
+  "name": "@nexuslink/windows-host",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "start": "bun run src/server/index.ts",
+    "dev": "bun run src/server/index.ts",
+    "test": "bun test",
+    "compile": "bun build --compile --outfile ../../dist/windows/nexuslink-host.exe src/server/index.ts"
+  },
+  "dependencies": {
+    "@nexuslink/rpc-types": "workspace:*",
+    "jpeg-js": "^0.4.4",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
+}

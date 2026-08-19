@@ -1,7 +1,24 @@
-const LAST_AGENT_CWD_KEY = 'nexuslink-last-agent-cwd';
-const RECENT_AGENT_CWDS_KEY = 'nexuslink-recent-agent-cwds';
+const RECENT_AGENT_CWD_CAP_CONST = 8;
+export const RECENT_AGENT_CWD_CAP = RECENT_AGENT_CWD_CAP_CONST;
 
-export const RECENT_AGENT_CWD_CAP = 8;
+/** Derive a short stable key from a host URL to namespace storage per PC. */
+export function hostStorageKey(hostUrl: string): string {
+  try {
+    const { hostname, port } = new URL(hostUrl);
+    const raw = port ? `${hostname}:${port}` : hostname;
+    return raw.replace(/[^a-zA-Z0-9:._-]/g, '_');
+  } catch {
+    return 'default';
+  }
+}
+
+function cwdKeys(hostKey: string) {
+  const suffix = hostKey && hostKey !== 'default' ? `-${hostKey}` : '';
+  return {
+    list: `nexuslink-recent-agent-cwds${suffix}`,
+    last: `nexuslink-last-agent-cwd${suffix}`,
+  };
+}
 
 export function mergeRecentAgentCwd(path: string, existing: string[]): string[] {
   const trimmed = path.trim();
@@ -30,31 +47,34 @@ export function parseStoredRecentCwds(
   return legacy ? [legacy] : [];
 }
 
-export function loadRecentAgentCwds(): string[] {
+export function loadRecentAgentCwds(hostUrl = ''): string[] {
   try {
+    const { list, last } = cwdKeys(hostStorageKey(hostUrl));
     return parseStoredRecentCwds(
-      localStorage.getItem(RECENT_AGENT_CWDS_KEY),
-      localStorage.getItem(LAST_AGENT_CWD_KEY),
+      localStorage.getItem(list),
+      localStorage.getItem(last),
     );
   } catch {
     return [];
   }
 }
 
-export function saveLastAgentCwd(path: string): void {
-  const next = mergeRecentAgentCwd(path, loadRecentAgentCwds());
+export function saveLastAgentCwd(path: string, hostUrl = ''): void {
+  const next = mergeRecentAgentCwd(path, loadRecentAgentCwds(hostUrl));
   if (next.length === 0) return;
   try {
-    localStorage.setItem(RECENT_AGENT_CWDS_KEY, JSON.stringify(next));
-    localStorage.setItem(LAST_AGENT_CWD_KEY, next[0]!);
+    const { list, last } = cwdKeys(hostStorageKey(hostUrl));
+    localStorage.setItem(list, JSON.stringify(next));
+    localStorage.setItem(last, next[0]!);
   } catch {
     /* ignore quota / private mode */
   }
 }
 
 export function folderDisplayName(path: string): string {
-  if (!path) return path;
+  if (!path || path === '/') return path === '/' ? 'This PC' : path;
   const trimmed = path.endsWith('/') && path !== '/' ? path.slice(0, -1) : path;
+  if (/^[A-Za-z]:$/.test(trimmed)) return trimmed;
   const i = trimmed.lastIndexOf('/');
   return i < 0 ? trimmed : trimmed.slice(i + 1);
 }

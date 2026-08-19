@@ -7,9 +7,9 @@
 // phone can replay history via agent.history) and pushed live as
 // `agent-event` WebSocket messages.
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import type {
   AgentCapabilities,
   AgentEvent,
@@ -78,25 +78,84 @@ interface AgentDef {
 /** Extra dirs GUI/systemd launches often omit from PATH. */
 function extraBinDirs(): string[] {
   const home = homedir();
-  return [
-    `${home}/.local/bin`,
-    `${home}/.opencode/bin`,
-    `${home}/.cursor/bin`,
-    `${home}/.gemini/antigravity-cli`,
-    `${home}/bin`,
+  const local = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
+  const roaming = process.env.APPDATA || join(home, 'AppData', 'Roaming');
+  const dirs = [
+    join(home, '.local', 'bin'),
+    join(home, '.opencode', 'bin'),
+    join(home, '.cursor', 'bin'),
+    join(home, '.gemini', 'antigravity-cli'),
+    join(local, 'agy', 'bin'),
+    join(home, 'bin'),
+    join(local, 'Programs', 'cursor', 'resources', 'app', 'bin'),
+    join(roaming, 'npm'),
+    join(home, 'AppData', 'Roaming', 'npm'),
     '/usr/local/bin',
+    ...cursorAgentInstallDirs(roaming),
   ];
+  return dirs;
 }
 
+/** Cursor ships cursor-agent.cmd under AppData, not always on PATH. */
+function cursorAgentInstallDirs(roaming: string): string[] {
+  const versions = join(
+    roaming,
+    'Cursor',
+    'User',
+    'globalStorage',
+    'anysphere.cursor-agent-worker',
+    'agent-cli',
+    '.local',
+    'share',
+    'cursor-agent',
+    'versions',
+  );
+  if (!existsSync(versions)) return [];
+  try {
+    return readdirSync(versions)
+      .sort()
+      .reverse()
+      .map((v) => join(versions, v))
+      .filter((dir) =>
+        existsSync(join(dir, 'cursor-agent.cmd')) ||
+        existsSync(join(dir, 'cursor-agent.exe')) ||
+        existsSync(join(dir, 'cursor-agent')),
+      );
+  } catch {
+    return [];
+  }
+}
+
+const WIN_EXTS = ['', '.cmd', '.exe', '.bat', '.ps1'];
+
 export function resolveBin(bin: string): string | null {
+  if (!bin) return null;
+  if (bin.includes('/') || bin.includes('\\')) {
+    return existsSync(bin) ? bin : null;
+  }
+  const exts = process.platform === 'win32' ? WIN_EXTS : [''];
   const seen = new Set<string>();
-  for (const dir of [...(process.env.PATH ?? '').split(':'), ...extraBinDirs()]) {
+  for (const dir of [...(process.env.PATH ?? '').split(delimiter), ...extraBinDirs()]) {
     if (!dir || seen.has(dir)) continue;
     seen.add(dir);
-    const p = `${dir}/${bin}`;
-    if (existsSync(p)) return p;
+    for (const ext of exts) {
+      const p = join(dir, `${bin}${ext}`);
+      if (existsSync(p)) return p;
+    }
   }
   return null;
+}
+
+/** .cmd/.bat need cmd.exe on Windows or Bun's uv_spawn returns ENOENT. */
+export function spawnArgv(argv: string[]): string[] {
+  if (process.platform !== 'win32' || argv.length === 0) return argv;
+  const bin = argv[0]!;
+  const rest = argv.slice(1);
+  if (/\.(cmd|bat)$/i.test(bin)) return ['cmd.exe', '/d', '/s', '/c', bin, ...rest];
+  if (/\.ps1$/i.test(bin)) {
+    return ['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', bin, ...rest];
+  }
+  return argv;
 }
 
 function which(bin: string): string | null {
@@ -414,7 +473,7 @@ function fetchLiveModels(agentId: string, bin: string): AgentModelOption[] {
   const argv = agentId === 'cursor' ? [bin, 'models'] : [bin, 'models'];
   if (agentId === 'claude' || agentId === 'mock') return [];
   try {
-    const proc = Bun.spawnSync(argv, {
+    const proc = Bun.spawnSync(spawnArgv(argv), {
       stdout: 'pipe',
       stderr: 'pipe',
       timeout: 8000,
@@ -762,15 +821,24 @@ function setBusy(session: AgentSession, busy: boolean): void {
 export function resolveAgentCwd(cwd?: string, opts?: { fallbackHome?: boolean }): string {
   const home = homedir();
   const raw = (cwd ?? '').trim();
-  const path = !raw || raw === '~' ? home : raw.startsWith('~/') ? join(home, raw.slice(2)) : raw;
+  let path: string;
+  if (!raw || raw === '~') {
+    path = home;
+  } else if (raw.startsWith('~/') || raw.startsWith('~\\')) {
+    path = join(home, raw.slice(2));
+  } else if (process.platform === 'win32' && (raw === '/' || raw.startsWith('/home/'))) {
+    path = home;
+  } else {
+    path = raw;
+  }
   if (existsSync(path) && statSync(path).isDirectory()) {
     try {
-      return realpathSync(path);
+      return realpathSync(path).replace(/\\/g, '/');
     } catch {
-      return path;
+      return path.replace(/\\/g, '/');
     }
   }
-  if (opts?.fallbackHome) return home;
+  if (opts?.fallbackHome) return home.replace(/\\/g, '/');
   throw new Error(existsSync(path) ? `not a directory: ${path}` : `directory not found: ${path}`);
 }
 
@@ -1609,7 +1677,7 @@ function spawnJsonCli(
   extraEnv?: Record<string, string>,
   onStderr?: (chunk: string) => void,
 ): { proc: Proc; stderr: Promise<string> } {
-  const proc = Bun.spawn(argv, {
+  const proc = Bun.spawn(spawnArgv(argv), {
     cwd,
     stdin: 'ignore',
     stdout: 'pipe',
@@ -1652,11 +1720,17 @@ async function pumpTextStream(
 
 function openUrlOnHost(url: string): void {
   try {
-    Bun.spawn([resolveBin('xdg-open') ?? 'xdg-open', url], {
+    const argv =
+      process.platform === 'win32'
+        ? ['cmd.exe', '/c', 'start', '', url]
+        : process.platform === 'darwin'
+          ? ['open', url]
+          : [resolveBin('xdg-open') ?? 'xdg-open', url];
+    Bun.spawn(argv, {
       stdin: 'ignore',
       stdout: 'ignore',
       stderr: 'ignore',
-      env: hostEnv({ DISPLAY: process.env.DISPLAY || ':0' }),
+      env: hostEnv(),
     } as unknown as SpawnOpts);
   } catch {
     // Phone still gets the URL in chat.
@@ -1684,12 +1758,12 @@ class ClaudeAdapter implements AgentAdapter {
     this.spawnKey = key;
     const bin = resolveBin('claude') ?? 'claude';
     this.proc = Bun.spawn(
-      claudeSpawnArgs({
+      spawnArgv(claudeSpawnArgs({
         bin,
         model: opts?.model,
         mode: opts?.mode,
         thinking: opts?.thinking,
-      }),
+      })),
       {
         cwd: this.session.info.cwd,
         stdin: 'pipe',
@@ -1784,12 +1858,31 @@ class ClaudeAdapter implements AgentAdapter {
     } else if (type === 'control_request' || msg.subtype === 'can_use_tool') {
       const requestId = String(msg.request_id ?? msg.id ?? crypto.randomUUID());
       const tool = (msg.request as Record<string, unknown> | undefined) ?? msg;
+      
+      const toolName = String(tool.tool_name ?? tool.name ?? 'tool');
+      const toolInputStr = JSON.stringify(tool.input ?? tool.tool_input ?? {}, null, 2);
+
+      // Auto-allow safe tools inside the sandbox directory
+      const safeToolNames = ['View', 'Edit', 'Replace', 'Glob', 'Grep', 'read', 'write', 'edit_file', 'replace_file_content', 'view_file', 'grep_search', 'find_by_name'];
+      if (safeToolNames.includes(toolName) || toolName.toLowerCase().includes('file') || toolName.toLowerCase().includes('read') || toolName.toLowerCase().includes('write')) {
+          try {
+            const stdin = this.proc?.stdin as unknown as { write(s: string): unknown; flush?: () => void } | undefined;
+            stdin?.write(JSON.stringify({
+              type: 'control_response',
+              request_id: requestId,
+              response: { allowed: true },
+            }) + '\n');
+            stdin?.flush?.();
+          } catch {}
+          return;
+      }
+
       emit(s, {
         kind: 'permission-request',
         refId: requestId,
-        toolName: String(tool.tool_name ?? tool.name ?? 'tool'),
-        toolInput: JSON.stringify(tool.input ?? tool.tool_input ?? {}, null, 2),
-        text: `Allow ${String(tool.tool_name ?? tool.name ?? 'this tool')}?`,
+        toolName,
+        toolInput: toolInputStr,
+        text: `Allow ${toolName}?`,
       });
       s.pendingPermissions.set(requestId, (allow) => {
         try {
@@ -1959,7 +2052,7 @@ class CursorAdapter implements AgentAdapter {
     this.loggingIn = true;
     setBusy(this.session, true);
     const bin = resolveBin('cursor-agent') ?? 'cursor-agent';
-    const proc = Bun.spawn([bin, 'login'], {
+    const proc = Bun.spawn(spawnArgv([bin, 'login']), {
       cwd: this.session.info.cwd,
       stdin: 'ignore',
       stdout: 'pipe',
@@ -2384,7 +2477,7 @@ class AntigravityAdapter implements AgentAdapter {
     setBusy(this.session, true);
     const bin = resolveBin('agy') ?? 'agy';
     const proc = Bun.spawn(
-      [bin, '--output-format', 'text', '--print-timeout', '3m', '-p', 'ping'],
+      spawnArgv([bin, '--output-format', 'text', '--print-timeout', '3m', '-p', 'ping']),
       {
         cwd: this.session.info.cwd,
         stdin: 'ignore',

@@ -47,7 +47,9 @@ function hasPty(): boolean {
 
 export function handleTerminalCreate(cols: number, rows: number, shell?: string, ws?: WebSocket): { terminalId: string } {
   const id = crypto.randomUUID();
-  const cmd = shell || process.env.SHELL || '/bin/bash';
+  const cmd = shell
+    || process.env.SHELL
+    || (process.platform === 'win32' ? (process.env.ComSpec || 'powershell.exe') : '/bin/bash');
   const usePty = hasPty();
 
   const proc = usePty

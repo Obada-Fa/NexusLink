@@ -13,6 +13,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../rpc/models.dart';
 import '../state/connection.dart';
+import '../util/host_path.dart';
 import '../widgets/not_connected_view.dart';
 
 enum FileSortOption {
@@ -121,9 +122,8 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
 
   void _up() {
     final cwd = _cwd;
-    if (cwd == null || cwd == '/') return;
-    final parent = cwd.substring(0, cwd.lastIndexOf('/'));
-    _navigate(parent.isEmpty ? '/' : parent);
+    if (cwd == null || isThisPcPath(cwd)) return;
+    _navigate(parentHostPath(cwd));
   }
 
   String get _httpBase => ref.read(connectionProvider).httpBase ?? '';
@@ -233,11 +233,12 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
         children: [
           IconButton(
             icon: const Icon(Icons.arrow_upward, size: 18),
-            onPressed: _cwd == null || _cwd == '/' ? null : _up,
+            onPressed: _cwd == null || isThisPcPath(_cwd!) ? null : _up,
             visualDensity: VisualDensity.compact,
           ),
           Expanded(
-            child: Text(_cwd ?? '',
+            child: Text(
+                isThisPcPath(_cwd ?? '/') ? 'This PC' : (_cwd ?? ''),
                 style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
                 overflow: TextOverflow.ellipsis),
           ),
@@ -293,7 +294,10 @@ class _FilesScreenState extends ConsumerState<FilesScreen> {
       itemBuilder: (_, i) {
         final e = _entries[i];
         return ListTile(
-          leading: Icon(e.isDirectory ? Icons.folder : Icons.insert_drive_file,
+          leading: Icon(
+              e.isDirectory
+                  ? (isWindowsDriveRoot(e.path) ? Icons.storage : Icons.folder)
+                  : Icons.insert_drive_file,
               color: e.isDirectory ? const Color(0xFF6B8CFF) : Colors.white54),
           title: Text(e.name, maxLines: 1, overflow: TextOverflow.ellipsis),
           subtitle: e.isDirectory

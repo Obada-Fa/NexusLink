@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useConnectionStore } from '@/store/connection';
+import { hostPathCrumbs, isThisPcPath, normalizeGoPath } from '@/lib/host-path';
 
 interface FileEntry {
   name: string;
@@ -67,7 +68,7 @@ export default function FilesPage() {
     try { await connect(hostUrl); } catch { /* handled by store */ }
   }, [connect, hostUrl]);
 
-  const [cwd, setCwd] = useState('/home');
+  const [cwd, setCwd] = useState<string | null>(null);
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -97,7 +98,23 @@ export default function FilesPage() {
   );
 
   useEffect(() => {
-    fetchEntries(cwd);
+    if (!client || status !== 'connected') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const info = (await client.request('system.getInfo')) as { homeDir?: string };
+        if (!cancelled) setCwd(info.homeDir?.trim() || '/');
+      } catch {
+        if (!cancelled) setCwd('/');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, status]);
+
+  useEffect(() => {
+    if (cwd) fetchEntries(cwd);
   }, [cwd, fetchEntries]);
 
   const navigate = useCallback((path: string) => {
@@ -114,6 +131,7 @@ export default function FilesPage() {
   );
 
   const handleRefresh = useCallback(() => {
+    if (!cwd) return;
     setRefreshing(true);
     fetchEntries(cwd);
   }, [cwd, fetchEntries]);
@@ -124,7 +142,7 @@ export default function FilesPage() {
       try {
         await client.request('fs.delete', { path: entry.path });
         setDeleteTarget(null);
-        fetchEntries(cwd);
+        if (cwd) fetchEntries(cwd);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Delete failed');
         setDeleteTarget(null);
@@ -147,12 +165,12 @@ export default function FilesPage() {
     []
   );
 
-  const breadcrumbs = cwd.split('/').filter(Boolean);
+  const breadcrumbs = hostPathCrumbs(cwd ?? '/');
 
   const goToPath = useCallback(() => {
     const val = inputRef.current?.value;
     if (val) {
-      setCwd(val.startsWith('/') ? val : `/${val}`);
+      setCwd(normalizeGoPath(val));
     }
   }, []);
 
@@ -229,26 +247,17 @@ export default function FilesPage() {
 
       <div style={styles.navRow}>
         <div style={styles.breadcrumb}>
-          <button
-            style={styles.breadcrumbBtn}
-            onClick={() => navigate('/')}
-          >
-            /
-          </button>
-          {breadcrumbs.map((seg, i) => {
-            const path = '/' + breadcrumbs.slice(0, i + 1).join('/');
-            return (
-              <span key={path} style={styles.breadcrumbItem}>
-                <span style={styles.breadcrumbSep}>{'\u203A'}</span>
-                <button
-                  style={styles.breadcrumbBtn}
-                  onClick={() => navigate(path)}
-                >
-                  {seg}
-                </button>
-              </span>
-            );
-          })}
+          {breadcrumbs.map((crumb, i) => (
+            <span key={`${crumb.path}-${i}`} style={styles.breadcrumbItem}>
+              {i > 0 && <span style={styles.breadcrumbSep}>{'\u203A'}</span>}
+              <button
+                style={styles.breadcrumbBtn}
+                onClick={() => navigate(crumb.path)}
+              >
+                {crumb.label}
+              </button>
+            </span>
+          ))}
         </div>
         <button
           onClick={handleRefresh}
@@ -266,8 +275,9 @@ export default function FilesPage() {
         <input
           ref={inputRef}
           style={styles.pathInput}
-          defaultValue={cwd}
-          placeholder="Path..."
+          key={cwd ?? 'pending'}
+          defaultValue={cwd ?? ''}
+          placeholder="C:/Users or D:/projects"
           onKeyDown={(e) => {
             if (e.key === 'Enter') goToPath();
           }}

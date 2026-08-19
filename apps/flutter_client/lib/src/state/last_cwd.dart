@@ -38,11 +38,12 @@ Future<void> saveLastAgentCwd(String path) async {
   await prefs.setString(lastAgentCwdKey, next.first);
 }
 
-/// Last segment of a Unix path for display (e.g. `/home/you/project` → `project`).
+/// Last segment of a host path for display (`D:/projects/foo` → `foo`).
 String folderDisplayName(String path) {
-  if (path.isEmpty) return path;
+  if (path.isEmpty || path == '/') return path.isEmpty ? path : 'This PC';
   final trimmed =
       path.endsWith('/') && path != '/' ? path.substring(0, path.length - 1) : path;
+  if (RegExp(r'^[A-Za-z]:$').hasMatch(trimmed)) return trimmed;
   final i = trimmed.lastIndexOf('/');
   return i < 0 ? trimmed : trimmed.substring(i + 1);
 }

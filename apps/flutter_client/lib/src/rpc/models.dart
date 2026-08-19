@@ -450,7 +450,9 @@ class CaptureRegion {
 }
 
 bool isAgentToolEvent(AgentEvent e) =>
-    e.kind == 'tool-start' || e.kind == 'tool-end';
+    (e.kind == 'tool-start' || e.kind == 'tool-end') &&
+    e.toolName != 'ask_question' &&
+    e.toolName != 'askQuestion';
 
 /// Collapse a tool-start + matching tool-end into one row.
 List<AgentEvent> mergeToolEvents(List<AgentEvent> events) {
@@ -573,7 +575,20 @@ List<AgentEvent> closeOpenTools(
 String toolGroupTitle(List<AgentEvent> tools) {
   final n = tools.length;
   final steps = n == 1 ? 'step' : 'steps';
-  return toolGroupRunning(tools) ? 'Working… $n $steps' : '$n $steps';
+  return toolGroupRunning(tools) ? 'Working…' : 'Finished $n $steps';
+}
+
+String _friendlyToolName(String name) {
+  final l = name.toLowerCase();
+  if (l == 'glob' || l == 'grep' || l == 'search' || l == 'glob_file_search' || l == 'find_by_name' || l == 'grep_search') return 'Searching codebase';
+  if (l == 'read' || l == 'readlints' || l == 'view_file' || l == 'read_file') return 'Reading files';
+  if (l == 'write' || l == 'edit' || l == 'replace' || l == 'edit_file' || l == 'replace_file_content' || l == 'write_to_file') return 'Editing files';
+  if (l == 'shell' || l == 'bash' || l == 'run_command' || l == 'task' || l == 'cmd') return 'Running command';
+  if (l == 'list' || l == 'ls' || l == 'list_dir') return 'Exploring folders';
+  if (l == 'webfetch' || l == 'fetch' || l == 'read_url_content' || l == 'search_web') return 'Browsing web';
+  if (l == 'ask_question' || l == 'askquestion') return 'Asking a question';
+  if (l == 'invoke_subagent' || l == 'manage_subagents' || l == 'send_message') return 'Coordinating agents';
+  return name;
 }
 
 String toolGroupSummary(List<AgentEvent> tools) {
@@ -581,8 +596,9 @@ String toolGroupSummary(List<AgentEvent> tools) {
   for (final e in tools) {
     final n = (e.toolName ?? '').trim();
     if (n.isEmpty) continue;
-    if (names.isEmpty || names.last.toLowerCase() != n.toLowerCase()) {
-      names.add(n);
+    final friendly = _friendlyToolName(n);
+    if (names.isEmpty || names.last != friendly) {
+      names.add(friendly);
     }
   }
   return names.join(' · ');

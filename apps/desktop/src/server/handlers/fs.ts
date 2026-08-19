@@ -4,14 +4,28 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 
-export async function handleFsRead(rawPath: string): Promise<string> {
+export function toPosixPath(p: string): string {
+  return p.replace(/\\/g, '/');
+}
+
+/** Phone sends Unix-style paths; Windows hosts still understand them via Node. */
+export function expandHostPath(rawPath: string): string {
   let p = (rawPath || '').trim();
   if (p.startsWith('file://')) {
     p = decodeURIComponent(p.replace(/^file:\/\//, ''));
+    p = p.replace(/^\/([A-Za-z]:)/, '$1');
   }
-  if (p.startsWith('~/')) {
-    p = join(homedir(), p.slice(2));
-  }
+  const home = homedir();
+  if (!p || p === '~') return home;
+  if (process.platform === 'win32' && p === '/') return home;
+  if (p.startsWith('~/') || p.startsWith('~\\')) return join(home, p.slice(2));
+  if (process.platform === 'win32' && (p.startsWith('/home/') || p === '/home')) return home;
+  if (/^[A-Za-z]:$/.test(p)) return `${p}\\`;
+  return p;
+}
+
+export async function handleFsRead(rawPath: string): Promise<string> {
+  const p = expandHostPath(rawPath);
   const stat = await fs.stat(p);
   if (stat.isDirectory()) {
     throw new Error(`Cannot read directory: ${p}`);
@@ -24,12 +38,13 @@ export async function handleFsRead(rawPath: string): Promise<string> {
 }
 
 export async function handleFsList(path: string, showHidden = false): Promise<FileEntry[]> {
-  const entries = await fs.readdir(path, { withFileTypes: true, recursive: false });
+  const dir = expandHostPath(path);
+  const entries = await fs.readdir(dir, { withFileTypes: true, recursive: false });
   const out: FileEntry[] = [];
   for (const entry of entries) {
     const name = entry.name;
     if (!showHidden && name.startsWith('.')) continue;
-    const fullPath = `${path.replace(/\/$/, '')}/${name}`;
+    const fullPath = toPosixPath(join(dir, name));
     let size = 0;
     let modifiedAt = '';
     try {
@@ -71,10 +86,14 @@ export async function listProjects(): Promise<ProjectInfo[]> {
     home,
     join(home, 'Projects'),
     join(home, 'projects'),
+    join(home, 'Documents'),
+    join(home, 'Desktop'),
     join(home, 'code'),
     join(home, 'dev'),
     join(home, 'src'),
     join(home, 'work'),
+    'D:\\projects',
+    'C:\\projects',
   ];
   const skip = new Set(['node_modules', 'dist', 'out', 'build', 'target']);
   const seen = new Set<string>();
@@ -84,7 +103,7 @@ export async function listProjects(): Promise<ProjectInfo[]> {
     const real = canonicalDir(dir);
     if (seen.has(real) || !existsSync(join(dir, '.git'))) return;
     seen.add(real);
-    out.push({ name, path: real });
+    out.push({ name, path: toPosixPath(real) });
   }
 
   async function walk(root: string, remaining: number): Promise<void> {
@@ -138,7 +157,7 @@ export function parseGitStatusPorcelain(output: string): Omit<GitWorkingTree, 'c
 }
 
 export async function gitWorkingTree(cwd: string): Promise<GitWorkingTree | null> {
-  const dir = cwd.trim();
+  const dir = expandHostPath(cwd);
   if (!dir || !existsSync(dir)) return null;
   try {
     const proc = Bun.spawnSync(['git', '-C', dir, 'status', '-sb', '--porcelain=v1'], {
@@ -150,7 +169,7 @@ export async function gitWorkingTree(cwd: string): Promise<GitWorkingTree | null
     const text = proc.stdout?.toString() ?? '';
     const parsed = parseGitStatusPorcelain(text);
     if (!parsed) return null;
-    return { cwd: dir, ...parsed };
+    return { cwd: toPosixPath(dir), ...parsed };
   } catch {
     return null;
   }

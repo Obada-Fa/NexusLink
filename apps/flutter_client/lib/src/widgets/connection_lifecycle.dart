@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -19,6 +21,7 @@ class _ConnectionLifecycleState extends ConsumerState<ConnectionLifecycle>
     with WidgetsBindingObserver {
   void Function()? _unsubAgentEvent;
   RpcClient? _subscribedClient;
+  int? _backgroundedAtMs;
 
   @override
   void initState() {
@@ -36,7 +39,55 @@ class _ConnectionLifecycleState extends ConsumerState<ConnectionLifecycle>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      ref.read(connectionProvider.notifier).ensureConnected();
+      unawaited(_onResumed());
+      return;
+    }
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _backgroundedAtMs = DateTime.now().millisecondsSinceEpoch;
+    }
+  }
+
+  Future<void> _onResumed() async {
+    final since = _backgroundedAtMs;
+    _backgroundedAtMs = null;
+    await ref.read(connectionProvider.notifier).ensureConnected();
+    if (!mounted || since == null) return;
+    await _catchUpAgentEvents(since);
+  }
+
+  Future<void> _catchUpAgentEvents(int sinceMs) async {
+    final client = ref.read(activeClientProvider);
+    if (client == null || client.status != RpcStatus.connected) return;
+    try {
+      final sessionsRaw = await client.requestList(
+        'agent.listSessions',
+        const {},
+        const Duration(seconds: 8),
+      );
+      for (final row in sessionsRaw) {
+        if (row is! Map<String, dynamic>) continue;
+        final session = AgentSessionInfo.fromJson(row);
+        final historyRaw = await client.requestList(
+          'agent.history',
+          {'agentSessionId': session.agentSessionId},
+          const Duration(seconds: 8),
+        );
+        for (final ev in historyRaw) {
+          if (ev is! Map<String, dynamic>) continue;
+          final parsed = AgentEvent.fromJson(ev);
+          if (parsed.ts < sinceMs) continue;
+          NotificationService.instance.handleAgentEvent(
+            session.agentSessionId,
+            parsed,
+            sessionTitle: session.title,
+          );
+        }
+      }
+    } catch (_) {
+      // Best effort: resume should still proceed even if catch-up fails.
     }
   }
 

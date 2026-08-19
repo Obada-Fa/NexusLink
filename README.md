@@ -11,13 +11,10 @@ chats on the PC appear under **On this PC** and can be opened (CLI chats resume;
 
 ```
 phone (PWA or Flutter)
-  launcher ── WS RPC :45678 ── PC host (Bun)
+  launcher ── WS RPC :45678 ── PC host
                  │
-                 ├── appSession  → Xvfb + openbox per app (exact phone pixels)
-                 ├── MJPEG WS    → ffmpeg x11grab of that display (always-on)
-                 ├── WebRTC      → GStreamer webrtcbin H.264 + Opus (upgrade)
-                 ├── PTY         → python pty-host.py → xterm on the phone
-                 └── agents      → Claude Code / Cursor CLI / OpenCode / Antigravity → chat UI
+                 ├── Linux (apps/desktop): Xvfb + ffmpeg x11grab + xdotool
+                 └── Windows (apps/windows-host): agents, files, terminal
 ```
 
 Control plane is the existing ECDH-paired JSON WebSocket. Video upgrades to
@@ -40,7 +37,10 @@ Linux/X11 host needs:
 ## Quick Start (LAN) — scan & go
 
 ```bash
-bun run lan          # builds the PWA, then starts the unified host on :45678
+bun run lan          # Linux/X11: builds the PWA, then starts apps/desktop on :45678
+bun run windows      # Windows: builds the PWA, then starts apps/windows-host on :45678
+                     # Folder pickers show This PC (C:/, D:/). Other PCs: packaging/windows/build.ps1
+
 ```
 
 The host prints a **QR code** for every address it is reachable at:
@@ -67,9 +67,10 @@ bun run dev          # all apps in parallel (turbo)
 Per-app:
 
 ```bash
-cd apps/desktop && bun run dev      # http://localhost:3000
-cd apps/mobile-client && bun run dev # http://localhost:3001
-cd apps/relay && bun run dev         # ws://localhost:3033
+cd apps/desktop && bun run dev         # http://localhost:3000 (Linux/X11 host UI)
+cd apps/windows-host && bun run start  # Windows host on :45678
+cd apps/mobile-client && bun run dev   # http://localhost:3001
+cd apps/relay && bun run dev           # ws://localhost:3033
 ```
 
 ## Build
@@ -121,7 +122,8 @@ RELAY_PORT=3033 bun run start
 
 ## Stack
 
-- **Desktop**: Tauri 2.0, Next.js 14, Bun RPC server (port 45678)
+- **Desktop (Linux)**: Tauri 2.0, Next.js 14, Bun RPC server (port 45678)
+- **Windows host**: Bun RPC server (port 45678) in `apps/windows-host`
 - **Mobile**: Next.js 14 PWA + Flutter (Riverpod, flutter_webrtc, xterm, markdown)
 - **Relay**: Bun WebSocket server (port 3033)
 - **Packages**: TypeScript types, touch gesture engine, SVG UI components
@@ -132,7 +134,8 @@ RELAY_PORT=3033 bun run start
 
 ```
 apps/
-  desktop/          Tauri + Next.js host app (virtual sessions, WebRTC, agents)
+  desktop/          Linux/X11 host (virtual sessions, WebRTC, agents)
+  windows-host/     Windows host (agents, files, terminal; same phone RPC)
   mobile-client/    Next.js PWA client
   flutter_client/   Flutter Android client
   relay/            Bun WebSocket signaling relay

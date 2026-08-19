@@ -1,8 +1,8 @@
 // Agent gateway: session lifecycle, CLI stream parsers, and the mock adapter.
 
 import { describe, expect, test } from 'bun:test';
-import { homedir } from 'node:os';
-import { realpathSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { existsSync, realpathSync } from 'node:fs';
 import type { AgentEvent, WsMessage } from '@nexuslink/rpc-types';
 import {
   listAgents,
@@ -52,10 +52,15 @@ import {
   agyEffortFlag,
   isModelEffortSupported,
   resolveAgentIcon,
+  resolveBin,
+  spawnArgv,
 } from '../agents';
+
+const sessionCwd = existsSync('/tmp') ? '/tmp' : tmpdir();
 
 describe('agent gateway', () => {
   test('resolves real logo icons for agents', async () => {
+    if (process.platform === 'win32') return;
     const antigravityIcon = await resolveAgentIcon('antigravity');
     expect(antigravityIcon).toBeDefined();
     expect(antigravityIcon).toMatch(/^data:image\/png;base64,/);
@@ -96,7 +101,7 @@ describe('agent gateway', () => {
       if (msg.type === 'agent-event') pushed.push(msg.event);
     });
 
-    const info = createAgentSession('mock', '/tmp', 'Test chat');
+    const info = createAgentSession('mock', sessionCwd, 'Test chat');
     expect(info.status).toBe('running');
     expect(listAgentSessions().some((s) => s.agentSessionId === info.agentSessionId)).toBe(true);
 
@@ -152,10 +157,10 @@ describe('agent gateway', () => {
     const info = openHostChat({
       agent: 'mock',
       hostChatId: 'host-cwd',
-      cwd: '/tmp',
+      cwd: sessionCwd,
       title: 'Project chat',
     });
-    expect(info.cwd).toBe(resolveAgentCwd('/tmp'));
+    expect(info.cwd).toBe(resolveAgentCwd(sessionCwd));
     const moved = openHostChat({
       agent: 'mock',
       hostChatId: 'host-cwd',
@@ -163,11 +168,11 @@ describe('agent gateway', () => {
     });
     expect(moved.agentSessionId).toBe(info.agentSessionId);
     expect(moved.cwd).toBe(resolveAgentCwd(homedir()));
-    const again = setAgentSessionCwd(info.agentSessionId, '/tmp');
-    expect(again.cwd).toBe(resolveAgentCwd('/tmp'));
+    const again = setAgentSessionCwd(info.agentSessionId, sessionCwd);
+    expect(again.cwd).toBe(resolveAgentCwd(sessionCwd));
     const kept = openHostChat({ agent: 'mock', hostChatId: 'host-cwd' });
     expect(kept.agentSessionId).toBe(info.agentSessionId);
-    expect(kept.cwd).toBe(resolveAgentCwd('/tmp'));
+    expect(kept.cwd).toBe(resolveAgentCwd(sessionCwd));
     closeAgentSession(info.agentSessionId);
   });
 
@@ -180,11 +185,26 @@ describe('agent gateway', () => {
   });
 
   test('resolves ~ and rejects missing working directories', () => {
-    expect(resolveAgentCwd('~')).toBe(homedir());
-    expect(resolveAgentCwd()).toBe(homedir());
-    expect(resolveAgentCwd('/tmp')).toBe(realpathSync('/tmp'));
+    const home = realpathSync(homedir()).replace(/\\/g, '/');
+    expect(resolveAgentCwd('~')).toBe(home);
+    expect(resolveAgentCwd()).toBe(home);
+    expect(resolveAgentCwd(sessionCwd)).toBe(realpathSync(sessionCwd).replace(/\\/g, '/'));
     expect(() => resolveAgentCwd('/this/path-does-not-exist-nexuslink')).toThrow(/directory not found/);
-    expect(resolveAgentCwd('/this-path-does-not-exist-nexuslink', { fallbackHome: true })).toBe(homedir());
+    expect(resolveAgentCwd('/this-path-does-not-exist-nexuslink', { fallbackHome: true })).toBe(homedir().replace(/\\/g, '/'));
+  });
+
+  test('resolves CLI names with PATH delimiters and Windows script wrappers', () => {
+    expect(spawnArgv(['claude', '-p'])).toEqual(['claude', '-p']);
+    if (process.platform === 'win32') {
+      const wrapped = spawnArgv(['C:\\tools\\cursor-agent.cmd', 'login']);
+      expect(wrapped[0]).toBe('cmd.exe');
+      expect(wrapped).toContain('C:\\tools\\cursor-agent.cmd');
+      expect(resolveBin('cursor-agent')).toBeTruthy();
+      const agyHome = process.env.LOCALAPPDATA;
+      if (agyHome && existsSync(`${agyHome}\\agy\\bin\\agy.exe`)) {
+        expect(resolveBin('agy')).toMatch(/agy\.exe$/i);
+      }
+    }
   });
 });
 
@@ -399,7 +419,7 @@ describe('composer flags and attachments', () => {
     setAgentBroadcast((msg: WsMessage) => {
       if (msg.type === 'agent-event') pushed.push(msg.event);
     });
-    const info = createAgentSession('mock', '/tmp', 'Photos');
+    const info = createAgentSession('mock', sessionCwd, 'Photos');
     expect(promptAgent(info.agentSessionId, '  ', {}).ok).toBe(false);
     expect(promptAgent(info.agentSessionId, '', {
       mode: 'plan',

@@ -360,6 +360,19 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     });
   }
 
+  Future<void> _submitPermission(String? requestId, bool allow) async {
+    final client = _client;
+    final session = _active;
+    if (client == null || session == null || requestId == null || !mounted) {
+      return;
+    }
+    await client.request('agent.permission', {
+      'agentSessionId': session.agentSessionId,
+      'requestId': requestId,
+      'allow': allow,
+    });
+  }
+
   Future<void> _askPermission(AgentEvent e) async {
     final client = _client;
     final session = _active;
@@ -369,7 +382,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
     final allow = await showModalBottomSheet<bool>(
       context: context,
-      backgroundColor: const Color(0xFF151522),
+      backgroundColor: _panelBackgroundColor(_active?.agent),
       builder: (ctx) => Padding(
         padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
         child: Column(
@@ -415,11 +428,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         ),
       ),
     );
-    await client.request('agent.permission', {
-      'agentSessionId': session.agentSessionId,
-      'requestId': requestId,
-      'allow': allow == true,
-    });
+    await _submitPermission(requestId, allow == true);
   }
 
   Future<String?> _pickProject() async {
@@ -1002,7 +1011,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final newTitle = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF151522),
+        backgroundColor: _panelBackgroundColor(_active?.agent),
         title: const Text('Rename chat', style: TextStyle(fontSize: 16)),
         content: TextField(
           controller: controller,
@@ -1155,7 +1164,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (modes.length < 2 || !mounted) return;
     final chosen = await showModalBottomSheet<String>(
       context: context,
-      backgroundColor: const Color(0xFF151522),
+      backgroundColor: _panelBackgroundColor(_active?.agent),
       builder: (ctx) => SafeArea(
         child: ListView(
           shrinkWrap: true,
@@ -1197,7 +1206,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final git = _gitTree;
     await showModalBottomSheet<void>(
       context: context,
-      backgroundColor: const Color(0xFF151522),
+      backgroundColor: _panelBackgroundColor(_active?.agent),
       builder: (ctx) => SafeArea(
         child: ListView(
           shrinkWrap: true,
@@ -1316,7 +1325,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (!mounted) return;
     final chosen = await showModalBottomSheet<AgentInfo>(
       context: context,
-      backgroundColor: const Color(0xFF151522),
+      backgroundColor: _panelBackgroundColor(_active?.agent),
       builder: (ctx) => SafeArea(
         child: ListView(
           shrinkWrap: true,
@@ -1357,7 +1366,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (!mounted) return;
     final chosen = await showModalBottomSheet<String>(
       context: context,
-      backgroundColor: const Color(0xFF151522),
+      backgroundColor: _panelBackgroundColor(_active?.agent),
       builder: (ctx) => SafeArea(
         child: ListView(
           shrinkWrap: true,
@@ -1395,7 +1404,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
     final chosen = await showModalBottomSheet<String>(
       context: context,
-      backgroundColor: const Color(0xFF151522),
+      backgroundColor: _panelBackgroundColor(_active?.agent),
       isScrollControlled: true,
       builder: (ctx) {
         var query = '';
@@ -1477,7 +1486,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
-      backgroundColor: const Color(0xFF151522),
+      backgroundColor: _panelBackgroundColor(_active?.agent),
       builder: (ctx) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1578,9 +1587,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         if (!didPop) _leaveChat();
       },
       child: Scaffold(
-        backgroundColor: const Color(0xFF0A0A0F),
+        backgroundColor: _appBackgroundColor(_active?.agent),
         appBar: AppBar(
-          backgroundColor: const Color(0xFF0A0A0F),
+          backgroundColor: _appBackgroundColor(_active?.agent),
           leading: _active == null
               ? null
               : IconButton(
@@ -1802,9 +1811,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     return Container(
       padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
-        color: const Color(0xFF151522),
+        color: _panelBackgroundColor(_active?.agent),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFF22223A)),
+        border: Border.all(color: _borderColor(_active?.agent)),
       ),
       child: Row(
         children: [
@@ -1868,23 +1877,36 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     );
   }
 
+  Color _chatBackgroundColor(String? agentId) {
+    switch (agentId) {
+      case 'cursor': return const Color(0xFFF3F3F5); // Soft white
+      case 'antigravity': return const Color(0xFF0D0717); // Slightly lighter deep purple
+      case 'claude': return const Color(0xFF140B08); // Slightly lighter deep brown
+      case 'opencode': return const Color(0xFF060F0D); // Slightly lighter deep teal
+      default: return Colors.transparent; // Fallback to Scaffold background
+    }
+  }
+
   Widget _chat() {
     final display = groupAgentDisplay(_events);
     return Column(
       children: [
         Expanded(
-          child: ListView.builder(
-            controller: _scroll,
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-            itemCount: display.length + (_busy ? 1 : 0),
-            itemBuilder: (_, i) {
-              if (i >= display.length) {
-                return _workingRow();
-              }
-              final item = display[i];
-              if (item.tools != null) return _toolGroup(item.tools!);
-              return _bubble(item.event!);
-            },
+          child: Container(
+            color: _chatBackgroundColor(_active?.agent),
+            child: ListView.builder(
+              controller: _scroll,
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+              itemCount: display.length + (_busy ? 1 : 0),
+              itemBuilder: (_, i) {
+                if (i >= display.length) {
+                  return _workingRow();
+                }
+                final item = display[i];
+                if (item.tools != null) return _toolGroup(item.tools!);
+                return _bubble(item.event!);
+              },
+            ),
           ),
         ),
         _composer(),
@@ -1906,10 +1928,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             size: 22,
           ),
           const SizedBox(width: 10),
-          const Text(
+          Text(
             'Working…',
             style: TextStyle(
-              color: Colors.white38,
+              color: agentId == 'cursor' ? Colors.black54 : Colors.white38,
               fontSize: 12,
               fontStyle: FontStyle.italic,
             ),
@@ -1922,30 +1944,89 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   Color _agentBubbleColor(String? agentId) {
     switch (agentId) {
       case 'cursor':
-        return const Color(0xFF101014);
+        return const Color(0xFF111111); // Very dark gray/black
       case 'antigravity':
-        return const Color(0xFF2D1B4E);
+        return const Color(0xFF1D0E38); // Darker purple
       case 'claude':
-        return const Color(0xFF3D2B1F);
+        return const Color(0xFF2A150D); // Darker terracotta
       case 'opencode':
-        return const Color(0xFF1C3330);
+        return const Color(0xFF0E2320); // Darker teal
       default:
-        return const Color(0xFF151522);
+        return const Color(0xFF1E1E2F); // Darker blue-gray
     }
   }
 
   Color _userBubbleColor(String? agentId) {
     switch (agentId) {
       case 'cursor':
-        return const Color(0xFF4B5563); // gray
+        return const Color(0xFFD4D4D8); // Soft off-white
       case 'antigravity':
-        return const Color(0xFF9333EA); // purple
+        return const Color(0xFF9F54FF); // Bright purple
       case 'claude':
-        return const Color(0xFFD97757); // terracotta/orange
+        return const Color(0xFFE57A55); // Bright terracotta
       case 'opencode':
-        return const Color(0xFF0D9488); // teal
+        return const Color(0xFF12C9B6); // Bright teal
       default:
-        return const Color(0xFF2A6AFF); // default blue
+        return const Color(0xFF2A6AFF); // Bright blue
+    }
+  }
+
+  Color _userBubbleTextColor(String? agentId) {
+    switch (agentId) {
+      case 'cursor':
+        return Colors.black87; // Dark text on soft white
+      default:
+        return Colors.white; // White text for colored bubbles
+    }
+  }
+
+  Color _appBackgroundColor(String? agentId) {
+    switch (agentId) {
+      case 'cursor': return const Color(0xFF000000); // Pure black
+      case 'antigravity': return const Color(0xFF0A0512);
+      case 'claude': return const Color(0xFF0F0806);
+      case 'opencode': return const Color(0xFF040A09);
+      default: return const Color(0xFF0A0A0F);
+    }
+  }
+
+  Color _panelBackgroundColor(String? agentId) {
+    switch (agentId) {
+      case 'cursor': return const Color(0xFF1A1A1A); // Dark gray
+      case 'antigravity': return const Color(0xFF120B20);
+      case 'claude': return const Color(0xFF1A100B);
+      case 'opencode': return const Color(0xFF0A1412);
+      default: return const Color(0xFF151522);
+    }
+  }
+
+  Color _borderColor(String? agentId) {
+    switch (agentId) {
+      case 'cursor': return const Color(0xFF333333); // Medium gray
+      case 'antigravity': return const Color(0xFF281845); // Dark purple border
+      case 'claude': return const Color(0xFF3A2015); // Dark terracotta border
+      case 'opencode': return const Color(0xFF15332E); // Dark teal border
+      default: return const Color(0xFF22223A); // Default purplish gray
+    }
+  }
+
+  Color _inputBorderColor(String? agentId) {
+    switch (agentId) {
+      case 'cursor': return const Color(0xFF444444); // Lighter gray
+      case 'antigravity': return const Color(0xFF352055); // Lighter purple border
+      case 'claude': return const Color(0xFF4A2B1C); // Lighter terracotta border
+      case 'opencode': return const Color(0xFF1C453E); // Lighter teal border
+      default: return const Color(0xFF2A2A40); // Default lighter purplish gray
+    }
+  }
+
+  Color _chipBackgroundColor(String? agentId) {
+    switch (agentId) {
+      case 'cursor': return const Color(0xFF2A2A2A); // Dark gray
+      case 'antigravity': return const Color(0xFF1F1235); // Dark purple
+      case 'claude': return const Color(0xFF2A150D); // Dark terracotta
+      case 'opencode': return const Color(0xFF102824); // Dark teal
+      default: return const Color(0xFF1E1E2E); // Default purplish gray
     }
   }
 
@@ -1980,8 +2061,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   Padding(
                     padding: const EdgeInsets.only(bottom: 6),
                     child: Text(e.images.join(', '),
-                        style: const TextStyle(
-                            color: Colors.white38, fontSize: 11)),
+                        style: TextStyle(
+                            color: _active?.agent == 'cursor' ? Colors.black38 : Colors.white38, 
+                            fontSize: 11)),
                   ),
                 if ((e.text ?? '').isNotEmpty)
                   Container(
@@ -1993,7 +2075,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                       borderRadius: BorderRadius.circular(14),
                     ),
                     child: Text(e.text ?? '',
-                        style: const TextStyle(color: Colors.white)),
+                        style: TextStyle(color: _userBubbleTextColor(_active?.agent))),
                   ),
               ],
             ),
@@ -2010,7 +2092,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               margin: const EdgeInsets.symmetric(vertical: 4),
               padding: const EdgeInsets.fromLTRB(12, 10, 10, 6),
               decoration: BoxDecoration(
-                color: const Color(0xFFF5F5F5),
+                color: _agentBubbleColor(_active?.agent),
                 borderRadius: BorderRadius.circular(14),
               ),
               child: Column(
@@ -2025,13 +2107,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                     },
                     styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
                         .copyWith(
-                          p: const TextStyle(color: Colors.black, fontSize: 14),
+                          p: const TextStyle(color: Colors.white, fontSize: 14),
                           a: const TextStyle(
-                              color: Color(0xFF0055CC),
+                              color: Color(0xFF5CA3FF),
                               fontSize: 14,
                               decoration: TextDecoration.underline),
                           code: const TextStyle(
-                              color: Colors.black87,
+                              color: Colors.white70,
                               fontFamily: 'monospace',
                               fontSize: 12),
                         ),
@@ -2054,20 +2136,86 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
           child: SelectionArea(
             child: Text(e.text ?? 'Thinking…',
-                style: const TextStyle(
-                    color: Colors.white38, fontSize: 12, fontStyle: FontStyle.italic)),
+                style: TextStyle(
+                    color: _active?.agent == 'cursor' ? Colors.black38 : Colors.white38, fontSize: 12, fontStyle: FontStyle.italic)),
           ),
         );
       case 'tool-start':
+        if (e.toolName == 'ask_question' || e.toolName == 'askQuestion') {
+           return _questionBubble(e, running: true);
+        }
         return _toolCard(e, running: true);
       case 'tool-end':
+        if (e.toolName == 'ask_question' || e.toolName == 'askQuestion') {
+           return _questionBubble(e, running: false);
+        }
         return _toolCard(e, running: false);
       case 'permission-request':
+        final isPending = _active != null && e == _events.last && _busy;
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
           child: SelectionArea(
-            child: Text(e.text ?? 'Waiting for permission…',
-                style: const TextStyle(color: Color(0xFFF0C040), fontSize: 12)),
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: _panelBackgroundColor(_active?.agent),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFF0C040).withOpacity(0.5)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(e.text ?? 'Allow this tool?',
+                      style: const TextStyle(color: Color(0xFFF0C040), fontSize: 13, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 4),
+                  Text(e.toolName ?? 'tool', style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                  if ((e.toolInput ?? '').isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8, bottom: 8),
+                      child: Text(e.toolInput!,
+                          maxLines: 4,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: Colors.white54)),
+                    ),
+                  if (isPending)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: Colors.white,
+                                side: const BorderSide(color: Colors.white24),
+                                padding: const EdgeInsets.symmetric(vertical: 8),
+                              ),
+                              onPressed: () => _submitPermission(e.refId, false),
+                              child: const Text('Deny'),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: FilledButton(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFFF0C040),
+                                foregroundColor: Colors.black,
+                                padding: const EdgeInsets.symmetric(vertical: 8),
+                              ),
+                              onPressed: () => _submitPermission(e.refId, true),
+                              child: const Text('Allow'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  else
+                    const Padding(
+                      padding: EdgeInsets.only(top: 8),
+                      child: Text('Responded', style: TextStyle(fontSize: 11, color: Colors.white38, fontStyle: FontStyle.italic)),
+                    ),
+                ],
+              ),
+            ),
           ),
         );
       case 'error':
@@ -2109,9 +2257,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4),
       decoration: BoxDecoration(
-        color: const Color(0xFF12121C),
+        color: _panelBackgroundColor(_active?.agent),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFF22223A)),
+        border: Border.all(color: _borderColor(_active?.agent)),
       ),
       child: Theme(
         data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
@@ -2171,9 +2319,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         margin: EdgeInsets.symmetric(vertical: nested ? 3 : 2),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
-          color: nested ? const Color(0xFF0A0A10) : const Color(0xFF12121C),
+          color: nested ? _appBackgroundColor(_active?.agent) : _panelBackgroundColor(_active?.agent),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: const Color(0xFF22223A)),
+          border: Border.all(color: _borderColor(_active?.agent)),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2219,6 +2367,94 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                       color: _looksLikeDiff(output)
                           ? const Color(0xFF93C5FD)
                           : const Color(0xFF6EE7B7)),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _questionBubble(AgentEvent e, {required bool running}) {
+    final input = e.toolInput ?? '';
+    if (input.isEmpty) return _toolCard(e, running: running);
+
+    String questionText = 'Question';
+    List<String> options = [];
+    bool isMulti = false;
+    try {
+      final json = jsonDecode(input);
+      if (json is Map) {
+        if (json.containsKey('questions') && json['questions'] is List) {
+          final qList = json['questions'] as List;
+          if (qList.isNotEmpty && qList.first is Map) {
+            final firstQ = qList.first as Map;
+            questionText = firstQ['question']?.toString() ?? questionText;
+            isMulti = firstQ['is_multi_select'] == true;
+            if (firstQ['options'] is List) {
+              options = (firstQ['options'] as List).map((o) => o.toString()).toList();
+            }
+          }
+        } else if (json.containsKey('question')) {
+          questionText = json['question']?.toString() ?? questionText;
+          if (json['options'] is List) {
+            options = (json['options'] as List).map((o) => o.toString()).toList();
+          }
+        }
+      }
+    } catch (_) {}
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: _panelBackgroundColor(_active?.agent),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: _borderColor(_active?.agent)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(running ? Icons.help_outline : Icons.check_circle_outline,
+                    size: 16,
+                    color: running ? const Color(0xFFF0C040) : const Color(0xFF4ADE80)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    running ? 'Needs input' : 'Responded',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: running ? const Color(0xFFF0C040) : const Color(0xFF4ADE80),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(questionText, style: const TextStyle(fontSize: 14)),
+            if (options.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: options.map((opt) {
+                    return ActionChip(
+                      label: Text(opt, style: const TextStyle(fontSize: 13)),
+                      backgroundColor: _appBackgroundColor(_active?.agent),
+                      side: BorderSide(color: _borderColor(_active?.agent)),
+                      onPressed: running && !_busy
+                          ? () {
+                              _input.text = opt;
+                              _send();
+                            }
+                          : null,
+                    );
+                  }).toList(),
                 ),
               ),
           ],
@@ -2288,9 +2524,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               ),
             Container(
               decoration: BoxDecoration(
-                color: const Color(0xFF151522),
+                color: _panelBackgroundColor(_active?.agent),
                 borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: const Color(0xFF2A2A40)),
+                border: Border.all(color: _inputBorderColor(_active?.agent)),
               ),
               padding: const EdgeInsets.fromLTRB(8, 8, 8, 6),
               child: Column(
@@ -2321,7 +2557,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                                   child: IconButton(
                                     visualDensity: VisualDensity.compact,
                                     style: IconButton.styleFrom(
-                                      backgroundColor: const Color(0xFF0A0A0F),
+                                      backgroundColor: _appBackgroundColor(_active?.agent),
                                       minimumSize: const Size(22, 22),
                                       tapTargetSize:
                                           MaterialTapTargetSize.shrinkWrap,
@@ -2409,7 +2645,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           ? 'Mode: ${_modeLabel(_mode)} (tap to switch)'
           : 'Mode: ${_modeLabel(_mode)}',
       child: Material(
-        color: const Color(0xFF1E1E2E),
+        color: _chipBackgroundColor(_active?.agent),
         borderRadius: BorderRadius.circular(8),
         child: InkWell(
           onTap: _busy ? null : (canPick ? _pickMode : _openComposerMenu),
@@ -2418,7 +2654,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: const Color(0xFF2A2A40)),
+              border: Border.all(color: _inputBorderColor(_active?.agent)),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -2446,7 +2682,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     return Tooltip(
       message: 'Model: $_modelLabel${canPick ? ' (tap to switch)' : ''}',
       child: Material(
-        color: const Color(0xFF1E1E2E),
+        color: _chipBackgroundColor(_active?.agent),
         borderRadius: BorderRadius.circular(8),
         child: InkWell(
           onTap: _busy ? null : (canPick ? _pickModel : _openComposerMenu),
@@ -2455,7 +2691,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: const Color(0xFF2A2A40)),
+              border: Border.all(color: _inputBorderColor(_active?.agent)),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,

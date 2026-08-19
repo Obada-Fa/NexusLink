@@ -69,6 +69,20 @@
         "typescript": "^5",
       },
     },
+    "apps/windows-host": {
+      "name": "@nexuslink/windows-host",
+      "version": "0.0.0",
+      "dependencies": {
+        "@nexuslink/rpc-types": "workspace:*",
+        "jpeg-js": "^0.4.4",
+        "qrcode-terminal": "^0.12.0",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "@types/node": "^20.0.0",
+        "typescript": "^5.4.0",
+      },
+    },
     "packages/gesture-engine": {
       "name": "@nexuslink/gesture-engine",
       "devDependencies": {
@@ -330,6 +344,8 @@
     "@nexuslink/rpc-types": ["@nexuslink/rpc-types@workspace:packages/rpc-types"],
 
     "@nexuslink/ui-components": ["@nexuslink/ui-components@workspace:packages/ui-components"],
+
+    "@nexuslink/windows-host": ["@nexuslink/windows-host@workspace:apps/windows-host"],
 
     "@noble/curves": ["@noble/curves@2.2.0", "", { "dependencies": { "@noble/hashes": "2.2.0" } }, "sha512-T/BoHgFXirb0ENSPBquzX0rcjXeM6Lo892a2jlYJkqk83LqZx0l1Of7DzlKJ6jkpvMrkHSnAcgb5JegL8SeIkQ=="],
 
@@ -756,6 +772,8 @@
     "jake": ["jake@10.9.4", "", { "dependencies": { "async": "^3.2.6", "filelist": "^1.0.4", "picocolors": "^1.1.1" }, "bin": { "jake": "bin/cli.js" } }, "sha512-wpHYzhxiVQL+IV05BLE2Xn34zW1S223hvjtqk0+gsPrwd/8JNLXJgZZM/iPFsYc1xyphF+6M6EvdE5E9MBGkDA=="],
 
     "jest-worker": ["jest-worker@27.5.1", "", { "dependencies": { "@types/node": "*", "merge-stream": "^2.0.0", "supports-color": "^8.0.0" } }, "sha512-7vuh85V5cdDofPyxn58nrPjBktZo0u9x1g8WtjQol+jZDaE+fhN+cIvTj11GndBnMnyfrUOG1sZQxCdjKh+DKg=="],
+
+    "jpeg-js": ["jpeg-js@0.4.4", "", {}, "sha512-WZzeDOEtTOBK4Mdsar0IqEU5sMr3vSV2RqkAIzUEV2BHnUfKGyswWFPFwK5EeDo93K3FohSHbLAjj0s1Wzd+dg=="],
 
     "js-tokens": ["js-tokens@4.0.0", "", {}, "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ=="],
 
