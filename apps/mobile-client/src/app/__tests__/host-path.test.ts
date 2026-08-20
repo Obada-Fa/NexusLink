@@ -8,7 +8,7 @@ import {
 
 describe('parentHostPath', () => {
   it('walks Unix paths to root', () => {
-    expect(parentHostPath('/home/obada/Projects')).toBe('/home/obada');
+    expect(parentHostPath('/home/user/Projects')).toBe('/home/user');
     expect(parentHostPath('/home')).toBe('/');
     expect(parentHostPath('/')).toBe('/');
   });

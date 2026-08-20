@@ -9,7 +9,7 @@
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import type {
   AgentCapabilities,
   AgentEvent,
@@ -34,7 +34,6 @@ import {
   normalizeHostChat,
   type HostChatDelta,
 } from './host-chats';
-import { resolveAppIcon } from './icon-resolver';
 
 type SpawnOpts = Parameters<typeof Bun.spawn>[1];
 type Proc = ReturnType<typeof Bun.spawn>;
@@ -266,42 +265,16 @@ const AGENT_DEFS: AgentDef[] = [
   },
 ];
 
-export const AGENT_ICON_NAMES: Record<string, string[]> = {
-  antigravity: ['antigravity', 'antigravity-url-handler', 'google-antigravity'],
-  cursor: ['co.anysphere.cursor', 'cursor', 'cursor-url-handler'],
-  claude: ['claude-desktop', 'com.anthropic.Claude', 'claude'],
-  opencode: ['ai.opencode.desktop', 'opencode-desktop', 'opencode'],
-};
+// Supported agents have unified client-side brand marks rather than scraping
+// arbitrary and inconsistent desktop theme icons from the host PC.
+export const AGENT_ICON_NAMES: Record<string, string[]> = {};
 
-const agentIconCache = new Map<string, string | null>();
-
-export async function resolveAgentIcon(agentId: string): Promise<string | undefined> {
-  if (agentIconCache.has(agentId)) {
-    return agentIconCache.get(agentId) ?? undefined;
-  }
-  const names = AGENT_ICON_NAMES[agentId] || [agentId];
-  for (const name of names) {
-    try {
-      const icon = await resolveAppIcon(name);
-      if (icon) {
-        agentIconCache.set(agentId, icon);
-        return icon;
-      }
-    } catch {
-      // Continue searching
-    }
-  }
-  agentIconCache.set(agentId, null);
+export async function resolveAgentIcon(_agentId: string): Promise<string | undefined> {
   return undefined;
 }
 
-export function getCachedAgentIcon(agentId: string): string | undefined {
-  return agentIconCache.get(agentId) ?? undefined;
-}
-
-// Warm up agent icons eagerly
-for (const agentId of Object.keys(AGENT_ICON_NAMES)) {
-  resolveAgentIcon(agentId).catch(() => {});
+export function getCachedAgentIcon(_agentId: string): string | undefined {
+  return undefined;
 }
 
 export function listAgents(): AgentInfo[] {
@@ -1771,6 +1744,142 @@ function openUrlOnHost(url: string): void {
   }
 }
 
+export function isSafeAgentToolCall(
+  toolName: string,
+  rawInput: unknown,
+  cwd?: string,
+): { safe: boolean; reason?: string } {
+  const normName = (toolName || '').toLowerCase().trim();
+  const inputObj = (rawInput && typeof rawInput === 'object' ? rawInput : {}) as Record<string, unknown>;
+
+  // 1. Path Safety: Check if any file/directory parameters target outside assigned cwd
+  const pathKeys = [
+    'path', 'target_file', 'file_path', 'filePath', 'TargetFile', 'AbsolutePath',
+    'SearchDirectory', 'directory', 'dir', 'Destination', 'destination', 'cwd',
+  ];
+  const pathsToCheck: string[] = [];
+  for (const k of pathKeys) {
+    const val = inputObj[k];
+    if (typeof val === 'string' && val.trim()) {
+      pathsToCheck.push(val.trim());
+    }
+  }
+  if (Array.isArray(inputObj.paths)) {
+    for (const p of inputObj.paths) {
+      if (typeof p === 'string' && p.trim()) pathsToCheck.push(p.trim());
+    }
+  }
+  if (Array.isArray(inputObj.files)) {
+    for (const p of inputObj.files) {
+      if (typeof p === 'string' && p.trim()) pathsToCheck.push(p.trim());
+    }
+  }
+
+  if (cwd && cwd.trim()) {
+    const resolvedCwd = resolve(cwd.trim());
+    for (const p of pathsToCheck) {
+      if (p.startsWith('http://') || p.startsWith('https://')) continue;
+      const target = isAbsolute(p) ? resolve(p) : resolve(resolvedCwd, p);
+      if (target !== resolvedCwd && !target.startsWith(resolvedCwd + sep)) {
+        return {
+          safe: false,
+          reason: `Target path '${p}' is outside the assigned directory (${cwd})`,
+        };
+      }
+    }
+  }
+
+  // 2. Command / Shell Execution Safety
+  const isCommandTool = [
+    'run_command', 'runcommand', 'bash', 'shell', 'exec', 'execute_command',
+    'terminal', 'cmd', 'command',
+  ].includes(normName);
+
+  if (isCommandTool) {
+    const cmd = String(
+      inputObj.CommandLine ?? inputObj.commandLine ?? inputObj.command ?? inputObj.cmd ?? inputObj.script ?? '',
+    ).trim();
+
+    if (!cmd) return { safe: true };
+
+    // 2a. Git actions require permission
+    if (/\bgit\b/i.test(cmd)) {
+      return {
+        safe: false,
+        reason: `Git action requested: \`${cmd}\``,
+      };
+    }
+
+    // 2b. Database operations and migrations require permission
+    const dbPatterns = [
+      /\b(psql|pg_dump|pg_restore|mysql|mysqldump|mariadb|mongosh|mongo|mongodump|sqlite3|redis-cli|influx)\b/i,
+      /\b(prisma\s+(migrate|db\s+push)|drizzle-kit|supabase\s+db|knex\s+migrate|typeorm\s+migration|alembic\s+upgrade|flyway\s+migrate|sequelize\s+db:migrate)\b/i,
+      /\b(DROP\s+DATABASE|DROP\s+TABLE|TRUNCATE|DELETE\s+FROM|ALTER\s+TABLE)\b/i,
+      /\b(db\.[a-zA-Z0-9_]+\.(drop|deleteMany|dropDatabase))\b/i,
+      /\b(flushall|flushdb)\b/i,
+    ];
+    for (const pat of dbPatterns) {
+      if (pat.test(cmd)) {
+        return {
+          safe: false,
+          reason: `Database operation requested: \`${cmd}\``,
+        };
+      }
+    }
+
+    // 2c. Destructive or dangerous system commands require permission
+    const dangerousPatterns = [
+      /\b(rm\s+-[a-zA-Z]*r|rm\s+-[a-zA-Z]*f|rmdir|unlink|shred|wipe)(\s|$)/i,
+      /\b(sudo|su|chmod|chown|chgrp)(\s|$)/i,
+      /\b(mkfs|dd|fdisk|parted)(\s|$)/i,
+      /\b(kill|killall|pkill)(\s|$)/i,
+      /\b(reboot|shutdown|poweroff|systemctl\s+(stop|disable|restart))(\s|$)/i,
+      /(\bcurl\b|\bwget\b)[^|]*\|\s*(bash|sh|zsh)/i,
+    ];
+    for (const pat of dangerousPatterns) {
+      if (pat.test(cmd)) {
+        return {
+          safe: false,
+          reason: `Potentially dangerous system command: \`${cmd}\``,
+        };
+      }
+    }
+
+    // 2d. Check if command attempts to navigate outside cwd
+    if (/\bcd\s+(\.\.|\/|~)/.test(cmd)) {
+      return {
+        safe: false,
+        reason: `Command attempts to navigate outside assigned directory: \`${cmd}\``,
+      };
+    }
+
+    return { safe: true };
+  }
+
+  // 3. Known Safe Read & Edit Tools (validated within cwd)
+  const safeToolNames = [
+    'view', 'view_file', 'read', 'cat',
+    'glob', 'find_by_name', 'grep', 'grep_search', 'list_dir',
+    'read_url_content', 'search_web', 'search',
+    'edit', 'replace', 'replace_file_content', 'write', 'write_to_file', 'create_file', 'edit_file',
+    'ask_question', 'askquestion', 'ask_user', 'askuser', 'question',
+  ];
+
+  if (
+    safeToolNames.includes(normName) ||
+    normName.includes('file') ||
+    normName.includes('read') ||
+    normName.includes('view')
+  ) {
+    return { safe: true };
+  }
+
+  return {
+    safe: false,
+    reason: `Tool '${toolName}' requested execution`,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Claude Code adapter — persistent `claude --print` with stream-json in/out.
 // ---------------------------------------------------------------------------
@@ -1818,7 +1927,7 @@ class ClaudeAdapter implements AgentAdapter {
       const fail = finishCliTurn({
         sawResult: isSuccess,
         exitCode: code,
-        stderr: isSuccess ? '' : (stderr || 'Claude Code process exited'),
+        stderr: isSuccess ? '' : stderr,
       });
       if (!fail) {
         if (!this.sawResult) {
@@ -1826,8 +1935,8 @@ class ClaudeAdapter implements AgentAdapter {
         }
         return;
       }
-      emit(this.session, fail);
-      this.proc = null;
+      const cleaned = sanitizeCliError(fail.text ?? '', 'Claude Code');
+      emit(this.session, withoutDuplicateResult({ kind: 'error', text: cleaned }, this.streamedText));
     }).catch(() => {});
     return this.proc;
   }
@@ -1842,7 +1951,7 @@ class ClaudeAdapter implements AgentAdapter {
         broadcast({ type: 'agent-session-update', session: { ...this.session.info } });
       }
     }
-    const type = msg.type;
+    const type = String(msg.type ?? '');
     if (type === 'assistant') {
       const message = msg.message as Record<string, unknown> | undefined;
       const content = message?.content;
@@ -1894,21 +2003,22 @@ class ClaudeAdapter implements AgentAdapter {
       const tool = (msg.request as Record<string, unknown> | undefined) ?? msg;
       
       const toolName = String(tool.tool_name ?? tool.name ?? 'tool');
-      const toolInputStr = JSON.stringify(tool.input ?? tool.tool_input ?? {}, null, 2);
+      const toolInput = (tool.input ?? tool.tool_input ?? {}) as Record<string, unknown>;
+      const toolInputStr = JSON.stringify(toolInput, null, 2);
 
-      // Auto-allow safe tools inside the sandbox directory
-      const safeToolNames = ['View', 'Edit', 'Replace', 'Glob', 'Grep', 'read', 'write', 'edit_file', 'replace_file_content', 'view_file', 'grep_search', 'find_by_name'];
-      if (safeToolNames.includes(toolName) || toolName.toLowerCase().includes('file') || toolName.toLowerCase().includes('read') || toolName.toLowerCase().includes('write')) {
-          try {
-            const stdin = this.proc?.stdin as unknown as { write(s: string): unknown; flush?: () => void } | undefined;
-            stdin?.write(JSON.stringify({
-              type: 'control_response',
-              request_id: requestId,
-              response: { allowed: true },
-            }) + '\n');
-            stdin?.flush?.();
-          } catch {}
-          return;
+      // Check selective safety against the session workspace folder
+      const safety = isSafeAgentToolCall(toolName, toolInput, s.info.cwd);
+      if (safety.safe) {
+        try {
+          const stdin = this.proc?.stdin as unknown as { write(s: string): unknown; flush?: () => void } | undefined;
+          stdin?.write(JSON.stringify({
+            type: 'control_response',
+            request_id: requestId,
+            response: { allowed: true },
+          }) + '\n');
+          stdin?.flush?.();
+        } catch {}
+        return;
       }
 
       emit(s, {
@@ -1916,7 +2026,7 @@ class ClaudeAdapter implements AgentAdapter {
         refId: requestId,
         toolName,
         toolInput: toolInputStr,
-        text: `Allow ${toolName}?`,
+        text: safety.reason || `Allow ${toolName}?`,
       });
       s.pendingPermissions.set(requestId, (allow) => {
         try {

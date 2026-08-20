@@ -8,3 +8,8 @@ target/
 tsconfig.tsbuildinfo
 .tools/
 .claude/
+apps/mobile-client/out/
+out/
+.kotlin/
+.gradle/
+*.iml

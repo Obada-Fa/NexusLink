@@ -116,29 +116,6 @@ function AgentIcon({
   icon?: string;
   size?: number;
 }) {
-  if (icon && icon.startsWith('data:image/')) {
-    return (
-      <div
-        style={{
-          width: size,
-          height: size,
-          borderRadius: Math.round(size * 0.22),
-          overflow: 'hidden',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          flexShrink: 0,
-        }}
-      >
-        <img
-          src={icon}
-          alt={name}
-          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-        />
-      </div>
-    );
-  }
-
   let outlinePath = null;
   switch (agentId) {
     case 'claude':
@@ -173,11 +150,19 @@ function AgentIcon({
         />
       );
       break;
+    case 'mock':
+      outlinePath = (
+        <path
+          fill="currentColor"
+          d="M12 2a2 2 0 0 1 2 2v1h4a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4V4a2 2 0 0 1 2-2zm-3 8a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm6 0a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM8 15h8v-1H8v1z"
+        />
+      );
+      break;
   }
 
   if (outlinePath) {
     return (
-      <div style={{ width: size, height: size, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+      <div style={{ width: size, height: size, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color: '#ffffff' }}>
         <svg
           width={size * 0.75}
           height={size * 0.75}
@@ -187,10 +172,33 @@ function AgentIcon({
           strokeWidth="1.5"
           strokeLinecap="round"
           strokeLinejoin="round"
-          style={{ opacity: 0.9 }}
+          style={{ opacity: 0.95, color: '#ffffff' }}
         >
           {outlinePath}
         </svg>
+      </div>
+    );
+  }
+
+  if (icon && icon.startsWith('data:image/')) {
+    return (
+      <div
+        style={{
+          width: size,
+          height: size,
+          borderRadius: Math.round(size * 0.22),
+          overflow: 'hidden',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+        }}
+      >
+        <img
+          src={icon}
+          alt={name}
+          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+        />
       </div>
     );
   }
@@ -774,7 +782,23 @@ export default function AgentsPage() {
         <>
           <div ref={listRef} style={styles.chat}>
             {mergeToolEvents(events).map((e, i) => (
-              <Bubble key={`${e.seq}-${i}`} e={e} agentId={active.agent} />
+              <Bubble
+                key={`${e.seq}-${i}`}
+                e={e}
+                agentId={active.agent}
+                onSelectOption={(opt) => {
+                  setDraft(opt);
+                }}
+                onResolvePermission={(requestId, allow) => {
+                  if (client && active) {
+                    void client.request('agent.permission', {
+                      agentSessionId: active.agentSessionId,
+                      requestId,
+                      allow,
+                    });
+                  }
+                }}
+              />
             ))}
           </div>
           <form
@@ -1298,7 +1322,66 @@ function CwdPicker({
   );
 }
 
-function Bubble({ e, agentId }: { e: AgentEvent; agentId?: string }) {
+function isQuestionTool(name: string | undefined): boolean {
+  if (!name) return false;
+  const n = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return (
+    n === 'askquestion' ||
+    n === 'askuser' ||
+    n === 'askfollowupquestion' ||
+    n === 'question' ||
+    n === 'promptuser' ||
+    n === 'inputprompt'
+  );
+}
+
+function parseQuestionsFromInput(input: string | undefined): { question: string; options: string[] }[] {
+  if (!input) return [{ question: 'Question', options: [] }];
+  try {
+    const json = JSON.parse(input);
+    if (json && typeof json === 'object') {
+      if (Array.isArray(json.questions)) {
+        const out: { question: string; options: string[] }[] = [];
+        for (const q of json.questions) {
+          if (q && typeof q === 'object') {
+            const text = String(q.question ?? q.prompt ?? q.title ?? 'Question');
+            const opts: string[] = [];
+            const rawOpts = q.options ?? q.choices ?? q.suggested_answers ?? q.items;
+            if (Array.isArray(rawOpts)) {
+              for (const opt of rawOpts) {
+                if (opt != null) opts.push(String(opt));
+              }
+            }
+            out.push({ question: text, options: opts });
+          }
+        }
+        if (out.length > 0) return out;
+      }
+      const text = String(json.question ?? json.prompt ?? json.message ?? json.query ?? 'Question');
+      const opts: string[] = [];
+      const rawOpts = json.options ?? json.choices ?? json.suggested_answers ?? json.items;
+      if (Array.isArray(rawOpts)) {
+        for (const opt of rawOpts) {
+          if (opt != null) opts.push(String(opt));
+        }
+      }
+      return [{ question: text, options: opts }];
+    }
+  } catch {}
+  return [{ question: 'Question', options: [] }];
+}
+
+function Bubble({
+  e,
+  agentId,
+  onSelectOption,
+  onResolvePermission,
+}: {
+  e: AgentEvent;
+  agentId?: string;
+  onSelectOption?: (opt: string) => void;
+  onResolvePermission?: (requestId: string, allow: boolean) => void;
+}) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
@@ -1346,10 +1429,91 @@ function Bubble({ e, agentId }: { e: AgentEvent; agentId?: string }) {
   if (e.kind === 'thinking' || e.kind === 'status') {
     return <div style={styles.thinking}>{e.text || 'Thinking…'}</div>;
   }
+  if (e.kind === 'permission-request') {
+    return (
+      <div style={styles.permissionCard}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+          <span style={{ color: '#f0c040', fontSize: 16 }}>⚠️</span>
+          <strong style={{ color: '#f0c040', fontSize: 13 }}>Permission Required</strong>
+        </div>
+        <div style={{ fontSize: 13, color: '#eee', marginBottom: 6 }}>
+          {e.text || `Allow ${e.toolName || 'tool'}?`}
+        </div>
+        {e.toolInput && (
+          <pre style={{ ...styles.code, background: '#0e0e16', padding: 8, borderRadius: 6, maxHeight: 120, overflowY: 'auto' }}>
+            {e.toolInput}
+          </pre>
+        )}
+        {e.refId && onResolvePermission && (
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button
+              type="button"
+              onClick={() => onResolvePermission(e.refId!, false)}
+              style={{ flex: 1, padding: '6px 12px', borderRadius: 8, border: '1px solid #333', background: 'transparent', color: '#eee', cursor: 'pointer', fontSize: 12 }}
+            >
+              Deny
+            </button>
+            <button
+              type="button"
+              onClick={() => onResolvePermission(e.refId!, true)}
+              style={{ flex: 1, padding: '6px 12px', borderRadius: 8, border: 'none', background: '#f0c040', color: '#000', fontWeight: 600, cursor: 'pointer', fontSize: 12 }}
+            >
+              Allow
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
   if (e.kind === 'tool-start' || e.kind === 'tool-end') {
+    const running = e.kind === 'tool-start';
+    if (isQuestionTool(e.toolName)) {
+      const qList = parseQuestionsFromInput(e.toolInput);
+      return (
+        <div style={styles.questionCard}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+            <span style={{ color: running ? '#f0c040' : '#4ade80', fontSize: 14 }}>
+              {running ? '❓' : '✓'}
+            </span>
+            <strong style={{ fontSize: 12, color: running ? '#f0c040' : '#4ade80' }}>
+              {running ? 'Needs Your Input' : 'Responded'}
+            </strong>
+          </div>
+          {qList.map((q, idx) => (
+            <div key={idx} style={{ marginTop: idx > 0 ? 10 : 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 500, color: '#fff', marginBottom: q.options.length ? 8 : 0 }}>
+                {q.question}
+              </div>
+              {q.options.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {q.options.map((opt, oIdx) => (
+                    <button
+                      key={oIdx}
+                      type="button"
+                      disabled={!running}
+                      onClick={() => onSelectOption?.(opt)}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: 16,
+                        border: '1px solid #2a6aff',
+                        background: '#16162a',
+                        color: running ? '#fff' : '#889',
+                        fontSize: 13,
+                        cursor: running ? 'pointer' : 'default',
+                      }}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      );
+    }
     const detail = e.toolInput?.trim();
     const output = e.toolOutput?.trim();
-    const running = e.kind === 'tool-start';
     return (
       <div style={styles.tool}>
         <strong>
@@ -1499,6 +1663,20 @@ const styles: Record<string, React.CSSProperties> = {
     padding: 10,
     margin: '6px 0',
     fontSize: 12,
+  },
+  questionCard: {
+    background: '#151526',
+    border: '1px solid #2a6aff',
+    borderRadius: 12,
+    padding: 12,
+    margin: '8px 0',
+  },
+  permissionCard: {
+    background: '#1c1810',
+    border: '1px solid #f0c040',
+    borderRadius: 12,
+    padding: 12,
+    margin: '8px 0',
   },
   code: { color: '#aab', fontSize: 11, whiteSpace: 'pre-wrap', margin: '6px 0 0' },
   out: { color: '#6ee7b7', fontSize: 11, whiteSpace: 'pre-wrap', margin: '6px 0 0' },

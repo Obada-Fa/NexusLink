@@ -1,8 +1,7 @@
 # NexusLink — System Architecture & Production Blueprint
 
 > Canonical design document for NexusLink's evolution from a LAN prototype into a
-> commercial-grade, WAN-capable remote-control ecosystem. This file supersedes the
-> conceptual goals; `plan.md` is retained as the historical phase-prompt record.
+> commercial-grade, WAN-capable remote-control ecosystem.
 
 ## 1. Vision & Paradigm Shifts
 
@@ -168,9 +167,9 @@ portrait and stream at 15 fps, and injected taps land within ~15 px of the touch
 
 **Resume on another PC:**
 - Clone the repo, `cd apps/desktop && bun run src/server/index.ts` starts the host (mDNS on LAN, HTTP `:45678`).
-- Install Flutter 3.44.6 from ~/development/flutter (not on PATH: `export PATH="$HOME/development/flutter/bin:$PATH"`), then `flutter build apk --debug` or `flutter install` if a phone is plugged in.
-- Tests: `flutter test` (41 pass), live-host test needs the server running.
-- Next: git log shows commits; `plan.md` and this file document the architecture; M2 requires Rust (not yet installed — `rustup` is step one).
+- Install Flutter, then `flutter build apk --debug` or `flutter install` if a phone is plugged in.
+- Tests: `flutter test` (all pass), live-host test needs the server running.
+- Next: git log shows commits; this file documents the architecture; M2 requires Rust (not yet installed — `rustup` is step one).
 
 ## 3. System Topology — The Unified Connection Engine
 
@@ -467,9 +466,7 @@ nexuslink/
 
 ---
 
-## 5. Implementation Plan — Phases 6–10
-
-Numbering continues from `plan.md` (Phases 1–5 delivered the prototype).
+## 5. Implementation Plan — Next Phases
 
 ### Phase 6 — Sidecar Foundation & Terminal Unblocking
 Move the terminal onto a real PTY and stand up the sidecar's control surface.

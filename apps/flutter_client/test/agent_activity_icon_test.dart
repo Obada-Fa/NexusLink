@@ -44,17 +44,18 @@ void main() {
     expect(hasOfficialAgentLogo('antigravity'), isTrue);
     expect(hasOfficialAgentLogo('claude'), isTrue);
     expect(hasOfficialAgentLogo('opencode'), isTrue);
+    expect(hasOfficialAgentLogo('mock'), isTrue);
     expect(hasOfficialAgentLogo('future-bot'), isFalse);
   });
 
-  testWidgets('AgentMark renders raster image when data URI is provided',
+  testWidgets('AgentMark renders raster image when data URI is provided for custom agent',
       (tester) async {
     const pngDataUri =
         'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
     await tester.pumpWidget(
       const MaterialApp(
         home: Scaffold(
-          body: AgentMark(agentId: 'antigravity', icon: pngDataUri),
+          body: AgentMark(agentId: 'custom-agent', icon: pngDataUri),
         ),
       ),
     );
