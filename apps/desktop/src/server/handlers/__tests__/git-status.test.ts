@@ -48,3 +48,19 @@ describe('handleFsRead', () => {
     expect(handleFsRead('/tmp')).rejects.toThrow();
   });
 });
+
+describe('handleFsMkdir', () => {
+  test('creates a directory recursively and returns POSIX path and name', async () => {
+    const { handleFsMkdir } = await import('../fs');
+    const { existsSync, rmSync } = await import('node:fs');
+    const testDir = `/tmp/test-nexuslink-mkdir-${Date.now()}/nested/folder`;
+    try {
+      const res = await handleFsMkdir(testDir);
+      expect(res.name).toBe('folder');
+      expect(res.path).toBe(testDir);
+      expect(existsSync(testDir)).toBe(true);
+    } finally {
+      try { rmSync(`/tmp/test-nexuslink-mkdir-${Date.now()}`, { recursive: true, force: true }); } catch {}
+    }
+  });
+});

@@ -165,6 +165,26 @@ export default function FilesPage() {
     []
   );
 
+  const handleCreateFolder = useCallback(async () => {
+    if (!client || !cwd) return;
+    if (isThisPcPath(cwd)) {
+      alert('Cannot create a folder in This PC');
+      return;
+    }
+    const name = window.prompt('New folder name:');
+    if (!name || !name.trim()) return;
+    const cleaned = name.trim().replace(/[/\\:]/g, '_');
+    if (!cleaned) return;
+    const targetPath = cwd.endsWith('/') ? `${cwd}${cleaned}` : `${cwd}/${cleaned}`;
+    try {
+      await client.request('fs.mkdir', { path: targetPath });
+      fetchEntries(targetPath);
+      setCwd(targetPath);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create folder');
+    }
+  }, [client, cwd, fetchEntries]);
+
   const breadcrumbs = hostPathCrumbs(cwd ?? '/');
 
   const goToPath = useCallback(() => {
@@ -204,6 +224,15 @@ export default function FilesPage() {
         </button>
         <span style={styles.title}>Files</span>
         <div style={styles.headerActions}>
+          {cwd && !isThisPcPath(cwd) && (
+            <button
+              style={{ ...styles.actionBtn, color: '#2a6aff', borderColor: '#2a6aff' }}
+              onClick={handleCreateFolder}
+              title="New folder"
+            >
+              + Folder
+            </button>
+          )}
           <select
             value={sortBy}
             onChange={(e) => {

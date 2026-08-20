@@ -122,6 +122,15 @@ export async function handleFsRead(rawPath: string): Promise<string> {
   return await fs.readFile(p, 'utf-8');
 }
 
+export async function handleFsMkdir(rawPath: string): Promise<{ path: string; name: string }> {
+  if (isThisPcPath(rawPath)) {
+    throw new Error('Cannot create a folder in This PC');
+  }
+  const p = expandHostPath(rawPath);
+  await fs.mkdir(p, { recursive: true });
+  return { path: toPosixPath(p), name: basename(p) };
+}
+
 export async function handleFsList(path: string, showHidden = false): Promise<FileEntry[]> {
   if (isThisPcPath(path)) return listDriveEntries();
 

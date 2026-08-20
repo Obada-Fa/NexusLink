@@ -4,6 +4,7 @@ export type RpcMethod =
   | 'fs.write'
   | 'fs.delete'
   | 'fs.move'
+  | 'fs.mkdir'
   | 'fs.listProjects'
   | 'fs.gitStatus'
   | 'process.list'
@@ -86,6 +87,8 @@ export type Params<M extends RpcMethod> =
     ? { path: string }
     : M extends 'fs.move'
     ? { from: string; to: string }
+    : M extends 'fs.mkdir'
+    ? { path: string }
     : M extends 'fs.listProjects'
     ? {}
     : M extends 'fs.gitStatus'
@@ -222,6 +225,8 @@ export type Result<M extends RpcMethod> =
     ? void
     : M extends 'fs.move'
     ? void
+    : M extends 'fs.mkdir'
+    ? { path: string; name: string }
     : M extends 'fs.listProjects'
     ? ProjectInfo[]
     : M extends 'fs.gitStatus'

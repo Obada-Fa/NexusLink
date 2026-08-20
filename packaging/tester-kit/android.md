@@ -1,6 +1,6 @@
 # Android app
 
-Install **`NexusLink-Android.apk`** on a physical Android phone or tablet (Android 8+).
+Install **`NexusLink-Android.apk`** on a physical Android phone or tablet (Android 8+, **64-bit ARM**). It will not install on x86 emulators.
 
 ## Install
 
