@@ -62,3 +62,10 @@ describe('parseGitStatusPorcelain', () => {
     expect(parsed?.files).toEqual(['foo.ts', 'bar.ts']);
   });
 });
+
+describe('handleFsMkdir', () => {
+  test('rejects creating directory in This PC', async () => {
+    const { handleFsMkdir } = await import('../fs');
+    expect(handleFsMkdir('/')).rejects.toThrow(/This PC/);
+  });
+});

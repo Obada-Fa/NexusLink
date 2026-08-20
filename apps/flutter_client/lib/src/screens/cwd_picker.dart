@@ -280,6 +280,86 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
     }
   }
 
+  Future<void> _createNewFolder() async {
+    if (isThisPcPath(_cwd)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Cannot create a folder in This PC'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1C2A),
+        title: const Text('New folder'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'Folder name',
+            labelText: 'Name',
+          ),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty || !mounted) return;
+
+    final cleaned = name.replaceAll(RegExp(r'[/\\:]'), '_').trim();
+    if (cleaned.isEmpty) return;
+
+    final targetPath = _cwd.endsWith('/') ? '$_cwd$cleaned' : '$_cwd/$cleaned';
+
+    final client = _activeClient;
+    if (client == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Not connected to the PC.'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    try {
+      await client.request('fs.mkdir', {'path': targetPath});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Created folder "$cleaned"'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+      await _listDir(targetPath);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to create folder: $e'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    }
+  }
+
   Future<void> _enterPath() async {
     final controller = TextEditingController(text: _cwd == '/' ? _home : _cwd);
     final path = await showDialog<String>(
@@ -420,6 +500,13 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
                       ),
                     ),
                   ),
+                  if (!isThisPcPath(_cwd))
+                    IconButton(
+                      tooltip: 'New folder',
+                      icon: const Icon(Icons.create_new_folder_outlined, size: 18),
+                      visualDensity: VisualDensity.compact,
+                      onPressed: _createNewFolder,
+                    ),
                   IconButton(
                     tooltip: 'Copy path',
                     icon: const Icon(Icons.copy_outlined, size: 18),
@@ -572,18 +659,41 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
           children: [
             const Text('No subfolders — use this folder, or go up.'),
             const SizedBox(height: 12),
-            FilledButton.tonal(
-              onPressed: () => _listDir(_cwd),
-              child: const Text('Refresh'),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!isThisPcPath(_cwd)) ...[
+                  FilledButton.icon(
+                    onPressed: _createNewFolder,
+                    icon: const Icon(Icons.create_new_folder, size: 18),
+                    label: const Text('New folder'),
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                FilledButton.tonal(
+                  onPressed: () => _listDir(_cwd),
+                  child: const Text('Refresh'),
+                ),
+              ],
             ),
           ],
         ),
       );
     }
+    final showNewFolderHeader = !isThisPcPath(_cwd);
+    final itemCount = _dirs.length + (showNewFolderHeader ? 1 : 0);
     return ListView.builder(
-      itemCount: _dirs.length,
+      itemCount: itemCount,
       itemBuilder: (_, i) {
-        final d = _dirs[i];
+        if (showNewFolderHeader && i == 0) {
+          return ListTile(
+            leading: const Icon(Icons.create_new_folder_outlined, color: Color(0xFF6B8CFF)),
+            title: const Text('New folder…',
+                style: TextStyle(color: Color(0xFF6B8CFF), fontWeight: FontWeight.w500)),
+            onTap: _createNewFolder,
+          );
+        }
+        final d = _dirs[showNewFolderHeader ? i - 1 : i];
         return ListTile(
           leading: Icon(
             isWindowsDriveRoot(d.path) ? Icons.storage : Icons.folder,

@@ -40,7 +40,8 @@ if [[ -x "$FLUTTER" ]]; then
   (
     cd apps/flutter_client
     "$FLUTTER" pub get
-    "$FLUTTER" build apk --release
+    # arm64-only: smaller, and fat APK Gradle can OOM on 8GB machines
+    "$FLUTTER" build apk --release --target-platform android-arm64
   )
   APK_SRC="$ROOT/apps/flutter_client/build/app/outputs/flutter-apk/app-release.apk"
 else

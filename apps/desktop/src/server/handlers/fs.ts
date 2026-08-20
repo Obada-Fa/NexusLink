@@ -37,6 +37,12 @@ export async function handleFsRead(rawPath: string): Promise<string> {
   return await fs.readFile(p, 'utf-8');
 }
 
+export async function handleFsMkdir(rawPath: string): Promise<{ path: string; name: string }> {
+  const p = expandHostPath(rawPath);
+  await fs.mkdir(p, { recursive: true });
+  return { path: toPosixPath(p), name: basename(p) };
+}
+
 export function getWindowsDrives(): FileEntry[] {
   const drives: FileEntry[] = [];
   for (let i = 65; i <= 90; i++) {

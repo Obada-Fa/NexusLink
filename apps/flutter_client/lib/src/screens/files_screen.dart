@@ -327,6 +327,65 @@ class _FilesScreenState extends ConsumerState<FilesScreen>
     }
   }
 
+  Future<void> _createNewFolder() async {
+    final cwd = _cwd;
+    if (cwd == null || isThisPcPath(cwd)) {
+      _toast('Cannot create a folder in This PC');
+      return;
+    }
+
+    final controller = TextEditingController();
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1C1C2A),
+        title: const Text('New folder'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'Folder name',
+            labelText: 'Name',
+          ),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty || !mounted) return;
+
+    final cleaned = name.replaceAll(RegExp(r'[/\\:]'), '_').trim();
+    if (cleaned.isEmpty) return;
+
+    final targetPath = cwd.endsWith('/') ? '$cwd$cleaned' : '$cwd/$cleaned';
+
+    final client = ref.read(activeClientProvider);
+    if (client == null) {
+      _toast('Not connected to the PC.');
+      return;
+    }
+
+    try {
+      await client.request('fs.mkdir', {'path': targetPath});
+      if (!mounted) return;
+      _toast('Created folder "$cleaned"');
+      await _navigate(targetPath);
+    } catch (e) {
+      if (!mounted) return;
+      _toast('Failed to create folder: $e');
+    }
+  }
+
   Widget _pathBar() {
     return Container(
       width: double.infinity,
@@ -363,6 +422,13 @@ class _FilesScreenState extends ConsumerState<FilesScreen>
               ),
             ),
           ),
+          if (_cwd != null && !isThisPcPath(_cwd!))
+            IconButton(
+              icon: const Icon(Icons.create_new_folder_outlined, size: 18),
+              visualDensity: VisualDensity.compact,
+              tooltip: 'New folder',
+              onPressed: _createNewFolder,
+            ),
           IconButton(
             icon: const Icon(Icons.copy_outlined, size: 18),
             visualDensity: VisualDensity.compact,

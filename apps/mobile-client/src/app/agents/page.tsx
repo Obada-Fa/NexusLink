@@ -1152,6 +1152,24 @@ function CwdPicker({
     [client],
   );
 
+  const createNewFolder = useCallback(async () => {
+    if (isThisPcPath(cwd)) {
+      alert('Cannot create a folder in This PC');
+      return;
+    }
+    const name = window.prompt('New folder name:');
+    if (!name || !name.trim()) return;
+    const cleaned = name.trim().replace(/[/\\:]/g, '_');
+    if (!cleaned) return;
+    const targetPath = cwd.endsWith('/') ? `${cwd}${cleaned}` : `${cwd}/${cleaned}`;
+    try {
+      await client.request('fs.mkdir', { path: targetPath });
+      await listDir(targetPath);
+    } catch (e) {
+      alert(`Failed to create folder: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [client, cwd, listDir]);
+
   const openBrowse = () => {
     setBrowse(true);
     void listDir(home);
@@ -1200,6 +1218,16 @@ function CwdPicker({
             >
               {cwd} ✎
             </span>
+            {!isThisPcPath(cwd) && (
+              <button
+                type="button"
+                onClick={() => void createNewFolder()}
+                style={styles.barBtn}
+                title="New folder"
+              >
+                +📁
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -1239,13 +1267,35 @@ function CwdPicker({
             <p style={styles.center}>{error}</p>
           ) : browse ? (
             dirs.length === 0 ? (
-              <p style={styles.center}>No subfolders — use this folder, or go up.</p>
+              <div style={{ textAlign: 'center', padding: '24px 0' }}>
+                <p style={styles.center}>No subfolders — use this folder, or go up.</p>
+                {!isThisPcPath(cwd) && (
+                  <button
+                    type="button"
+                    onClick={() => void createNewFolder()}
+                    style={{ ...styles.selectBtn, marginTop: 12, display: 'inline-block' }}
+                  >
+                    + New folder
+                  </button>
+                )}
+              </div>
             ) : (
-              dirs.map((d) => (
-                <button key={d.path} type="button" onClick={() => void listDir(d.path)} style={styles.row}>
-                  <strong>{d.name}</strong>
-                </button>
-              ))
+              <>
+                {!isThisPcPath(cwd) && (
+                  <button
+                    type="button"
+                    onClick={() => void createNewFolder()}
+                    style={{ ...styles.row, color: '#6B8CFF' }}
+                  >
+                    <strong>+ New folder…</strong>
+                  </button>
+                )}
+                {dirs.map((d) => (
+                  <button key={d.path} type="button" onClick={() => void listDir(d.path)} style={styles.row}>
+                    <strong>{d.name}</strong>
+                  </button>
+                ))}
+              </>
             )
           ) : entering ? (
             <form
