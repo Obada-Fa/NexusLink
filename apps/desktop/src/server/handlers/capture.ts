@@ -37,6 +37,8 @@ interface CaptureSession {
   lastFrameBytes: number;
   quality: 'low' | 'medium' | 'high' | 'full';
   lastQosAt: number;
+  /** Consecutive congested reportStats samples before a quality step. */
+  qosBadStreak: number;
 }
 
 /** Binary frame header: u32 magic 'NLF1' | u32 streamKey | f64 timestampMs (LE). */
@@ -232,6 +234,7 @@ function spawnGrabber(
       '-f', 'x11grab',
       '-framerate', String(ffArgs.fps),
       '-video_size', `${grab.width}x${grab.height}`,
+      '-draw_mouse', '0',
       '-thread_queue_size', '1',
       '-i', `${display}+${grab.x},${grab.y}`,
       '-vf', `scale=${outW}:-2`,
@@ -301,6 +304,7 @@ export function startCapture(
     lastFrameBytes: 0,
     quality: qualityName,
     lastQosAt: 0,
+    qosBadStreak: 0,
   };
   sessions.set(id, session);
 
@@ -332,6 +336,50 @@ export function startCapture(
 
 const QUALITY_LADDER = ['low', 'medium', 'high', 'full'] as const;
 
+export type CaptureQuality = (typeof QUALITY_LADDER)[number];
+
+/**
+ * Step JPEG quality/scale only. Capture fps stays locked so the phone keeps
+ * seeing motion instead of a 10 fps slideshow (game-stream QoS, not file-transfer).
+ * `decodeAgeMs` is client-local receive→decode time — never a host-vs-phone wall clock.
+ */
+export function planStreamQos(opts: {
+  quality: CaptureQuality;
+  fps: number;
+  displayedFps: number;
+  decodeAgeMs: number;
+  badStreak: number;
+}): { quality: CaptureQuality; fps: number; restart: boolean; badStreak: number } {
+  const { quality, fps, displayedFps, decodeAgeMs } = opts;
+  const idx = QUALITY_LADDER.indexOf(quality);
+  const down = displayedFps < Math.max(6, fps * 0.45) || decodeAgeMs > 120;
+  const up = displayedFps >= fps * 0.75 && decodeAgeMs < 50;
+
+  if (down) {
+    const streak = opts.badStreak + 1;
+    if (streak < 2 || idx <= 0) {
+      return { quality, fps, restart: false, badStreak: streak };
+    }
+    return {
+      quality: QUALITY_LADDER[idx - 1]!,
+      fps,
+      restart: true,
+      badStreak: 0,
+    };
+  }
+
+  if (up && idx < QUALITY_LADDER.length - 1) {
+    return {
+      quality: QUALITY_LADDER[idx + 1]!,
+      fps,
+      restart: true,
+      badStreak: 0,
+    };
+  }
+
+  return { quality, fps, restart: false, badStreak: 0 };
+}
+
 function restartGrabber(session: CaptureSession, grab: Region): void {
   const oldProc = session.proc;
   session.region = grab;
@@ -350,7 +398,7 @@ function restartGrabber(session: CaptureSession, grab: Region): void {
   });
 }
 
-/** Client FPS / frame-age feedback. Step JPEG quality (and fps) instead of queueing. */
+/** Client displayed-FPS / decode-age feedback. Step JPEG quality, never capture fps. */
 export function reportStreamStats(streamId: string, decodeFps: number, frameAgeMs: number): void {
   const session = sessions.get(streamId);
   if (!session) return;
@@ -358,28 +406,20 @@ export function reportStreamStats(streamId: string, decodeFps: number, frameAgeM
   if (now - session.lastQosAt < 2000) return;
   session.lastQosAt = now;
 
-  const idx = QUALITY_LADDER.indexOf(session.quality);
-  const down = frameAgeMs > 80 || decodeFps < Math.max(6, session.ffArgs.fps * 0.45);
-  const up = frameAgeMs < 40 && decodeFps >= session.ffArgs.fps * 0.75;
-  let nextIdx = idx;
-  if (down && idx > 0) nextIdx = idx - 1;
-  else if (up && idx < QUALITY_LADDER.length - 1) nextIdx = idx + 1;
-  else if (!down && !up) return;
-  else if (down && session.ffArgs.fps > 12) {
-    session.ffArgs = { ...session.ffArgs, fps: Math.max(10, session.ffArgs.fps - 4) };
-    const grab = session.region;
-    if (grab) restartGrabber(session, grab);
-    return;
-  } else {
-    return;
-  }
+  const planned = planStreamQos({
+    quality: session.quality,
+    fps: session.ffArgs.fps,
+    displayedFps: decodeFps,
+    decodeAgeMs: frameAgeMs,
+    badStreak: session.qosBadStreak,
+  });
+  session.qosBadStreak = planned.badStreak;
+  if (!planned.restart) return;
 
-  session.quality = QUALITY_LADDER[nextIdx]!;
+  session.quality = planned.quality;
   const { scaleW, q } = qualitySettings(session.quality);
   session.ffArgs = {
-    fps: down
-      ? Math.max(10, session.ffArgs.fps - 2)
-      : Math.min(24, session.ffArgs.fps + 2),
+    fps: session.ffArgs.fps,
     scaleW: session.ffArgs.scaleW === 0 ? 0 : scaleW,
     q,
   };
