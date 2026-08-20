@@ -381,15 +381,25 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         // Per-window capture: resolve the window's current on-screen rect, grab
         // only that region, and keep tracking the window if it moves.
         const windowId = params.windowId as string | undefined;
-        const region = windowId
-          ? (getAdoptedCaptureRegion(windowId) ?? getWindowGeometry(windowId) ?? undefined)
-          : undefined;
+        if (windowId) {
+          const region =
+            getAdoptedCaptureRegion(windowId) ?? getWindowGeometry(windowId);
+          if (!region || region.width < 16 || region.height < 16) {
+            throw new Error('window is gone or has no geometry');
+          }
+          result = startCapture(
+            (params.quality as 'low' | 'medium' | 'high' | 'full') ?? 'medium',
+            (params.fps as number) ?? 24,
+            ws,
+            region,
+            () => getAdoptedCaptureRegion(windowId) ?? getWindowGeometry(windowId),
+          );
+          break;
+        }
         result = startCapture(
           (params.quality as 'low' | 'medium' | 'high' | 'full') ?? 'medium',
           (params.fps as number) ?? 24,
           ws,
-          region,
-          windowId ? () => getAdoptedCaptureRegion(windowId) ?? getWindowGeometry(windowId) : undefined,
         );
         break;
       }

@@ -15,6 +15,14 @@ const hasStack =
   existsSync('/usr/share/applications/debian-xterm.desktop') &&
   webrtcAvailability().available;
 
+describe('webrtc.start guards', () => {
+  test('refuses a physical/desktop upgrade without a sessionId', () => {
+    const res = startWebrtc(undefined, 24, { readyState: 1 } as unknown as WebSocket);
+    expect(res.available).toBe(false);
+    expect(res.reason ?? '').toContain('virtual');
+  });
+});
+
 describe.if(hasStack)('webrtc pipeline', () => {
   test(
     'agent builds the encode pipeline and emits an H.264 offer + ICE',
