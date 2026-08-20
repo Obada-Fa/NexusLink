@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { extractFrames, MjpegRing, socketBackedUp } from '../capture';
+import { extractFrames, MjpegRing, socketBackedUp, planStreamQos } from '../capture';
 
 const SOI = Buffer.from([0xff, 0xd8]);
 const EOI = Buffer.from([0xff, 0xd9]);
@@ -83,5 +83,55 @@ describe('socketBackedUp', () => {
     const ws = { bufferedAmount: 80_000 } as unknown as WebSocket;
     expect(socketBackedUp(ws, 40_000)).toBe(true);
     expect(socketBackedUp({ bufferedAmount: 0 } as unknown as WebSocket, 40_000)).toBe(false);
+  });
+});
+
+describe('planStreamQos', () => {
+  it('never lowers capture fps, even with a clock-skewed age', () => {
+    const r = planStreamQos({
+      quality: 'medium',
+      fps: 24,
+      displayedFps: 24,
+      decodeAgeMs: 5000,
+      badStreak: 2,
+    });
+    expect(r.fps).toBe(24);
+  });
+
+  it('requires two consecutive bad reports before dropping quality', () => {
+    const first = planStreamQos({
+      quality: 'medium',
+      fps: 24,
+      displayedFps: 8,
+      decodeAgeMs: 200,
+      badStreak: 0,
+    });
+    expect(first.restart).toBe(false);
+    expect(first.quality).toBe('medium');
+    expect(first.fps).toBe(24);
+
+    const second = planStreamQos({
+      quality: 'medium',
+      fps: 24,
+      displayedFps: 8,
+      decodeAgeMs: 200,
+      badStreak: first.badStreak,
+    });
+    expect(second.restart).toBe(true);
+    expect(second.quality).toBe('low');
+    expect(second.fps).toBe(24);
+  });
+
+  it('does not drop fps when already at the lowest quality', () => {
+    const r = planStreamQos({
+      quality: 'low',
+      fps: 24,
+      displayedFps: 5,
+      decodeAgeMs: 300,
+      badStreak: 8,
+    });
+    expect(r.fps).toBe(24);
+    expect(r.quality).toBe('low');
+    expect(r.restart).toBe(false);
   });
 });

@@ -5,6 +5,7 @@ import {
   geometryClose,
   portraitTarget,
   aspectCorrectPlacement,
+  streamRegionForAdopted,
 } from '../phone-aspect';
 
 describe('geometryClose', () => {
@@ -108,5 +109,25 @@ describe('cropToPhoneAspect', () => {
     expect(cropped.height).toBe(h & ~1);
     expect(cropped.x).toBe(0);
     expect(cropped.y).toBe(0);
+  });
+});
+
+describe('streamRegionForAdopted', () => {
+  const aspect = 390 / 844;
+  const screen = { width: 1920, height: 1080 };
+  const target = { x: 1420, y: 24, width: 484, height: 1048 };
+
+  it('keeps a small floating window as-is instead of a monitor slice', () => {
+    const live = { x: 200, y: 100, width: 400, height: 300 };
+    const region = streamRegionForAdopted(live, target, aspect, screen);
+    expect(region).toEqual({ x: 200, y: 100, width: 400, height: 300 });
+    expect(region.x).not.toBe(target.x);
+    expect(region.width).toBeLessThan(target.width);
+  });
+
+  it('phone-aspect crops when the window landed on the placement target', () => {
+    const live = { ...target };
+    const region = streamRegionForAdopted(live, target, aspect, screen);
+    expect(Math.abs(region.width / region.height - aspect)).toBeLessThan(0.05);
   });
 });

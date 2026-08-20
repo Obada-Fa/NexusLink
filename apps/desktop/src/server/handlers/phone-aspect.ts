@@ -137,3 +137,32 @@ export function aspectCorrectPlacement(
   const y = mon.y + marginTop;
   return { x, y, width, height };
 }
+
+/**
+ * Capture rect for an adopted window. If the WM actually placed it near
+ * `target`, phone-aspect crop the live rect. If reshape failed, keep the
+ * real window bounds — never expand to a monitor slice that shows the desktop
+ * around a floating terminal.
+ */
+export function streamRegionForAdopted(
+  live: CaptureRegion,
+  target: { x: number; y: number; width: number; height: number },
+  aspect: number,
+  screen: { width: number; height: number },
+): CaptureRegion {
+  const rx = Math.max(0, live.x);
+  const ry = Math.max(0, live.y);
+  const rw = Math.max(0, Math.min(screen.width - rx, live.width));
+  const rh = Math.max(0, Math.min(screen.height - ry, live.height));
+  const clamped: CaptureRegion = {
+    x: rx,
+    y: ry,
+    width: rw & ~1,
+    height: rh & ~1,
+  };
+  if (clamped.width < 32 || clamped.height < 32) return clamped;
+  if (geometryClose(clamped, target, 64)) {
+    return cropToPhoneAspect(clamped, aspect);
+  }
+  return clamped;
+}
