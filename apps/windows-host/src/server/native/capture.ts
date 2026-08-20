@@ -57,6 +57,7 @@ interface CaptureSession {
   lastFrameBytes: number;
   quality: string;
   lastQosAt: number;
+  qosBadStreak: number;
   lastEmittedRegion?: CaptureRegion;
 }
 
@@ -313,7 +314,7 @@ export function startCapture(
     id, key, ws, region: grab, hwnd: windowId, running: true,
     fps: Math.max(1, Math.min(24, fps || 12)),
     q, maxW, lastFrameBytes: 0,
-    quality, lastQosAt: 0,
+    quality, lastQosAt: 0, qosBadStreak: 0,
   };
   sessions.set(id, session);
   void pumpCapture(session).catch((err) => console.warn('[capture]', err));
@@ -342,21 +343,23 @@ export function reportStreamStats(streamId: string, decodeFps: number, frameAgeM
   if (now - session.lastQosAt < 2000) return;
   session.lastQosAt = now;
   const idx = QUALITY_LADDER.indexOf(session.quality as typeof QUALITY_LADDER[number]);
-  const down = frameAgeMs > 80 || decodeFps < Math.max(6, session.fps * 0.45);
-  const up = frameAgeMs < 40 && decodeFps >= session.fps * 0.75;
-  let next = idx < 0 ? 1 : idx;
-  if (down && next > 0) next -= 1;
-  else if (up && next < QUALITY_LADDER.length - 1) next += 1;
-  else if (down && session.fps > 8) {
-    session.fps = Math.max(8, session.fps - 2);
+  const down = frameAgeMs > 120 || decodeFps < Math.max(6, session.fps * 0.45);
+  const up = frameAgeMs < 50 && decodeFps >= session.fps * 0.75;
+  if (down) {
+    session.qosBadStreak += 1;
+    if (session.qosBadStreak < 2 || idx <= 0) return;
+    session.qosBadStreak = 0;
+    session.quality = QUALITY_LADDER[idx - 1]!;
+  } else if (up && idx >= 0 && idx < QUALITY_LADDER.length - 1) {
+    session.qosBadStreak = 0;
+    session.quality = QUALITY_LADDER[idx + 1]!;
+  } else {
+    session.qosBadStreak = 0;
     return;
-  } else return;
-  session.quality = QUALITY_LADDER[next]!;
+  }
   const s = qualitySettings(session.quality);
   session.q = s.q;
   session.maxW = s.maxW;
-  if (down) session.fps = Math.max(8, session.fps - 2);
-  if (up) session.fps = Math.min(24, session.fps + 2);
 }
 
 export { sendFn };

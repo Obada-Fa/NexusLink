@@ -27,17 +27,24 @@ class LatestJpegGate {
 /// posting a [ui.Image] for [CustomPainter]. Drops in-flight decodes when a
 /// newer frame is already waiting.
 class MirrorFrameSink {
-  MirrorFrameSink({required this.onImage, this.onFpsTick});
+  MirrorFrameSink({
+    required this.onImage,
+    this.onDisplayed,
+    this.onDecodeAge,
+  });
 
   final void Function(ui.Image image) onImage;
-  final VoidCallback? onFpsTick;
+  final VoidCallback? onDisplayed;
+  final void Function(int decodeAgeMs)? onDecodeAge;
+
+  /// Decode at the painted pixel width when set (less work on the phone).
+  int? targetWidth;
 
   final LatestJpegGate _gate = LatestJpegGate();
   bool _closed = false;
 
   void pushJpeg(Uint8List jpeg) {
     if (_closed) return;
-    onFpsTick?.call();
     _gate.offer(jpeg);
     _drain();
   }
@@ -50,14 +57,20 @@ class MirrorFrameSink {
         final jpeg = _gate.take();
         if (jpeg == null) break;
         try {
-          final codec = await ui.instantiateImageCodec(jpeg);
+          final started = DateTime.now();
+          final codec = await ui.instantiateImageCodec(
+            jpeg,
+            targetWidth: targetWidth,
+          );
           final frame = await codec.getNextFrame();
           codec.dispose();
+          onDecodeAge?.call(DateTime.now().difference(started).inMilliseconds);
           if (_closed || _gate.hasPending) {
             frame.image.dispose();
             continue;
           }
           onImage(frame.image);
+          onDisplayed?.call();
         } catch (_) {
           // Corrupt JPEG — skip.
         }

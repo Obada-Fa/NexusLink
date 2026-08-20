@@ -2543,34 +2543,26 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
 
     try {
-      var available = _speech.isAvailable;
-      if (!available) {
-        available = await _speech.initialize(
-          onStatus: (val) {
-            if (mounted) {
-              setState(() =>
-                  _isListening = (val == 'listening' || val == 'recording'));
-            }
-          },
-          onError: (val) {
-            if (!mounted) return;
-            setState(() => _isListening = false);
-            if (isBenignSpeechError(val.errorMsg)) return;
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text(speechErrorMessage(val.errorMsg)),
-                duration: const Duration(seconds: 3),
-              ),
-            );
-          },
-          options: speechInitOptions(),
-        );
-        if (available) {
-          // Google's recognizer often returns error_client if listen() races
-          // the just-created SpeechRecognizer.
-          await Future<void>.delayed(const Duration(milliseconds: 150));
-        }
-      }
+      // Always initialize: first tap requests the mic, later taps reuse it.
+      final available = await _speech.initialize(
+        onStatus: (val) {
+          if (mounted) {
+            setState(() => _isListening = isSpeechStatusListening(val));
+          }
+        },
+        onError: (val) {
+          if (!mounted) return;
+          setState(() => _isListening = false);
+          if (isBenignSpeechError(val.errorMsg)) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(speechErrorMessage(val.errorMsg)),
+              duration: const Duration(seconds: 3),
+            ),
+          );
+        },
+        options: speechInitOptions(),
+      );
 
       if (!available) {
         if (mounted) {
@@ -2585,10 +2577,22 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         return;
       }
 
+      if (!await _speech.hasPermission) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(speechErrorMessage('error_permission'))),
+          );
+        }
+        return;
+      }
+
+      // Google's recognizer often returns error_client if listen() races
+      // the just-created SpeechRecognizer.
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+
       _preListeningText = _input.text.isNotEmpty && !_input.text.endsWith(' ')
           ? '${_input.text} '
           : _input.text;
-      if (mounted) setState(() => _isListening = true);
 
       await _speech.listen(
         onResult: (val) {
@@ -2601,8 +2605,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             });
           }
         },
+        localeId: speechLocaleId(Localizations.localeOf(context)),
         listenOptions: speechListenOptions(),
       );
+      if (mounted) {
+        setState(() => _isListening = _speech.isListening);
+      }
     } catch (e) {
       if (mounted) {
         setState(() => _isListening = false);

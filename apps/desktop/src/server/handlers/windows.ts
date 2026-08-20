@@ -13,9 +13,9 @@ import { listProfiles } from './app-profiles';
 import { resolveAppIcon, invalidateIconCache } from './icon-resolver';
 import {
   aspectCorrectPlacement,
-  cropToPhoneAspect,
   geometryClose,
   portraitTarget,
+  streamRegionForAdopted,
 } from './phone-aspect';
 
 const DISPLAY = process.env.DISPLAY || ':0';
@@ -411,8 +411,12 @@ export async function listWindows(): Promise<WindowInfo[]> {
 
 /** Original geometry per adopted window, restored on release. */
 const savedGeometry = new Map<string, CaptureRegion & { maximized: boolean }>();
-/** Phone-aspect crop used by capture so the stream fills the phone. */
-const adoptedSessions = new Map<string, { aspect: number; region: CaptureRegion }>();
+/** Placement + live capture rect so the stream follows the window. */
+const adoptedSessions = new Map<string, {
+  aspect: number;
+  region: CaptureRegion;
+  target: { x: number; y: number; width: number; height: number };
+}>();
 
 function getWindowGeometry(windowId: string): CaptureRegion | null {
   // xwininfo reports the client area's absolute position — exactly what x11grab needs.
@@ -469,6 +473,8 @@ export async function adoptWindow(
 
   const place = (t: { x: number; y: number; width: number; height: number }) => {
     run(['wmctrl', '-i', '-r', windowId, '-e', `0,${t.x},${t.y},${t.width},${t.height}`]);
+    run(['xdotool', 'windowmove', windowId, String(t.x), String(t.y)]);
+    run(['xdotool', 'windowsize', windowId, String(t.width), String(t.height)]);
   };
 
   stripChrome();
@@ -503,16 +509,25 @@ export async function adoptWindow(
     }
   }
 
-  const region = actual ?? target;
+  // Terminals and some Electron apps ignore wmctrl; try fullscreen as a last reshape.
+  if (actual && !geometryClose(actual, target, 64)) {
+    run(['wmctrl', '-i', '-r', windowId, '-b', 'add,fullscreen']);
+    await Bun.sleep(200);
+    actual = getWindowGeometry(windowId) ?? actual;
+    if (actual && !geometryClose(actual, target, 96)) {
+      run(['wmctrl', '-i', '-r', windowId, '-b', 'remove,fullscreen']);
+      place(target);
+      await Bun.sleep(150);
+      actual = getWindowGeometry(windowId) ?? actual;
+    }
+  }
 
-  // Clamp into screen bounds, then force phone aspect on the capture rect so
-  // the phone stream never letterboxes even if the WM refused the reshape.
-  const rx = Math.max(0, region.x);
-  const ry = Math.max(0, region.y);
-  const rw = Math.min(screen.width - rx, region.width);
-  const rh = Math.min(screen.height - ry, region.height);
-  const cropped = cropToPhoneAspect({ x: rx, y: ry, width: rw, height: rh }, aspect);
-  adoptedSessions.set(windowId, { aspect, region: cropped });
+  if (!actual || actual.width < 16 || actual.height < 16) {
+    throw new Error('could not read window geometry');
+  }
+
+  const cropped = streamRegionForAdopted(actual, target, aspect, screen);
+  adoptedSessions.set(windowId, { aspect, region: cropped, target });
 
   return { region: cropped };
 }
@@ -524,11 +539,7 @@ export function getAdoptedCaptureRegion(windowId: string): CaptureRegion | null 
   const live = getWindowGeometry(windowId);
   if (!live) return session.region;
   const screen = getScreenMetadata();
-  const rx = Math.max(0, live.x);
-  const ry = Math.max(0, live.y);
-  const rw = Math.min(screen.width - rx, live.width);
-  const rh = Math.min(screen.height - ry, live.height);
-  const cropped = cropToPhoneAspect({ x: rx, y: ry, width: rw, height: rh }, session.aspect);
+  const cropped = streamRegionForAdopted(live, session.target, session.aspect, screen);
   session.region = cropped;
   return cropped;
 }

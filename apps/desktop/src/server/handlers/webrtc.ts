@@ -63,14 +63,19 @@ export function startWebrtc(
   fps: number,
   ws: WebSocket,
 ): { webrtcId?: string; available: boolean; reason?: string } {
+  // ximagesrc grabs the whole DISPLAY. Physical/desktop mirrors are cropped
+  // MJPEG of one window — upgrading those would replace the crop with :0.
+  if (!sessionId) {
+    return { available: false, reason: 'WebRTC is only available for virtual app sessions' };
+  }
   const avail = webrtcAvailability();
   if (!avail.available) return avail;
 
-  const display = sessionId ? getSessionDisplay(sessionId) : (process.env.DISPLAY || ':0');
-  if (!display) return { available: false, reason: sessionId ? 'unknown app session' : 'no DISPLAY' };
+  const display = getSessionDisplay(sessionId);
+  if (!display) return { available: false, reason: 'unknown app session' };
 
   const webrtcId = crypto.randomUUID();
-  const audioSource = sessionId ? getSessionAudioSource(sessionId) : null;
+  const audioSource = getSessionAudioSource(sessionId);
   const argv = [
     'python3', AGENT_PATH,
     '--display', display,
