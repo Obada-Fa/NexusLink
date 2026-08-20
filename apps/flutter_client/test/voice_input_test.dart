@@ -1,3 +1,5 @@
+import 'dart:ui' show Locale;
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nexuslink/src/util/voice_input.dart';
 import 'package:speech_to_text/speech_to_text.dart';
@@ -22,5 +24,18 @@ void main() {
     expect(isBenignSpeechError('error_no_match'), isTrue);
     expect(isBenignSpeechError('error_client'), isFalse);
     expect(speechErrorMessage('error_client'), contains('microphone'));
+    expect(speechErrorMessage('error_permission'), contains('Microphone'));
+  });
+
+  test('locale ids match what Android SpeechRecognizer expects', () {
+    expect(speechLocaleId(const Locale('en', 'US')), 'en_US');
+    expect(speechLocaleId(const Locale('nl', 'NL')), 'nl_NL');
+    expect(speechLocaleId(const Locale('en')), 'en');
+  });
+
+  test('listening statuses include recording', () {
+    expect(isSpeechStatusListening('listening'), isTrue);
+    expect(isSpeechStatusListening('recording'), isTrue);
+    expect(isSpeechStatusListening('done'), isFalse);
   });
 }
