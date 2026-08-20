@@ -5,11 +5,11 @@ import 'package:nexuslink/src/util/host_path.dart';
 
 void main() {
   test('parentUnixPath walks up to root', () {
-    expect(parentUnixPath('/home/obada/Projects'), '/home/obada');
-    expect(parentUnixPath('/home/obada'), '/home');
+    expect(parentUnixPath('/home/user/Projects'), '/home/user');
+    expect(parentUnixPath('/home/user'), '/home');
     expect(parentUnixPath('/home'), '/');
     expect(parentUnixPath('/'), '/');
-    expect(parentUnixPath('/home/obada/'), '/home');
+    expect(parentUnixPath('/home/user/'), '/home');
   });
 
   test('parentHostPath walks Windows drives to This PC', () {

@@ -1,7 +1,19 @@
-import { join, resolve, extname } from 'path';
+import { existsSync } from 'fs';
+import { dirname, join, resolve, extname } from 'path';
 
-const STATIC_DIR =
-  process.env.NEXUSLINK_STATIC_DIR || resolve(import.meta.dir, '../../../mobile-client/out');
+function resolveStaticDir(): string {
+  if (process.env.NEXUSLINK_STATIC_DIR) return process.env.NEXUSLINK_STATIC_DIR;
+  const candidates = [
+    join(dirname(process.execPath), 'www'),
+    resolve(import.meta.dir, '../../../mobile-client/out'),
+  ];
+  for (const dir of candidates) {
+    if (existsSync(join(dir, 'index.html'))) return dir;
+  }
+  return candidates[0]!;
+}
+
+const STATIC_DIR = resolveStaticDir();
 
 let available: boolean | null = null;
 

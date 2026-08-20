@@ -43,6 +43,7 @@ IconData iconForAgent(String id) {
     'cursor' => Icons.code,
     'opencode' => Icons.terminal,
     'antigravity' => Icons.auto_awesome,
+    'mock' => Icons.smart_toy_outlined,
     _ => Icons.smart_toy_outlined,
   };
 }
@@ -53,24 +54,22 @@ bool hasOfficialAgentLogo(String id) =>
     id == 'antigravity' ||
     id == 'claude' ||
     id == 'opencode' ||
-    _agentIconDataCache[id] != null;
+    id == 'mock';
 
 Color agentMarkColor(String id, {required bool available}) {
   if (!available) return Colors.white24;
-  return hasOfficialAgentLogo(id)
-      ? Colors.white
-      : const Color(0xFF2A6AFF);
+  return Colors.white;
 }
 
-/// Agent brand mark for list rows and pickers. Renders real host raster icon if present,
-/// falling back to authentic brand vector painters.
+/// Agent brand mark for list rows and pickers. Renders unified official brand vector
+/// marks for supported agents, or host raster icon if present for custom agents.
 class AgentMark extends StatelessWidget {
   const AgentMark({
     super.key,
     required this.agentId,
     this.icon,
     this.size = 24,
-    this.color = const Color(0xFF2A6AFF),
+    this.color = Colors.white,
   });
 
   final String agentId;
@@ -80,6 +79,9 @@ class AgentMark extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (hasOfficialAgentLogo(agentId)) {
+      return _officialBrandWidget();
+    }
     final iconUri = (icon != null && icon!.isNotEmpty)
         ? icon
         : _agentIconDataCache[agentId];
@@ -102,7 +104,7 @@ class AgentMark extends StatelessWidget {
     return _fallbackWidget();
   }
 
-  Widget _fallbackWidget() {
+  Widget _officialBrandWidget() {
     final painter = switch (agentId) {
       'cursor' => _CursorLogoPainter(color),
       'antigravity' => _AntigravityLogoPainter(color),
@@ -117,6 +119,10 @@ class AgentMark extends StatelessWidget {
         child: CustomPaint(painter: painter),
       );
     }
+    return Icon(iconForAgent(agentId), size: size, color: color);
+  }
+
+  Widget _fallbackWidget() {
     return Icon(iconForAgent(agentId), size: size, color: color);
   }
 }
@@ -169,7 +175,7 @@ class AgentActivityIcon extends StatefulWidget {
     this.icon,
     this.active = false,
     this.size = 24,
-    this.color = const Color(0xFF2A6AFF),
+    this.color = Colors.white,
   });
 
   final String agentId;
@@ -220,9 +226,7 @@ class _AgentActivityIconState extends State<AgentActivityIcon>
     super.dispose();
   }
 
-  Color get _markColor => hasOfficialAgentLogo(widget.agentId)
-      ? Colors.white
-      : widget.color;
+  Color get _markColor => Colors.white;
 
   @override
   Widget build(BuildContext context) {

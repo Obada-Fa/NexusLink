@@ -120,8 +120,8 @@ void main() {
       expect(items[1].tools?.length, 2);
       expect(items[1].tools?.map((e) => e.kind).toList(),
           ['tool-end', 'tool-end']);
-      expect(toolGroupTitle(items[1].tools!), '2 steps');
-      expect(toolGroupSummary(items[1].tools!), 'edit · shell');
+      expect(toolGroupTitle(items[1].tools!), 'Finished 2 steps');
+      expect(toolGroupSummary(items[1].tools!), 'Editing files · Running command');
       expect(items[2].event?.kind, 'text');
     });
 
@@ -132,7 +132,7 @@ void main() {
       ]);
       expect(items.length, 1);
       expect(toolGroupRunning(items[0].tools!), isTrue);
-      expect(toolGroupTitle(items[0].tools!), 'Working… 2 steps');
+      expect(toolGroupTitle(items[0].tools!), 'Working…');
     });
 
     test('closeOpenTools ends a dangling tool-start so Working can clear', () {

@@ -2142,12 +2142,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           ),
         );
       case 'tool-start':
-        if (e.toolName == 'ask_question' || e.toolName == 'askQuestion') {
+        if (_isQuestionTool(e.toolName)) {
            return _questionBubble(e, running: true);
         }
         return _toolCard(e, running: true);
       case 'tool-end':
-        if (e.toolName == 'ask_question' || e.toolName == 'askQuestion') {
+        if (_isQuestionTool(e.toolName)) {
            return _questionBubble(e, running: false);
         }
         return _toolCard(e, running: false);
@@ -2376,56 +2376,100 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     );
   }
 
+  bool _isQuestionTool(String? name) {
+    if (name == null) return false;
+    final n = name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+    return n == 'askquestion' ||
+        n == 'askuser' ||
+        n == 'askfollowupquestion' ||
+        n == 'question' ||
+        n == 'promptuser' ||
+        n == 'inputprompt';
+  }
+
   Widget _questionBubble(AgentEvent e, {required bool running}) {
     final input = e.toolInput ?? '';
     if (input.isEmpty) return _toolCard(e, running: running);
 
-    String questionText = 'Question';
-    List<String> options = [];
-    bool isMulti = false;
+    final List<Map<String, dynamic>> parsedQuestions = [];
     try {
       final json = jsonDecode(input);
       if (json is Map) {
         if (json.containsKey('questions') && json['questions'] is List) {
           final qList = json['questions'] as List;
-          if (qList.isNotEmpty && qList.first is Map) {
-            final firstQ = qList.first as Map;
-            questionText = firstQ['question']?.toString() ?? questionText;
-            isMulti = firstQ['is_multi_select'] == true;
-            if (firstQ['options'] is List) {
-              options = (firstQ['options'] as List).map((o) => o.toString()).toList();
+          for (final q in qList) {
+            if (q is Map) {
+              final text = q['question']?.toString() ??
+                  q['prompt']?.toString() ??
+                  q['title']?.toString() ??
+                  'Question';
+              final opts = <String>[];
+              final rawOpts = q['options'] ?? q['choices'] ?? q['suggested_answers'] ?? q['items'];
+              if (rawOpts is List) {
+                for (final opt in rawOpts) {
+                  if (opt != null) opts.add(opt.toString());
+                }
+              }
+              parsedQuestions.add({'question': text, 'options': opts});
             }
           }
-        } else if (json.containsKey('question')) {
-          questionText = json['question']?.toString() ?? questionText;
-          if (json['options'] is List) {
-            options = (json['options'] as List).map((o) => o.toString()).toList();
+        } else {
+          final text = json['question']?.toString() ??
+              json['prompt']?.toString() ??
+              json['message']?.toString() ??
+              json['query']?.toString() ??
+              'Question';
+          final opts = <String>[];
+          final rawOpts = json['options'] ?? json['choices'] ?? json['suggested_answers'] ?? json['items'];
+          if (rawOpts is List) {
+            for (final opt in rawOpts) {
+              if (opt != null) opts.add(opt.toString());
+            }
           }
+          parsedQuestions.add({'question': text, 'options': opts});
         }
       }
     } catch (_) {}
 
+    if (parsedQuestions.isEmpty) {
+      parsedQuestions.add({'question': 'Agent question', 'options': <String>[]});
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
       child: Container(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: _panelBackgroundColor(_active?.agent),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: _borderColor(_active?.agent)),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: running ? const Color(0xFFF0C040).withOpacity(0.6) : _borderColor(_active?.agent),
+            width: running ? 1.5 : 1,
+          ),
+          boxShadow: running
+              ? [
+                  BoxShadow(
+                    color: const Color(0xFFF0C040).withOpacity(0.08),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  )
+                ]
+              : null,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Icon(running ? Icons.help_outline : Icons.check_circle_outline,
-                    size: 16,
-                    color: running ? const Color(0xFFF0C040) : const Color(0xFF4ADE80)),
+                Icon(
+                  running ? Icons.help_outline : Icons.check_circle_outline,
+                  size: 16,
+                  color: running ? const Color(0xFFF0C040) : const Color(0xFF4ADE80),
+                ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    running ? 'Needs input' : 'Responded',
+                    running ? 'Needs Your Input' : 'Answered',
                     style: TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.w600,
@@ -2435,29 +2479,44 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                 ),
               ],
             ),
-            const SizedBox(height: 8),
-            Text(questionText, style: const TextStyle(fontSize: 14)),
-            if (options.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 12),
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: options.map((opt) {
-                    return ActionChip(
-                      label: Text(opt, style: const TextStyle(fontSize: 13)),
-                      backgroundColor: _appBackgroundColor(_active?.agent),
-                      side: BorderSide(color: _borderColor(_active?.agent)),
-                      onPressed: running && !_busy
-                          ? () {
-                              _input.text = opt;
-                              _send();
-                            }
-                          : null,
-                    );
-                  }).toList(),
-                ),
+            const SizedBox(height: 10),
+            for (int i = 0; i < parsedQuestions.length; i++) ...[
+              if (i > 0) const SizedBox(height: 12),
+              Text(
+                parsedQuestions[i]['question'] as String,
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.white),
               ),
+              if ((parsedQuestions[i]['options'] as List<String>).isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: (parsedQuestions[i]['options'] as List<String>).map((opt) {
+                      return ActionChip(
+                        label: Text(
+                          opt,
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: running && !_busy ? Colors.white : Colors.white70,
+                          ),
+                        ),
+                        backgroundColor: _appBackgroundColor(_active?.agent),
+                        side: BorderSide(
+                          color: running ? const Color(0xFF2A6AFF) : _borderColor(_active?.agent),
+                        ),
+                        elevation: running ? 1 : 0,
+                        onPressed: running && !_busy
+                            ? () {
+                                _input.text = opt;
+                                _send();
+                              }
+                            : null,
+                      );
+                    }).toList(),
+                  ),
+                ),
+            ],
           ],
         ),
       ),

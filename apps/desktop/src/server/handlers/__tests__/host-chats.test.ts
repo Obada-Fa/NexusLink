@@ -186,10 +186,10 @@ describe('host chat parsers', () => {
 
 describe('Antigravity workspace paths', () => {
   test('parses file URIs and workspace_uris JSON', () => {
-    expect(fileUriToPath('file:///home/obada/Projects/mobile/opendesktop'))
-      .toBe('/home/obada/Projects/mobile/opendesktop');
-    expect(fileUriToPath('file:///home/obada/Programming/market%20place'))
-      .toBe('/home/obada/Programming/market place');
+    expect(fileUriToPath('file:///home/user/Projects/mobile/opendesktop'))
+      .toBe('/home/user/Projects/mobile/opendesktop');
+    expect(fileUriToPath('file:///home/user/Programming/market%20place'))
+      .toBe('/home/user/Programming/market place');
     expect(parseAgyWorkspaceUris('["file:///tmp"]')).toBe(realpathSync('/tmp'));
     expect(parseAgyWorkspaceUris('')).toBe('');
   });

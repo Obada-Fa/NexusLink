@@ -43,6 +43,7 @@ import {
   claudeSpawnArgs,
   claudeUserContent,
   thinkingToEffort,
+  isSafeAgentToolCall,
   parseAgentModelList,
   matchAgentModel,
   listAgentModels,
@@ -59,20 +60,16 @@ import {
 const sessionCwd = existsSync('/tmp') ? '/tmp' : tmpdir();
 
 describe('agent gateway', () => {
-  test('resolves real logo icons for agents', async () => {
-    if (process.platform === 'win32') return;
+  test('unifies agent icons and does not scrape inconsistent host desktop icons', async () => {
     const antigravityIcon = await resolveAgentIcon('antigravity');
-    expect(antigravityIcon).toBeDefined();
-    expect(antigravityIcon).toMatch(/^data:image\/png;base64,/);
+    expect(antigravityIcon).toBeUndefined();
 
     const cursorIcon = await resolveAgentIcon('cursor');
-    expect(cursorIcon).toBeDefined();
-    expect(cursorIcon).toMatch(/^data:image\/png;base64,/);
+    expect(cursorIcon).toBeUndefined();
 
     const agents = listAgents();
     const agy = agents.find((a) => a.id === 'antigravity');
-    expect(agy?.icon).toBeDefined();
-    expect(agy?.icon).toMatch(/^data:image\/png;base64,/);
+    expect(agy?.icon).toBeUndefined();
   });
 
   test('lists known agents with availability flags', () => {
@@ -778,6 +775,80 @@ describe('CLI login helpers', () => {
     expect(withoutDuplicateResult({ kind: 'error', text: 'fatal error' }, false)).toEqual({
       kind: 'error',
       text: 'fatal error',
+    });
+  });
+
+  describe('isSafeAgentToolCall security filter', () => {
+    const cwd = '/home/user/project';
+
+    test('auto-allows safe in-directory file tools', () => {
+      expect(isSafeAgentToolCall('view_file', { AbsolutePath: '/home/user/project/src/index.ts' }, cwd).safe).toBe(true);
+      expect(isSafeAgentToolCall('replace_file_content', { TargetFile: '/home/user/project/src/index.ts' }, cwd).safe).toBe(true);
+      expect(isSafeAgentToolCall('grep_search', { SearchPath: '/home/user/project/src' }, cwd).safe).toBe(true);
+      expect(isSafeAgentToolCall('list_dir', { DirectoryPath: '/home/user/project' }, cwd).safe).toBe(true);
+      expect(isSafeAgentToolCall('ask_question', { questions: [] }, cwd).safe).toBe(true);
+    });
+
+    test('flags commands/tools targeting paths outside assigned cwd', () => {
+      const out1 = isSafeAgentToolCall('view_file', { AbsolutePath: '/etc/passwd' }, cwd);
+      expect(out1.safe).toBe(false);
+      expect(out1.reason).toContain('outside the assigned directory');
+
+      const out2 = isSafeAgentToolCall('write_to_file', { TargetFile: '/home/user/.ssh/id_rsa' }, cwd);
+      expect(out2.safe).toBe(false);
+      expect(out2.reason).toContain('outside the assigned directory');
+
+      const out3 = isSafeAgentToolCall('run_command', { CommandLine: 'cd ../.. && ls' }, cwd);
+      expect(out3.safe).toBe(false);
+      expect(out3.reason).toContain('navigate outside assigned directory');
+    });
+
+    test('flags git actions for permission approval', () => {
+      const git1 = isSafeAgentToolCall('run_command', { CommandLine: 'git push origin main' }, cwd);
+      expect(git1.safe).toBe(false);
+      expect(git1.reason).toContain('Git action requested');
+
+      const git2 = isSafeAgentToolCall('bash', { command: 'git commit -m "update"' }, cwd);
+      expect(git2.safe).toBe(false);
+      expect(git2.reason).toContain('Git action requested');
+
+      const git3 = isSafeAgentToolCall('shell', { command: 'git reset --hard HEAD' }, cwd);
+      expect(git3.safe).toBe(false);
+    });
+
+    test('flags database actions and migrations for permission approval', () => {
+      const db1 = isSafeAgentToolCall('run_command', { CommandLine: 'psql -U postgres -d mydb' }, cwd);
+      expect(db1.safe).toBe(false);
+      expect(db1.reason).toContain('Database operation requested');
+
+      const db2 = isSafeAgentToolCall('run_command', { CommandLine: 'npx prisma migrate dev' }, cwd);
+      expect(db2.safe).toBe(false);
+      expect(db2.reason).toContain('Database operation requested');
+
+      const db3 = isSafeAgentToolCall('bash', { command: 'mysql -u root -p database' }, cwd);
+      expect(db3.safe).toBe(false);
+
+      const db4 = isSafeAgentToolCall('run_command', { CommandLine: 'redis-cli flushall' }, cwd);
+      expect(db4.safe).toBe(false);
+    });
+
+    test('flags destructive commands for permission approval', () => {
+      const rm = isSafeAgentToolCall('run_command', { CommandLine: 'rm -rf ./dist' }, cwd);
+      expect(rm.safe).toBe(false);
+      expect(rm.reason).toContain('Potentially dangerous system command');
+
+      const sudo = isSafeAgentToolCall('run_command', { CommandLine: 'sudo apt install foo' }, cwd);
+      expect(sudo.safe).toBe(false);
+
+      const kill = isSafeAgentToolCall('bash', { command: 'kill -9 1234' }, cwd);
+      expect(kill.safe).toBe(false);
+    });
+
+    test('allows harmless developer commands inside cwd', () => {
+      expect(isSafeAgentToolCall('run_command', { CommandLine: 'bun test' }, cwd).safe).toBe(true);
+      expect(isSafeAgentToolCall('run_command', { CommandLine: 'npm run build' }, cwd).safe).toBe(true);
+      expect(isSafeAgentToolCall('run_command', { CommandLine: 'ls -la' }, cwd).safe).toBe(true);
+      expect(isSafeAgentToolCall('run_command', { CommandLine: 'echo "hello"' }, cwd).safe).toBe(true);
     });
   });
 });
