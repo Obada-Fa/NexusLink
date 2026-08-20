@@ -3,6 +3,7 @@
 // manipulation touch via the ported GestureEngine (lib/src/gestures/).
 
 import 'dart:async';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -14,6 +15,8 @@ import '../gestures/gesture_engine.dart';
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
+import '../util/mjpeg_sink.dart';
+import '../widgets/mirror_frame_painter.dart';
 import '../widgets/not_connected_view.dart';
 
 /// What to show: a virtual app session (sessionAppId launches a new one,
@@ -58,15 +61,21 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     with SingleTickerProviderStateMixin {
   MirrorPhase _phase = MirrorPhase.launching;
   String _errorMsg = '';
-  Uint8List? _frame;
+  final _decoded = ValueNotifier<ui.Image?>(null);
+  MirrorFrameSink? _sink;
   CaptureRegion? _region;
   int _streamKey = -1;
   String? _streamId;
   String? _windowId;
   int _frameCount = 0;
   int _fps = 0;
+  double _lastFrameAgeMs = 0;
   bool _keyboardOpen = false;
-  bool _precision = false;
+  bool _mouseMode = false;
+  Offset _canvasPan = Offset.zero;
+  double _canvasScale = 1;
+  Offset? _cursorHost;
+  Size _viewSize = Size.zero;
   int? _queuedDragX;
   int? _queuedDragY;
 
@@ -188,12 +197,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         _setRegion(CaptureRegion.fromJson(cap['region'] as Map<String, dynamic>));
       }
 
-      _frameSub = client.frames.listen((f) {
-        if (f.streamKey != _streamKey) return;
-        _frameCount++;
-        if (mounted) setState(() => _frame = f.jpeg);
-      });
-      // Host re-grabs if the window moves; keep the region in sync for mapping.
+      _attachMjpeg(client);
       _unsubs.add(client.subscribe('stream-region', (msg) {
         if (msg['streamId'] != _streamId) return;
         final r = msg['region'];
@@ -203,10 +207,19 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       }));
       _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
         if (mounted) setState(() => _fps = _frameCount);
+        final sid = _streamId;
+        if (sid != null && !_rtcLive) {
+          _client?.notify('screen.reportStats', {
+            'streamId': sid,
+            'fps': _frameCount,
+            'frameAgeMs': _lastFrameAgeMs.round(),
+          });
+        }
         _frameCount = 0;
       });
 
       if (mounted) setState(() => _phase = MirrorPhase.streaming);
+      unawaited(_tryWebrtc(client, null));
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -219,6 +232,12 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
 
   Future<void> _startVirtual(RpcClient client) async {
     setState(() => _phase = MirrorPhase.launching);
+    final readyIds = <String>{};
+    _unsubs.add(client.subscribe('app-session-ready', (msg) {
+      final sid = msg['sessionId'];
+      if (sid is String) readyIds.add(sid);
+    }));
+
     AppSessionInfo session;
     if (widget.target.sessionId != null) {
       final raw = await client.requestList('appSession.list');
@@ -256,8 +275,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         const Duration(seconds: 45),
       );
       session = AppSessionInfo.fromJson(created);
-      // Host already waited for the first window and fitted it.
-      await Future.delayed(const Duration(milliseconds: 400));
+      await _waitForSessionReady(readyIds, session.sessionId);
     }
     if (!mounted) return;
     _session = session;
@@ -287,9 +305,17 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       }
     }));
     if (mounted) setState(() => _phase = MirrorPhase.streaming);
-    // MJPEG is the reliable path. WebRTC is an upgrade: never stop MJPEG
-    // when onTrack fires (that left new apps on a black RTC surface).
     unawaited(_tryWebrtc(client, session.sessionId));
+  }
+
+  Future<void> _waitForSessionReady(Set<String> readyIds, String sessionId) async {
+    if (readyIds.contains(sessionId)) return;
+    final deadline = DateTime.now().add(const Duration(seconds: 8));
+    while (mounted &&
+        !readyIds.contains(sessionId) &&
+        DateTime.now().isBefore(deadline)) {
+      await Future.delayed(const Duration(milliseconds: 50));
+    }
   }
 
   Future<void> _beginCapture(
@@ -300,11 +326,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     if (cap['region'] != null) {
       _setRegion(CaptureRegion.fromJson(cap['region'] as Map<String, dynamic>));
     }
-    _frameSub = client.frames.listen((f) {
-      if (f.streamKey != _streamKey) return;
-      _frameCount++;
-      if (mounted) setState(() => _frame = f.jpeg);
-    });
+    _attachMjpeg(client);
     _unsubs.add(client.subscribe('stream-region', (msg) {
       if (msg['streamId'] != _streamId) return;
       final r = msg['region'];
@@ -314,15 +336,58 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     }));
     _fpsTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() => _fps = _frameCount);
+      final sid = _streamId;
+      if (sid != null && !_rtcLive) {
+        _client?.notify('screen.reportStats', {
+          'streamId': sid,
+          'fps': _frameCount,
+          'frameAgeMs': _lastFrameAgeMs.round(),
+        });
+      }
       _frameCount = 0;
     });
   }
 
+  void _attachMjpeg(RpcClient client) {
+    _sink?.dispose();
+    _sink = MirrorFrameSink(
+      onFpsTick: () => _frameCount++,
+      onImage: (img) {
+        if (!mounted || _rtcLive) {
+          img.dispose();
+          return;
+        }
+        final old = _decoded.value;
+        _decoded.value = img;
+        old?.dispose();
+      },
+    );
+    _frameSub?.cancel();
+    _frameSub = client.frames.listen((f) {
+      if (_rtcLive || f.streamKey != _streamKey) return;
+      _lastFrameAgeMs = DateTime.now().millisecondsSinceEpoch - f.timestampMs;
+      _sink?.pushJpeg(f.jpeg);
+    });
+  }
+
+  void _stopMjpeg() {
+    _frameSub?.cancel();
+    _frameSub = null;
+    _sink?.dispose();
+    _sink = null;
+    final old = _decoded.value;
+    _decoded.value = null;
+    old?.dispose();
+    final id = _streamId;
+    _streamId = null;
+    if (id != null) _client?.notify('screen.stopCapture', {'streamId': id});
+  }
+
   /// Best-effort WebRTC upgrade. Failures leave MJPEG running.
-  Future<void> _tryWebrtc(RpcClient client, String sessionId) async {
+  Future<void> _tryWebrtc(RpcClient client, String? sessionId) async {
     try {
       final res = await client.requestMap('webrtc.start', {
-        'sessionId': sessionId,
+        if (sessionId != null) 'sessionId': sessionId,
         'fps': 24,
       });
       if (res['available'] != true || res['webrtcId'] is! String) return;
@@ -350,8 +415,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         renderer.srcObject = event.streams[0];
         if (!mounted) return;
         setState(() => _rtcLive = true);
-        // Keep MJPEG running. Stopping it here made new-app streams go
-        // black whenever ICE/track setup was incomplete.
+        _stopMjpeg();
       };
       pc.onIceCandidate = (c) {
         if (c.candidate == null || _webrtcId == null) return;
@@ -417,9 +481,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   void _setRegion(CaptureRegion r) {
     _region = r;
     _engine.setHostDimensions(r.width.toDouble(), r.height.toDouble());
-    // Virtual sessions are sized to this phone stage — stretch, don't letterbox,
-    // so a tap lands on the pixel under the finger.
     _engine.setFit(widget.target.isVirtual ? ScaleFit.fill : ScaleFit.contain);
+    _cursorHost ??= Offset(r.width / 2, r.height / 2);
   }
 
   @override
@@ -427,6 +490,11 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     _ticker.dispose();
     _frameSub?.cancel();
     _fpsTimer?.cancel();
+    _sink?.dispose();
+    final leftover = _decoded.value;
+    _decoded.value = null;
+    leftover?.dispose();
+    _decoded.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     for (final u in _unsubs) {
       u();
@@ -470,9 +538,11 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
 
     switch (e) {
       case TapEvent():
+        _cursorHost = Offset(e.x, e.y);
         client.notify('input.mouseClick',
             _sid({'button': 'left', 'x': hx(e.x), 'y': hy(e.y)}));
       case DoubleTapEvent():
+        _cursorHost = Offset(e.x, e.y);
         final x = hx(e.x), y = hy(e.y);
         client.notify('input.mouseClick', _sid({'button': 'left', 'x': x, 'y': y}));
         Future.delayed(const Duration(milliseconds: 50), () {
@@ -481,6 +551,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         });
       case ContextEvent():
         HapticFeedback.mediumImpact();
+        _cursorHost = Offset(e.x, e.y);
         client.notify('input.mouseClick',
             _sid({'button': 'right', 'x': hx(e.x), 'y': hy(e.y)}));
       case MiddleClickEvent():
@@ -492,36 +563,48 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
             _sid({
               'deltaX': e.deltaX,
               'deltaY': e.deltaY,
-              if (!_precision) 'x': hx(e.x),
-              if (!_precision) 'y': hy(e.y),
+              if (!_mouseMode) 'x': hx(e.x),
+              if (!_mouseMode) 'y': hy(e.y),
             }));
       case MouseMoveEvent():
         client.notify('input.mouseMove', _sid({'dx': e.dx, 'dy': e.dy}));
       case DragStartEvent():
+        _cursorHost = Offset(e.x, e.y);
         client.notify('input.buttonDown',
             _sid({'button': 'left', 'x': hx(e.x), 'y': hy(e.y)}));
       case DragMoveEvent():
-        // Latest position wins — sending every pointer event queues latency.
         _queuedDragX = hx(e.x);
         _queuedDragY = hy(e.y);
+        _cursorHost = Offset(e.x, e.y);
       case DragEndEvent():
         _flushQueuedDrag();
         client.notify('input.buttonUp',
             _sid({'button': 'left', 'x': hx(e.x), 'y': hy(e.y)}));
       case ZoomEvent():
-        // Pinch scale is a small delta (px * 0.005). Map to scroll-px conservatively;
-        // the host coalesces ctrl+wheel to at most one step / 50ms so a delayed
-        // burst cannot dump twenty zoom steps.
-        client.notify(
-            'input.mouseScroll',
-            _sid({
-              'deltaX': 0,
-              'deltaY': (-e.scale * 160).round(),
-              'x': hx(e.x),
-              'y': hy(e.y),
-              'modifiers': ['ctrl'],
-            }));
+        if (_mouseMode) {
+          setState(() {
+            _canvasScale = (_canvasScale * (1 + e.scale)).clamp(1.0, 4.0);
+          });
+          _syncCanvasTransform();
+        } else {
+          client.notify(
+              'input.mouseScroll',
+              _sid({
+                'deltaX': 0,
+                'deltaY': (-e.scale * 160).round(),
+                'x': hx(e.x),
+                'y': hy(e.y),
+                'modifiers': ['ctrl'],
+              }));
+        }
+      case CanvasPanEvent():
+        setState(() => _canvasPan += Offset(e.dx, e.dy));
+        _syncCanvasTransform();
     }
+  }
+
+  void _syncCanvasTransform() {
+    _engine.setCanvasTransform(_canvasPan.dx, _canvasPan.dy, _canvasScale);
   }
 
   void _flushQueuedDrag() {
@@ -590,14 +673,22 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         ),
         actions: [
           IconButton(
-            tooltip: _precision
-                ? 'Mouse mode on: 1 finger moves a cursor'
-                : 'Touch mode: tap where you press. Toggle for a trackpad cursor',
-            icon: Icon(_precision ? Icons.mouse : Icons.touch_app,
-                color: _precision ? const Color(0xFF2A6AFF) : null),
+            tooltip: _mouseMode
+                ? 'Mouse mode: pan the picture, tap to click'
+                : 'Touch mode: tap where you press, swipe to scroll',
+            icon: Icon(_mouseMode ? Icons.mouse : Icons.touch_app,
+                color: _mouseMode ? const Color(0xFF2A6AFF) : null),
             onPressed: () {
-              setState(() => _precision = !_precision);
-              _engine.setPrecision(_precision);
+              setState(() {
+                _mouseMode = !_mouseMode;
+                if (!_mouseMode) {
+                  _canvasPan = Offset.zero;
+                  _canvasScale = 1;
+                }
+              });
+              _engine.setMode(
+                  _mouseMode ? GestureMode.mouse : GestureMode.direct);
+              _syncCanvasTransform();
             },
           ),
           IconButton(
@@ -630,6 +721,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     switch (_phase) {
       case MirrorPhase.streaming:
         return LayoutBuilder(builder: (context, constraints) {
+          _viewSize = Size(constraints.maxWidth, constraints.maxHeight);
           _engine.setViewSize(constraints.maxWidth, constraints.maxHeight);
           return Listener(
             onPointerDown: _onPointerDown,
@@ -640,20 +732,42 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
               color: Colors.black,
               width: double.infinity,
               height: double.infinity,
-              alignment: Alignment.center,
-              child: _rtcLive && _renderer != null
-                  ? RTCVideoView(_renderer!,
-                      objectFit: widget.target.isVirtual
-                          ? RTCVideoViewObjectFit.RTCVideoViewObjectFitCover
-                          : RTCVideoViewObjectFit
-                              .RTCVideoViewObjectFitContain)
-                  : _frame == null
-                      ? const CircularProgressIndicator()
-                      : Image.memory(_frame!,
-                          gaplessPlayback: true,
-                          fit: widget.target.isVirtual
-                              ? BoxFit.fill
-                              : BoxFit.contain),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Transform(
+                    transform: Matrix4.identity()
+                      ..translate(_canvasPan.dx, _canvasPan.dy)
+                      ..scale(_canvasScale),
+                    child: _rtcLive && _renderer != null
+                        ? RTCVideoView(_renderer!,
+                            objectFit: widget.target.isVirtual
+                                ? RTCVideoViewObjectFit.RTCVideoViewObjectFitCover
+                                : RTCVideoViewObjectFit
+                                    .RTCVideoViewObjectFitContain)
+                        : ValueListenableBuilder<ui.Image?>(
+                            valueListenable: _decoded,
+                            builder: (context, img, _) {
+                              if (img == null) {
+                                return const Center(
+                                    child: CircularProgressIndicator());
+                              }
+                              return CustomPaint(
+                                painter: MirrorFramePainter(
+                                  image: img,
+                                  fit: widget.target.isVirtual
+                                      ? BoxFit.fill
+                                      : BoxFit.contain,
+                                  repaint: _decoded,
+                                ),
+                                child: const SizedBox.expand(),
+                              );
+                            },
+                          ),
+                  ),
+                  if (_mouseMode) _cursorOverlay(),
+                ],
+              ),
             ),
           );
         });
@@ -680,6 +794,36 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
               : 'Fitting the app to your screen…',
         );
     }
+  }
+
+  Widget _cursorOverlay() {
+    final region = _region;
+    final cursor = _cursorHost;
+    if (region == null || cursor == null || _viewSize == Size.zero) {
+      return const SizedBox.shrink();
+    }
+    final mapped = hostToView(
+      cursor.dx,
+      cursor.dy,
+      _viewSize.width,
+      _viewSize.height,
+      region.width.toDouble(),
+      region.height.toDouble(),
+      widget.target.isVirtual ? ScaleFit.fill : ScaleFit.contain,
+    );
+    final x = mapped.x * _canvasScale + _canvasPan.dx;
+    final y = mapped.y * _canvasScale + _canvasPan.dy;
+    return IgnorePointer(
+      child: Stack(
+        children: [
+          Positioned(
+            left: x - 2,
+            top: y,
+            child: const Icon(Icons.north_west, size: 22, color: Colors.white),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _centered(IconData? icon, String text, {String? action}) {

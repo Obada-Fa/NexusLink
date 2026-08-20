@@ -256,15 +256,15 @@ void main() {
       expect(events.whereType<DoubleTapEvent>(), isEmpty);
     });
 
-    test('movement past the tap slop becomes a drag, not a tap', () {
+    test('movement past the tap slop becomes a scroll, not a tap', () {
       final (engine, events) = setupEngine();
       engine.onTouchStart([tp(100, 200)], 0);
       engine.onTouchMove([tp(150, 260)], 50);
       engine.onTouchEnd([], 100);
 
       expect(events.whereType<TapEvent>(), isEmpty);
-      expect(events.whereType<DragStartEvent>(), isNotEmpty);
-      expect(events.whereType<DragEndEvent>(), isNotEmpty);
+      expect(events.whereType<ScrollEvent>(), isNotEmpty);
+      expect(events.whereType<DragStartEvent>(), isEmpty);
     });
 
     test('setHostDimensions rescales tap coordinates', () {
@@ -278,34 +278,29 @@ void main() {
     });
   });
 
-  group('GestureEngine — native touch drag', () {
-    test('one-finger vertical pan emits a left drag, never MouseMove or Scroll',
-        () {
+  group('GestureEngine — native touch scroll', () {
+    test('one-finger vertical pan emits scroll, never MouseMove or Drag', () {
       final (engine, events) = setupEngine();
       engine.onTouchStart([tp(200, 600)], 0);
       engine.onTouchMove([tp(200, 540)], 16);
       engine.onTouchMove([tp(200, 480)], 32);
       engine.onTouchEnd([], 48);
 
-      expect(events.whereType<DragStartEvent>(), hasLength(1));
-      expect(events.whereType<DragMoveEvent>(), isNotEmpty);
-      expect(events.whereType<DragEndEvent>(), hasLength(1));
+      expect(events.whereType<ScrollEvent>(), isNotEmpty);
+      expect(events.whereType<DragStartEvent>(), isEmpty);
       expect(events.whereType<MouseMoveEvent>(), isEmpty);
-      expect(events.whereType<ScrollEvent>(), isEmpty);
-      // Button-down at the original aim point.
-      expect(events.whereType<DragStartEvent>().single.y,
-          closeTo(600 * (1920 / 667), 2));
     });
 
-    test('horizontal pan is also a drag (not a cursor chase)', () {
+    test('horizontal pan is also a scroll (not a cursor chase)', () {
       final (engine, events) = setupEngine();
       engine.onTouchStart([tp(100, 300)], 0);
       engine.onTouchMove([tp(160, 300)], 16);
       engine.onTouchMove([tp(220, 302)], 32);
       engine.onTouchEnd([], 48);
 
-      expect(events.whereType<DragStartEvent>(), hasLength(1));
+      expect(events.whereType<ScrollEvent>(), isNotEmpty);
       expect(events.whereType<MouseMoveEvent>(), isEmpty);
+      expect(events.whereType<DragStartEvent>(), isEmpty);
     });
   });
 
@@ -408,15 +403,15 @@ void main() {
   });
 
   group('GestureEngine — long press and drag', () {
-    test('still hold fires ContextEvent from the tick driver', () {
+    test('still hold fires ContextEvent on release after the tick arms it', () {
       final (engine, events) = setupEngine();
       engine.onTouchStart([tp(100, 200)], 0);
       engine.tick(longPressThresholdMs + 20);
-      expect(events.whereType<ContextEvent>(), hasLength(1));
+      expect(events.whereType<ContextEvent>(), isEmpty);
 
-      // Release adds nothing further.
       engine.onTouchEnd([], longPressThresholdMs + 100);
-      expect(events, hasLength(1));
+      expect(events.whereType<ContextEvent>(), hasLength(1));
+      expect(events.whereType<TapEvent>(), isEmpty);
     });
 
     test('hold past the threshold fires context at release without a driver',
@@ -429,33 +424,31 @@ void main() {
       expect(events.whereType<TapEvent>(), isEmpty);
     });
 
-    test('long-press then move emits context click followed by a drag', () {
+    test('long-press then move emits a drag without a context click', () {
       final (engine, events) = setupEngine();
       engine.onTouchStart([tp(100, 200)], 0);
       engine.onTouchMove([tp(140, 250)], longPressThresholdMs + 40);
       engine.onTouchMove([tp(170, 280)], longPressThresholdMs + 60);
       engine.onTouchEnd([], longPressThresholdMs + 80);
 
-      expect(events.whereType<ContextEvent>(), hasLength(1));
+      expect(events.whereType<ContextEvent>(), isEmpty);
       expect(events.whereType<DragStartEvent>(), hasLength(1));
       expect(events.whereType<DragMoveEvent>(), isNotEmpty);
       expect(events.whereType<DragEndEvent>(), hasLength(1));
-      // Context click fires before the drag begins.
-      expect(events.first, isA<ContextEvent>());
       expect(events.whereType<ScrollEvent>(), isEmpty);
     });
 
-    test('significant movement cancels the pending long press and starts a drag',
+    test('significant movement cancels the pending long press and starts a scroll',
         () {
       final (engine, events) = setupEngine();
       engine.onTouchStart([tp(100, 200)], 0);
-      // >10 host px from the origin: cancels the long press, becomes a drag.
       engine.onTouchMove([tp(120, 220)], 100);
       engine.tick(600);
       engine.onTouchEnd([], 650);
 
       expect(events.whereType<ContextEvent>(), isEmpty);
-      expect(events.whereType<DragStartEvent>(), isNotEmpty);
+      expect(events.whereType<ScrollEvent>(), isNotEmpty);
+      expect(events.whereType<DragStartEvent>(), isEmpty);
     });
   });
 
@@ -481,7 +474,7 @@ void main() {
       expect(events.whereType<ZoomEvent>(), isEmpty);
     });
 
-    test('three-finger tap emits a middle click', () {
+    test('three-finger tap does not emit a middle click', () {
       final (engine, events) = setupEngine();
       engine.onTouchStart(
         [tp(100, 200), tp(150, 200, 1), tp(200, 200, 2)],
@@ -489,7 +482,7 @@ void main() {
       );
       engine.onTouchEnd([], 100);
 
-      expect(events.whereType<MiddleClickEvent>(), hasLength(1));
+      expect(events.whereType<MiddleClickEvent>(), isEmpty);
       expect(events.whereType<TapEvent>(), isEmpty);
     });
   });
@@ -527,6 +520,25 @@ void main() {
       final move = events.whereType<MouseMoveEvent>().single;
       // 100 view px * (1920/667) / 3 ~= 95.95 -> truncated to 95.
       expect(move.dy, closeTo(100 * (1920 / 667) / precisionDivisor, 1.0));
+    });
+
+    test('mouse mode one-finger pan emits CanvasPanEvent, not host scroll', () {
+      final (engine, events) = setupEngine(mode: GestureMode.mouse);
+      engine.onTouchStart([tp(100, 200)], 0);
+      engine.onTouchMove([tp(100, 260)], 16);
+      engine.onTouchEnd([], 32);
+
+      expect(events.whereType<CanvasPanEvent>(), isNotEmpty);
+      expect(events.whereType<ScrollEvent>(), isEmpty);
+      expect(events.whereType<DragStartEvent>(), isEmpty);
+    });
+
+    test('mouse mode two-finger tap is a right click', () {
+      final (engine, events) = setupEngine(mode: GestureMode.mouse);
+      engine.onTouchStart([tp(100, 200), tp(140, 200, 1)], 0);
+      engine.onTouchEnd([], 80);
+
+      expect(events.whereType<ContextEvent>(), hasLength(1));
     });
   });
 }

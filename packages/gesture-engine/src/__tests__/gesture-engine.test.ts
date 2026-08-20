@@ -242,7 +242,7 @@ describe('GestureEngine', () => {
     const events: GestureEvent[] = [];
     const callbacks: GestureCallbacks = { onGesture: (e) => events.push(e) };
     // Relative cursor movement is trackpad / Precision mode.
-    // Default `direct` mode is a left-button drag at the finger.
+    // Default `direct` mode is one-finger scroll.
     const engine = new GestureEngine(el as unknown as HTMLElement, callbacks, { mode: 'trackpad' });
 
     Object.defineProperty(el, 'getBoundingClientRect', { value: getRect, configurable: true });
@@ -277,6 +277,7 @@ describe('GestureEngine', () => {
     el.dispatchEvent(new MockTouchEvent('touchstart', { touches: [touch] }));
 
     await new Promise((r) => setTimeout(r, LONGPRESS_THRESHOLD_MS + 50));
+    el.dispatchEvent(new MockTouchEvent('touchend', { touches: [] }));
 
     const rightClicks = events.filter(
       (e) => e.type === 'mouse-click' && e.button === 'right',

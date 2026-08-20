@@ -226,18 +226,16 @@ describe('GestureEngine v2 (direct mode)', () => {
     return { el, events, engine };
   }
 
-  it('one-finger vertical pan emits a left drag (not cursor-move or scroll)', () => {
+  it('one-finger vertical pan emits scroll (not cursor-move or drag)', () => {
     const { el, events, engine } = setup();
     el.dispatchEvent(new MockTouchEvent('touchstart', [touch(200, 600)]));
     el.dispatchEvent(new MockTouchEvent('touchmove', [touch(200, 540)]));
     el.dispatchEvent(new MockTouchEvent('touchmove', [touch(200, 480)]));
     el.dispatchEvent(new MockTouchEvent('touchend', []));
 
-    expect(events.some((e) => e.type === 'drag-start')).toBe(true);
-    expect(events.some((e) => e.type === 'drag-move')).toBe(true);
-    expect(events.some((e) => e.type === 'drag-end')).toBe(true);
+    expect(events.some((e) => e.type === 'mouse-scroll')).toBe(true);
+    expect(events.some((e) => e.type === 'drag-start')).toBe(false);
     expect(events.some((e) => e.type === 'mouse-move')).toBe(false);
-    expect(events.some((e) => e.type === 'mouse-scroll')).toBe(false);
     engine.detach();
   });
 
@@ -287,7 +285,7 @@ describe('GestureEngine v2 (direct mode)', () => {
     engine.detach();
   });
 
-  it('long-press then move emits a context click followed by a drag', async () => {
+  it('long-press then move emits a drag without a context click', async () => {
     const { el, events, engine } = setup();
     el.dispatchEvent(new MockTouchEvent('touchstart', [touch(100, 200)]));
     await new Promise((r) => setTimeout(r, LONGPRESS_THRESHOLD_MS + 40));
@@ -299,7 +297,7 @@ describe('GestureEngine v2 (direct mode)', () => {
     const dragStart = events.filter((e) => e.type === 'drag-start');
     const dragMove = events.filter((e) => e.type === 'drag-move');
     const dragEnd = events.filter((e) => e.type === 'drag-end');
-    expect(context.length).toBe(1);
+    expect(context.length).toBe(0);
     expect(dragStart.length).toBe(1);
     expect(dragMove.length).toBeGreaterThanOrEqual(1);
     expect(dragEnd.length).toBe(1);
@@ -318,7 +316,7 @@ describe('GestureEngine v2 (direct mode)', () => {
     engine.detach();
   });
 
-  it('three-finger tap emits a middle click', () => {
+  it('three-finger tap does not emit a middle click', () => {
     const { el, events, engine } = setup();
     el.dispatchEvent(
       new MockTouchEvent('touchstart', [touch(100, 200), touch(150, 200), touch(200, 200)]),
@@ -326,7 +324,7 @@ describe('GestureEngine v2 (direct mode)', () => {
     el.dispatchEvent(new MockTouchEvent('touchend', []));
 
     const middle = events.filter((e) => e.type === 'mouse-click' && e.button === 'middle');
-    expect(middle.length).toBe(1);
+    expect(middle.length).toBe(0);
     engine.detach();
   });
 
@@ -346,6 +344,26 @@ describe('GestureEngine v2 (direct mode)', () => {
     el.dispatchEvent(new MockTouchEvent('touchend', []));
 
     expect(events.some((e) => e.type === 'mouse-move')).toBe(true);
+    expect(events.some((e) => e.type === 'mouse-scroll')).toBe(false);
+    engine.detach();
+  });
+
+  it('mouse mode one-finger pan emits canvas-pan, not host scroll', () => {
+    const { el } = createMockElement();
+    const events: GestureEvent[] = [];
+    const engine = new GestureEngine(
+      el as unknown as HTMLElement,
+      { onGesture: (e) => events.push(e) },
+      { mode: 'mouse' },
+    );
+    engine.setHostDimensions(1080, 1920);
+    engine.attach();
+
+    el.dispatchEvent(new MockTouchEvent('touchstart', [touch(200, 600)]));
+    el.dispatchEvent(new MockTouchEvent('touchmove', [touch(200, 500)]));
+    el.dispatchEvent(new MockTouchEvent('touchend', []));
+
+    expect(events.some((e) => e.type === 'canvas-pan')).toBe(true);
     expect(events.some((e) => e.type === 'mouse-scroll')).toBe(false);
     engine.detach();
   });

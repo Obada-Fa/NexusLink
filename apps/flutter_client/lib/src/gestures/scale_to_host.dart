@@ -76,3 +76,45 @@ enum ScaleFit {
     y: scaledY.roundToDouble().clamp(0, hostHeight),
   );
 }
+
+/// Inverse of [scaleToHost]: host pixel → view point (before canvas pan/zoom).
+({double x, double y}) hostToView(
+  double hostX,
+  double hostY,
+  double viewWidth,
+  double viewHeight,
+  double hostWidth,
+  double hostHeight, [
+  ScaleFit fit = ScaleFit.contain,
+]) {
+  if (viewWidth <= 0 || viewHeight <= 0 || hostWidth <= 0 || hostHeight <= 0) {
+    return (x: 0, y: 0);
+  }
+  if (fit == ScaleFit.fill) {
+    return (
+      x: (hostX / hostWidth) * viewWidth,
+      y: (hostY / hostHeight) * viewHeight,
+    );
+  }
+  final hostAspect = hostWidth / hostHeight;
+  final viewAspect = viewWidth / viewHeight;
+  late final double contentWidth;
+  late final double contentHeight;
+  late final double offsetX;
+  late final double offsetY;
+  if (viewAspect > hostAspect) {
+    contentHeight = viewHeight;
+    contentWidth = viewHeight * hostAspect;
+    offsetX = (viewWidth - contentWidth) / 2;
+    offsetY = 0;
+  } else {
+    contentWidth = viewWidth;
+    contentHeight = viewWidth / hostAspect;
+    offsetX = 0;
+    offsetY = (viewHeight - contentHeight) / 2;
+  }
+  return (
+    x: offsetX + (hostX / hostWidth) * contentWidth,
+    y: offsetY + (hostY / hostHeight) * contentHeight,
+  );
+}

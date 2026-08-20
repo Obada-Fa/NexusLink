@@ -1,9 +1,10 @@
 // NexusLink Gesture Engine v2
 //
 // Native-touch translation (architecture.md Module C). The default `direct`
-// mode is RustDesk-style: the finger *is* the pointer. Tap = click, one-finger
-// pan = left drag, long-press = right click, two-finger pan = scroll. The
-// legacy relative-cursor behaviour survives as `trackpad` (Precision mode).
+// mode is phone-like: tap = click, one-finger pan = scroll, long-press = right
+// click, long-press-then-move = drag, two-finger pan = scroll, pinch = zoom.
+// `mouse` pans the client canvas (RustDesk mouse mode). `trackpad` is relative
+// cursor movement (Precision).
 //
 // Public surface (`GestureEngine`, `attach`/`detach`, `setHostDimensions`,
 // `scaleToHost`, and the exported sensitivity constants) is preserved. Internals
@@ -42,7 +43,7 @@ export const PINCH_MIN_DELTA_PX = 6;
 /** Screen-px → zoom-scale factor per pinch step. */
 export const PINCH_ZOOM_SCALE = 0.005;
 
-export type GestureMode = 'direct' | 'trackpad';
+export type GestureMode = 'direct' | 'trackpad' | 'mouse';
 
 export type GestureEvent =
   | { type: 'mouse-move'; dx: number; dy: number }
@@ -52,7 +53,8 @@ export type GestureEvent =
   | { type: 'drag-start'; x: number; y: number }
   | { type: 'drag-move'; x: number; y: number }
   | { type: 'drag-end'; x: number; y: number }
-  | { type: 'zoom'; scale: number; x: number; y: number };
+  | { type: 'zoom'; scale: number; x: number; y: number }
+  | { type: 'canvas-pan'; dx: number; dy: number };
 
 export type GestureCallbacks = {
   onGesture: (event: GestureEvent) => void;
@@ -66,7 +68,7 @@ export interface FrameScheduler {
 }
 
 export interface GestureOptions {
-  /** 'direct' (default): finger-as-pointer. 'trackpad': relative cursor. */
+  /** 'direct' (default): phone scroll. 'mouse': canvas pan. 'trackpad': relative cursor. */
   mode?: GestureMode;
   /** Force relative-cursor control with reduced sensitivity (overrides mode). */
   precision?: boolean;
@@ -187,6 +189,7 @@ export class GestureEngine {
   private startPos: { x: number; y: number } | null = null;
   private startTime = 0;
   private lastPos: { x: number; y: number } | null = null;
+  private lastView: { x: number; y: number } | null = null;
   private lastTapTime = 0;
   private lastTapPos: { x: number; y: number } | null = null;
 
@@ -325,6 +328,7 @@ export class GestureEngine {
   private resetState(): void {
     this.startPos = null;
     this.lastPos = null;
+    this.lastView = null;
     this.prevScrollMid = null;
     this.prevPinchDist = 0;
     this.moveAccumDx = 0;
@@ -343,6 +347,7 @@ export class GestureEngine {
     this.startPos = host;
     this.startTime = this.now();
     this.lastPos = host;
+    this.lastView = { x: touch.clientX, y: touch.clientY };
     this.axis = 'none';
     this.scrollCarryX = 0;
     this.scrollCarryY = 0;
@@ -358,9 +363,6 @@ export class GestureEngine {
       this.longPressFired = true;
       this.clearLongPressTimer();
       this.state = 'longpress-pending';
-      if (this.startPos) {
-        this.emit({ type: 'mouse-click', button: 'right', x: this.startPos.x, y: this.startPos.y });
-      }
     }, LONGPRESS_THRESHOLD_MS);
   }
 
@@ -377,10 +379,10 @@ export class GestureEngine {
       this.state = 'pinching';
       const t0 = e.touches[0]!;
       const t1 = e.touches[1]!;
-      // Anchor + start time so a 3-finger tap (no movement) can resolve to a click.
       this.startPos = this.toHost(t0);
       this.startTime = this.now();
       this.lastPos = this.startPos;
+      this.lastView = { x: t0.clientX, y: t0.clientY };
       this.prevScrollMid = {
         x: (t0.clientX + t1.clientX) / 2,
         y: (t0.clientY + t1.clientY) / 2,
@@ -429,19 +431,21 @@ export class GestureEngine {
     const rawDx = host.x - this.lastPos.x;
     const rawDy = host.y - this.lastPos.y;
 
-    if (this.effectiveMode() === 'direct') {
-      // Native touch: one-finger pan = left-button drag at the finger.
-      // Button-down at the original aim point so a tap-then-slide still hits.
+    const mode = this.effectiveMode();
+    const lastView = this.lastView;
+    const viewDx = lastView ? touch.clientX - lastView.x : 0;
+    const viewDy = lastView ? touch.clientY - lastView.y : 0;
+
+    if (mode === 'direct') {
       if (this.dist(host, this.startPos) > TAP_MAX_MOVE_PX) {
-        if (!this.dragStarted) {
-          this.dragStarted = true;
-          this.state = 'dragging';
-          this.emit({ type: 'drag-start', x: this.startPos.x, y: this.startPos.y });
-        }
-        this.emit({ type: 'drag-move', x: host.x, y: host.y });
+        this.emitFingerScroll(viewDx, viewDy, host);
+      }
+    } else if (mode === 'mouse') {
+      if (this.dist(host, this.startPos) > TAP_MAX_MOVE_PX) {
+        this.state = 'panning';
+        this.emit({ type: 'canvas-pan', dx: viewDx, dy: viewDy });
       }
     } else {
-      // Trackpad: relative cursor movement.
       this.state = 'panning';
       const divisor = this.precision ? PRECISION_DIVISOR : 1;
       this.moveAccumDx += rawDx / divisor;
@@ -461,6 +465,27 @@ export class GestureEngine {
     }
 
     this.lastPos = host;
+    this.lastView = { x: touch.clientX, y: touch.clientY };
+  }
+
+  private emitFingerScroll(
+    viewDx: number,
+    viewDy: number,
+    host: { x: number; y: number },
+  ): void {
+    this.state = 'scrolling';
+    const sdx = -viewDx;
+    const sdy = -viewDy;
+    this.velocity.addSample(sdx, sdy, this.now());
+    this.scrollCarryX += sdx;
+    this.scrollCarryY += sdy;
+    const ix = Math.trunc(this.scrollCarryX);
+    const iy = Math.trunc(this.scrollCarryY);
+    if (ix !== 0 || iy !== 0) {
+      this.scrollCarryX -= ix;
+      this.scrollCarryY -= iy;
+      this.emit({ type: 'mouse-scroll', deltaX: ix, deltaY: iy, x: host.x, y: host.y });
+    }
   }
 
   private handleMultiMove(t0: Touch, t1: Touch): void {
@@ -521,27 +546,29 @@ export class GestureEngine {
       return;
     }
 
-    // Long press already emitted its context click; nothing more on release.
     if (this.longPressFired) {
+      if (this.startPos) {
+        this.emit({ type: 'mouse-click', button: 'right', x: this.startPos.x, y: this.startPos.y });
+      }
       this.resetState();
       return;
     }
 
-    // Three-finger tap → middle click.
-    if (this.maxTouches >= 3 && this.startPos && this.state !== 'scrolling') {
-      const moved = this.lastPos ? this.dist(this.startPos, this.lastPos) : 0;
-      const duration = this.now() - this.startTime;
-      if (isTap(duration, moved)) {
-        this.emit({ type: 'mouse-click', button: 'middle', x: this.startPos.x, y: this.startPos.y });
-        this.resetState();
-        return;
-      }
+    const moved = this.lastPos && this.startPos ? this.dist(this.startPos, this.lastPos) : 0;
+    const duration = this.startPos ? this.now() - this.startTime : 0;
+
+    if (
+      this.startPos &&
+      isTap(duration, moved) &&
+      this.maxTouches === 2 &&
+      this.effectiveMode() === 'mouse'
+    ) {
+      this.emit({ type: 'mouse-click', button: 'right', x: this.startPos.x, y: this.startPos.y });
+      this.resetState();
+      return;
     }
 
     if (this.startPos && this.state !== 'pinching') {
-      const moved = this.lastPos ? this.dist(this.startPos, this.lastPos) : 0;
-      const duration = this.now() - this.startTime;
-
       if (isTap(duration, moved) && this.maxTouches < 2) {
         const now = this.now();
         const gap = now - this.lastTapTime;
@@ -562,8 +589,7 @@ export class GestureEngine {
         return;
       }
 
-      // Two-finger scroll released with velocity → momentum fling.
-      if (this.state === 'scrolling' && this.maxTouches >= 2) {
+      if (this.state === 'scrolling') {
         this.startInertia();
       }
     }

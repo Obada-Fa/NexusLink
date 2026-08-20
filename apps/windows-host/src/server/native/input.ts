@@ -58,8 +58,29 @@ function tapVk(vk: number, up: boolean): void {
   u32.keybd_event(vk, scan, up ? KEYEVENTF_KEYUP : 0, null as never);
 }
 
+const FLUSH_MS = 8;
+
+let pendingAbs: { x: number; y: number } | null = null;
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushAbs(): void {
+  if (flushTimer != null) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  const p = pendingAbs;
+  pendingAbs = null;
+  if (p) u32.SetCursorPos(Math.round(p.x), Math.round(p.y));
+}
+
 export function mouseMoveAbs(x: number, y: number): { ok: boolean } {
-  u32.SetCursorPos(Math.round(x), Math.round(y));
+  pendingAbs = { x, y };
+  if (flushTimer == null) {
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      flushAbs();
+    }, FLUSH_MS);
+  }
   return { ok: true };
 }
 
@@ -69,7 +90,10 @@ export function mouseMove(dx: number, dy: number): { ok: boolean } {
 }
 
 function maybeMove(x?: number, y?: number): void {
-  if (typeof x === 'number' && typeof y === 'number') mouseMoveAbs(x, y);
+  if (typeof x === 'number' && typeof y === 'number') {
+    flushAbs();
+    u32.SetCursorPos(Math.round(x), Math.round(y));
+  }
 }
 
 export function mouseClick(button: string, x?: number, y?: number): { ok: boolean } {

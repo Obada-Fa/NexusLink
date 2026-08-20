@@ -133,6 +133,7 @@ export async function createAppSession(
   }).catch(() => {});
 
   broadcast({ type: 'app-session-update', session: info });
+  broadcast({ type: 'app-session-ready', sessionId: id });
   return info;
 }
 

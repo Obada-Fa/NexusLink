@@ -8,7 +8,7 @@ import {
 } from './handlers/terminal';
 import { validateToken, generateToken, handleSessionPair, validateSessionTOTP, isLocalDev, isTrustedLan, generateDevToken } from './handlers/auth';
 import { getClipboard, setClipboard } from './handlers/clipboard';
-import { getScreenMetadata, startCapture, stopCapture, stopCapturesForSocket } from './handlers/screen';
+import { getScreenMetadata, startCapture, stopCapture, stopCapturesForSocket, reportStreamStats } from './handlers/screen';
 import * as winInput from './native/input';
 import { listWindows, activateWindow, adoptWindow, releaseWindow, listApps, refreshApps, launchApp } from './native/wm';
 import { createAppSession, listAppSessions, resizeAppSession, closeAppSession, getAppSession } from './native/sessions';
@@ -326,6 +326,14 @@ export async function startRpcServer(port = 45678, hostname?: string) {
       case 'screen.getMetadata':
         result = getScreenMetadata();
         break;
+      case 'screen.reportStats':
+        reportStreamStats(
+          params.streamId as string,
+          params.fps as number,
+          params.frameAgeMs as number,
+        );
+        result = undefined;
+        break;
       case 'session.pair': {
         const pairResult = await handleSessionPair(params.publicKey as string);
         const pairingId = pairResult.totpIssuerUri.split('secret=')[1]?.split('&')[0] ?? '';
@@ -399,7 +407,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
       }
       if (url.pathname === '/signal' || url.pathname === '/rpc') {
         const isLocal = isLocalDev(req.url);
-        const address = srv.requestIP(req)?.address;
+        const address = (srv as any).requestIP?.(req)?.address;
         // @ts-expect-error Bun upgrade supports data option in runtime
         if (srv.upgrade(req, { data: { isLocal, address } })) return;
         return new Response('Upgrade failed', { status: 400 });

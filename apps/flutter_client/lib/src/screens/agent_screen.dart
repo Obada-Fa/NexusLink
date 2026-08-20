@@ -22,6 +22,7 @@ import '../state/connection.dart';
 import '../state/last_cwd.dart';
 import '../widgets/agent_activity_icon.dart';
 import '../widgets/code_block_builder.dart';
+import '../util/voice_input.dart';
 import '../widgets/link_actions.dart';
 import '../widgets/not_connected_view.dart';
 import 'cwd_picker.dart';
@@ -2535,75 +2536,80 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       );
 
   Future<void> _toggleListen() async {
-    if (!_isListening) {
-      try {
-        bool available = _speech.isAvailable;
-        if (!available) {
-          available = await _speech.initialize(
-            onStatus: (val) {
-              if (mounted) {
-                setState(() => _isListening = (val == 'listening' || val == 'recording'));
-              }
-            },
-            onError: (val) {
-              if (mounted) {
-                setState(() => _isListening = false);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text('Speech recognition error: ${val.errorMsg}'),
-                    duration: const Duration(seconds: 3),
-                  ),
-                );
-              }
-            },
-          );
-        }
-
-        if (available) {
-          _preListeningText = _input.text.isNotEmpty && !_input.text.endsWith(' ')
-              ? '${_input.text} '
-              : _input.text;
-          if (mounted) setState(() => _isListening = true);
-
-          await _speech.listen(
-            onResult: (val) {
-              if (mounted) {
-                setState(() {
-                  _input.text = '$_preListeningText${val.recognizedWords}';
-                  _input.selection = TextSelection.fromPosition(
-                    TextPosition(offset: _input.text.length),
-                  );
-                });
-              }
-            },
-            listenMode: ListenMode.dictation,
-            partialResults: true,
-            cancelOnError: true,
-            pauseFor: const Duration(seconds: 3),
-            listenFor: const Duration(seconds: 60),
-          );
-        } else {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text(
-                  'Microphone or speech recognition unavailable. Please check permissions.',
-                ),
-              ),
-            );
-          }
-        }
-      } catch (e) {
-        if (mounted) {
-          setState(() => _isListening = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to start voice input: $e')),
-          );
-        }
-      }
-    } else {
+    if (_isListening) {
       if (mounted) setState(() => _isListening = false);
       await _speech.stop();
+      return;
+    }
+
+    try {
+      var available = _speech.isAvailable;
+      if (!available) {
+        available = await _speech.initialize(
+          onStatus: (val) {
+            if (mounted) {
+              setState(() =>
+                  _isListening = (val == 'listening' || val == 'recording'));
+            }
+          },
+          onError: (val) {
+            if (!mounted) return;
+            setState(() => _isListening = false);
+            if (isBenignSpeechError(val.errorMsg)) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(speechErrorMessage(val.errorMsg)),
+                duration: const Duration(seconds: 3),
+              ),
+            );
+          },
+          options: speechInitOptions(),
+        );
+        if (available) {
+          // Google's recognizer often returns error_client if listen() races
+          // the just-created SpeechRecognizer.
+          await Future<void>.delayed(const Duration(milliseconds: 150));
+        }
+      }
+
+      if (!available) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Microphone or speech recognition unavailable. Please check permissions.',
+              ),
+            ),
+          );
+        }
+        return;
+      }
+
+      _preListeningText = _input.text.isNotEmpty && !_input.text.endsWith(' ')
+          ? '${_input.text} '
+          : _input.text;
+      if (mounted) setState(() => _isListening = true);
+
+      await _speech.listen(
+        onResult: (val) {
+          if (mounted) {
+            setState(() {
+              _input.text = '$_preListeningText${val.recognizedWords}';
+              _input.selection = TextSelection.fromPosition(
+                TextPosition(offset: _input.text.length),
+              );
+            });
+          }
+        },
+        listenOptions: speechListenOptions(),
+      );
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isListening = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to start voice input: $e')),
+        );
+      }
     }
   }
 

@@ -211,6 +211,13 @@ describe("WsMessage discriminated union narrowing", () => {
       expect(msg.data.cpuPercent).toBe(50);
     }
   });
+
+  it("narrows app-session-ready", () => {
+    const msg: WsMessage = { type: "app-session-ready", sessionId: "sess-1" };
+    if (msg.type === "app-session-ready") {
+      expect(msg.sessionId).toBe("sess-1");
+    }
+  });
 });
 
 describe("createId", () => {

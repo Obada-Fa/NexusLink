@@ -17,6 +17,7 @@ export type RpcMethod =
   | 'screen.startCapture'
   | 'screen.stopCapture'
   | 'screen.getMetadata'
+  | 'screen.reportStats'
   | 'input.mouseMove'
   | 'input.mouseClick'
   | 'input.buttonDown'
@@ -113,6 +114,8 @@ export type Params<M extends RpcMethod> =
     ? { streamId: string }
     : M extends 'screen.getMetadata'
     ? {}
+    : M extends 'screen.reportStats'
+    ? { streamId: string; fps: number; frameAgeMs: number }
     : M extends 'input.mouseMove'
     ? { dx: number; dy: number; sessionId?: string }
     : M extends 'input.mouseClick'
@@ -152,7 +155,7 @@ export type Params<M extends RpcMethod> =
     : M extends 'appSession.close'
     ? { sessionId: string }
     : M extends 'webrtc.start'
-    ? { sessionId: string; fps?: number }
+    ? { sessionId?: string; fps?: number }
     : M extends 'webrtc.signal'
     ? { webrtcId: string; data: WebRtcSignal }
     : M extends 'webrtc.stop'
@@ -251,6 +254,8 @@ export type Result<M extends RpcMethod> =
     ? void
     : M extends 'screen.getMetadata'
     ? ScreenMetadata
+    : M extends 'screen.reportStats'
+    ? void
     : M extends 'input.mouseMove'
     ? { ok: boolean }
     : M extends 'input.mouseClick'
@@ -556,6 +561,7 @@ export type WsMessage =
   | { type: 'perf-update'; data: PerfSnapshot }
   | { type: 'webrtc-signal'; webrtcId: string; data: WebRtcSignal }
   | { type: 'app-session-update'; session: AppSessionInfo }
+  | { type: 'app-session-ready'; sessionId: string }
   | { type: 'agent-session-update'; session: AgentSessionInfo }
   | { type: 'agent-session-deleted'; agentSessionId: string }
   | { type: 'agent-event'; agentSessionId: string; event: AgentEvent }

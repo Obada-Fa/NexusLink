@@ -89,17 +89,17 @@ async function waitForX(display: string, timeoutMs = 6000): Promise<void> {
   throw new Error(`virtual display ${display} did not come up`);
 }
 
-/** Openbox config: no decorations, everything maximized — apps fill the phone. */
+/** Openbox config: no decorations, fullscreen — more reliable than maximize across WMs. */
 const OPENBOX_RC = `<?xml version="1.0" encoding="UTF-8"?>
 <openbox_config xmlns="http://openbox.org/3.4/rc">
   <applications>
     <application type="normal">
       <decor>no</decor>
-      <maximized>yes</maximized>
+      <fullscreen>yes</fullscreen>
     </application>
     <application class="*">
       <decor>no</decor>
-      <maximized>yes</maximized>
+      <fullscreen>yes</fullscreen>
     </application>
   </applications>
 </openbox_config>
@@ -392,14 +392,18 @@ export async function createAppSession(
     // that made new-app sessions miss the client timeout.
     info.status = 'running';
     broadcast({ type: 'app-session-update', session: { ...info } });
-    const fillMode = profile || chromiumBin ? 'fullscreen' : 'maximize';
+    const fillMode: 'maximize' | 'fullscreen' = 'fullscreen';
     void fillSessionWindows(
       display,
       geo.width,
       geo.height,
       fillMode,
-      fillMode === 'fullscreen' ? 5000 : 2500,
-    ).then(() => scheduleRefit(session, geo.width, geo.height, fillMode));
+      5000,
+    ).then(() => {
+      if (!sessions.has(sessionId)) return;
+      broadcast({ type: 'app-session-ready', sessionId });
+      scheduleRefit(session, geo.width, geo.height, fillMode);
+    });
     return { ...info };
   } catch (err) {
     teardown(session);

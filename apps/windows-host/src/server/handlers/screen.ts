@@ -5,4 +5,5 @@ export {
   stopCapturesForSocket,
   setCaptureSend,
   getPrimaryMonitor,
+  reportStreamStats,
 } from '../native/capture';
