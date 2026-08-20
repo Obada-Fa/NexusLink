@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test';
-import { extractFrames } from '../capture';
+import { extractFrames, MjpegRing, socketBackedUp } from '../capture';
 
 const SOI = Buffer.from([0xff, 0xd8]);
 const EOI = Buffer.from([0xff, 0xd9]);
@@ -54,5 +54,34 @@ describe('extractFrames (MJPEG framing)', () => {
     const { frames } = extractFrames(Buffer.concat([junk, a, b]));
     expect(frames.length).toBe(1);
     expect(frames[0]!.equals(a)).toBe(true);
+  });
+});
+
+describe('MjpegRing', () => {
+  it('extracts complete frames without growing via concat', () => {
+    const a = fakeJpeg(0xaa);
+    const b = fakeJpeg(0xbb);
+    const ring = new MjpegRing(4096);
+    ring.append(a);
+    expect(ring.takeFrames().length).toBe(0); // incomplete until next SOI
+    ring.append(b);
+    const frames = ring.takeFrames();
+    expect(frames.length).toBe(1);
+    expect(frames[0]!.equals(a)).toBe(true);
+  });
+
+  it('survives a chunk larger than capacity by keeping the tail', () => {
+    const ring = new MjpegRing(16);
+    ring.append(Buffer.alloc(64, 0x11));
+    const frames = ring.takeFrames();
+    expect(frames.length).toBe(0);
+  });
+});
+
+describe('socketBackedUp', () => {
+  it('drops when the socket already holds more than one frame', () => {
+    const ws = { bufferedAmount: 80_000 } as unknown as WebSocket;
+    expect(socketBackedUp(ws, 40_000)).toBe(true);
+    expect(socketBackedUp({ bufferedAmount: 0 } as unknown as WebSocket, 40_000)).toBe(false);
   });
 });

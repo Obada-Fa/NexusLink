@@ -28,7 +28,7 @@ interface WebRtcStream {
   webrtcId: string;
   proc: Proc;
   ws: WebSocket;
-  sessionId: string;
+  sessionId: string | undefined;
 }
 
 const streams = new Map<string, WebRtcStream>();
@@ -59,18 +59,18 @@ export function webrtcAvailability(): { available: boolean; reason?: string } {
 }
 
 export function startWebrtc(
-  sessionId: string,
+  sessionId: string | undefined,
   fps: number,
   ws: WebSocket,
 ): { webrtcId?: string; available: boolean; reason?: string } {
   const avail = webrtcAvailability();
   if (!avail.available) return avail;
 
-  const display = getSessionDisplay(sessionId);
-  if (!display) return { available: false, reason: 'unknown app session' };
+  const display = sessionId ? getSessionDisplay(sessionId) : (process.env.DISPLAY || ':0');
+  if (!display) return { available: false, reason: sessionId ? 'unknown app session' : 'no DISPLAY' };
 
   const webrtcId = crypto.randomUUID();
-  const audioSource = getSessionAudioSource(sessionId);
+  const audioSource = sessionId ? getSessionAudioSource(sessionId) : null;
   const argv = [
     'python3', AGENT_PATH,
     '--display', display,

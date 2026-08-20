@@ -1,8 +1,7 @@
 // Dart port of the NexusLink `GestureEngine` facade
 // (packages/gesture-engine/src/index.ts).
 //
-// Native-touch translation (architecture.md Module C). Default `direct` mode
-// is RustDesk-style: the finger *is* the pointer (tap / drag / long-press).
+// Default `direct` mode is phone-like: tap / one-finger scroll / long-press.
 // The legacy relative-cursor behaviour survives as `trackpad` (Precision).
 //
 // Differences from the TS class, dictated by the Flutter environment:
@@ -48,6 +47,9 @@ class GestureEngine {
   double _viewWidth = 0;
   double _viewHeight = 0;
   ScaleFit _fit = ScaleFit.contain;
+  double _canvasPanX = 0;
+  double _canvasPanY = 0;
+  double _canvasScale = 1;
 
   // Host coordinate a fling stays anchored at (last finger position).
   double _anchorX = 0;
@@ -77,13 +79,22 @@ class GestureEngine {
     _fit = fit;
   }
 
+  /// Mouse-mode canvas pan/zoom. Applied before [scaleToHost].
+  void setCanvasTransform(double panX, double panY, [double scale = 1]) {
+    _canvasPanX = panX;
+    _canvasPanY = panY;
+    _canvasScale = scale <= 0 ? 1 : scale;
+  }
+
   GestureState get state => _classifier.state;
 
   bool get inertiaActive => _inertia.isActive;
 
   ({double x, double y}) _toHost(double viewX, double viewY) {
+    final x = (viewX - _canvasPanX) / _canvasScale;
+    final y = (viewY - _canvasPanY) / _canvasScale;
     return scaleToHost(
-        viewX, viewY, _viewWidth, _viewHeight, _hostWidth, _hostHeight, _fit);
+        x, y, _viewWidth, _viewHeight, _hostWidth, _hostHeight, _fit);
   }
 
   void onTouchStart(List<TouchPoint> touches, double timestampMs) {

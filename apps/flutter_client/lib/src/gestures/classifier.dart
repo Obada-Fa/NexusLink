@@ -61,10 +61,10 @@ const double pinchMinDeltaPx = 6;
 /// Screen-px -> zoom-scale factor per pinch step.
 const double pinchZoomScale = 0.005;
 
-/// 'direct' (default, RustDesk-style): the finger *is* the pointer. Tap =
-/// click, one-finger pan = left drag, long-press = right click, two-finger
-/// pan = scroll. 'trackpad': relative-cursor (Precision / mouse mode).
-enum GestureMode { direct, trackpad }
+/// 'direct' (default): phone-like. Tap = click, one-finger pan = scroll,
+/// long-press = right click, long-press-then-move = drag, two-finger pan =
+/// scroll. 'mouse': canvas pan + floating cursor. 'trackpad': relative cursor.
+enum GestureMode { direct, trackpad, mouse }
 
 enum Axis { none, vertical, horizontal, free }
 
@@ -206,6 +206,13 @@ final class ZoomEvent extends GestureEvent {
   const ZoomEvent(this.scale, this.x, this.y);
 }
 
+/// Client-viewport pan in mouse mode (does not move the host pointer).
+final class CanvasPanEvent extends GestureEvent {
+  final double dx;
+  final double dy;
+  const CanvasPanEvent(this.dx, this.dy);
+}
+
 /// Maps a view-space coordinate to host-space (see scale_to_host.dart).
 typedef HostMapper = ({double x, double y}) Function(
     double viewX, double viewY);
@@ -218,9 +225,9 @@ typedef GestureCallback = void Function(GestureEvent event);
 typedef FlingCallback = void Function(
     double vx, double vy, double anchorX, double anchorY, double timestampMs);
 
-/// Touch FSM: tap / double-tap / scroll / long-press context / drag / pinch /
-/// two-finger pan / three-finger tap. Faithful port of the recognizer in
-/// packages/gesture-engine/src/index.ts.
+/// Touch FSM: tap / double-tap / one-finger scroll / long-press context /
+/// long-press drag / pinch / two-finger pan. Faithful port of the recognizer
+/// in packages/gesture-engine/src/index.ts.
 class TouchClassifier {
   TouchClassifier({
     required this._toHost,
@@ -251,6 +258,7 @@ class TouchClassifier {
   ({double x, double y})? _startPos; // host px
   double _startTime = 0;
   ({double x, double y})? _lastPos; // host px
+  ({double x, double y})? _lastView; // view px
   double _lastTapTime = 0;
   ({double x, double y})? _lastTapPos;
 
@@ -283,6 +291,7 @@ class TouchClassifier {
   void _resetState() {
     _startPos = null;
     _lastPos = null;
+    _lastView = null;
     _prevScrollMid = null;
     _prevPinchDist = 0;
     _moveAccumDx = 0;
@@ -307,10 +316,6 @@ class TouchClassifier {
     _longPressFired = true;
     _longPressArmed = false;
     _state = GestureState.longPressPending;
-    final start = _startPos;
-    if (start != null) {
-      _emit(ContextEvent(start.x, start.y));
-    }
     return true;
   }
 
@@ -319,6 +324,7 @@ class TouchClassifier {
     _startPos = host;
     _startTime = timestampMs;
     _lastPos = host;
+    _lastView = (x: touch.x, y: touch.y);
     _scrollCarryX = 0;
     _scrollCarryY = 0;
     _moveAccumDx = 0;
@@ -341,11 +347,10 @@ class TouchClassifier {
       _state = GestureState.pinching;
       final t0 = touches[0];
       final t1 = touches[1];
-      // Anchor + start time so a 3-finger tap (no movement) can resolve to a
-      // click.
       _startPos = _toHost(t0.x, t0.y);
       _startTime = timestampMs;
       _lastPos = _startPos;
+      _lastView = (x: t0.x, y: t0.y);
       _prevScrollMid = (x: (t0.x + t1.x) / 2, y: (t0.y + t1.y) / 2);
       final dx = t0.x - t1.x;
       final dy = t0.y - t1.y;
@@ -396,20 +401,20 @@ class TouchClassifier {
 
     final rawDx = host.x - last.x;
     final rawDy = host.y - last.y;
+    final lastView = _lastView;
+    final viewDx = lastView != null ? touch.x - lastView.x : 0.0;
+    final viewDy = lastView != null ? touch.y - lastView.y : 0.0;
 
     if (_effectiveMode == GestureMode.direct) {
-      // Native touch: one-finger pan = left-button drag at the finger.
-      // Button-down at the original aim point so a tap-then-slide still hits.
       if (_dist(host, start) > tapMaxMovePx) {
-        if (!_dragStarted) {
-          _dragStarted = true;
-          _state = GestureState.dragging;
-          _emit(DragStartEvent(start.x, start.y));
-        }
-        _emit(DragMoveEvent(host.x, host.y));
+        _emitFingerScroll(viewDx, viewDy, host, timestampMs);
+      }
+    } else if (_effectiveMode == GestureMode.mouse) {
+      if (_dist(host, start) > tapMaxMovePx) {
+        _state = GestureState.panning;
+        _emit(CanvasPanEvent(viewDx, viewDy));
       }
     } else {
-      // Trackpad: relative cursor movement.
       _state = GestureState.panning;
       final divisor = precision ? precisionDivisor : 1;
       _moveAccumDx += rawDx / divisor;
@@ -427,6 +432,28 @@ class TouchClassifier {
     }
 
     _lastPos = host;
+    _lastView = (x: touch.x, y: touch.y);
+  }
+
+  void _emitFingerScroll(
+    double viewDx,
+    double viewDy,
+    ({double x, double y}) host,
+    double timestampMs,
+  ) {
+    _state = GestureState.scrolling;
+    final sdx = -viewDx;
+    final sdy = -viewDy;
+    _velocity.addSample(sdx, sdy, timestampMs);
+    _scrollCarryX += sdx;
+    _scrollCarryY += sdy;
+    final ix = _scrollCarryX.truncate();
+    final iy = _scrollCarryY.truncate();
+    if (ix != 0 || iy != 0) {
+      _scrollCarryX -= ix;
+      _scrollCarryY -= iy;
+      _emit(ScrollEvent(ix, iy, host.x, host.y));
+    }
   }
 
   void _handleMultiMove(TouchPoint t0, TouchPoint t1, double timestampMs) {
@@ -500,29 +527,28 @@ class TouchClassifier {
       return;
     }
 
-    // Long press already emitted its context click; nothing more on release.
+    // Long-press held still: right click on release (move-after-hold is a drag).
     if (_longPressFired) {
+      final start = _startPos;
+      if (start != null) _emit(ContextEvent(start.x, start.y));
       _resetState();
       return;
     }
 
     final start = _startPos;
+    final moved = start != null && _lastPos != null ? _dist(start, _lastPos!) : 0.0;
+    final duration = timestampMs - _startTime;
 
-    // Three-finger tap -> middle click.
-    if (_maxTouches >= 3 && start != null && _state != GestureState.scrolling) {
-      final moved = _lastPos != null ? _dist(start, _lastPos!) : 0.0;
-      final duration = timestampMs - _startTime;
-      if (isTap(duration, moved)) {
-        _emit(MiddleClickEvent(start.x, start.y));
-        _resetState();
-        return;
-      }
+    if (start != null &&
+        isTap(duration, moved) &&
+        _maxTouches == 2 &&
+        _effectiveMode == GestureMode.mouse) {
+      _emit(ContextEvent(start.x, start.y));
+      _resetState();
+      return;
     }
 
     if (start != null && _state != GestureState.pinching) {
-      final moved = _lastPos != null ? _dist(start, _lastPos!) : 0.0;
-      final duration = timestampMs - _startTime;
-
       if (isTap(duration, moved) && _maxTouches < 2) {
         final gap = timestampMs - _lastTapTime;
         final tapDist =
@@ -543,9 +569,7 @@ class TouchClassifier {
         return;
       }
 
-      // Two-finger scroll released with velocity -> momentum fling.
       if (_state == GestureState.scrolling &&
-          _maxTouches >= 2 &&
           timestampMs - _velocity.lastSampleTimeMs <= flingMaxSampleAgeMs) {
         _onFlingStart?.call(
           _velocity.vx,

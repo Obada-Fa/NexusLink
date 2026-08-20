@@ -60,6 +60,8 @@ export class WireMapper {
         return { kind: 'drag.end', x: ev.x, y: ev.y, seq, t };
       case 'zoom':
         return { kind: 'zoom.delta', scale: ev.scale, cx: ev.x, cy: ev.y, seq, t };
+      case 'canvas-pan':
+        return null;
       default:
         return null;
     }
