@@ -1402,8 +1402,28 @@ export function formatCursorToolInput(name: string, args: unknown): string {
   if (tool === 'task') {
     return pickToolString(a, 'description', 'prompt');
   }
+  if (
+    tool === 'createplan' ||
+    tool === 'create_plan' ||
+    tool === 'setplan' ||
+    tool === 'set_plan' ||
+    tool === 'updateplan' ||
+    tool === 'writeplan' ||
+    tool === 'plan'
+  ) {
+    const path = pickToolString(a, 'path', 'filePath', 'planPath', 'target_file', 'targetFile', 'file');
+    if (path) return path;
+    const title = pickToolString(a, 'title', 'description', 'prompt');
+    if (title) return title;
+    const plan = pickToolString(a, 'plan', 'content', 'text');
+    if (plan) {
+      const firstLine = plan.split('\n').find((l) => l.trim().length > 0) || '';
+      return firstLine.replace(/^[#\s*-]+/, '').trim() || 'Implementation plan';
+    }
+    return 'Implementation plan';
+  }
 
-  for (const key of ['command', 'path', 'query', 'pattern', 'url', 'description', 'prompt']) {
+  for (const key of ['command', 'path', 'query', 'pattern', 'url', 'description', 'prompt', 'plan', 'title']) {
     const text = pickToolString(a, key);
     if (text) return text;
   }
@@ -1445,6 +1465,19 @@ export function formatCursorToolOutput(name: string, result: unknown): string {
   if (tool === 'read') {
     const content = bag.content ?? bag.text;
     if (typeof content === 'string' && content.trim()) return content.slice(0, 2000);
+  }
+
+  if (
+    tool === 'createplan' ||
+    tool === 'create_plan' ||
+    tool === 'setplan' ||
+    tool === 'set_plan' ||
+    tool === 'updateplan' ||
+    tool === 'writeplan' ||
+    tool === 'plan'
+  ) {
+    const text = pickToolString(bag, 'plan', 'output', 'text', 'content', 'message', 'result');
+    if (text) return text.slice(0, 2000);
   }
 
   if (tool === 'write' || tool === 'edit' || tool === 'delete') {
@@ -1514,10 +1547,17 @@ export function parseCursorStreamEvent(msg: Record<string, unknown>): AgentDelta
     const meta = describeCursorToolCall(msg.tool_call ?? msg);
     const refId = normalizeToolRefId(String(msg.call_id ?? msg.id ?? ''));
     if (subtype === 'started' || subtype === 'start') {
+      let toolInput = formatCursorToolInput(meta.name, meta.args).slice(0, 500);
+      if (meta.args && typeof meta.args === 'object' && Object.keys(meta.args as Record<string, unknown>).length > 0) {
+        const isPlanOrFile = /plan|write|edit|file/i.test(meta.name);
+        if (isPlanOrFile) {
+          toolInput = JSON.stringify(meta.args, null, 2).slice(0, 4000);
+        }
+      }
       return [{
         kind: 'tool-start',
         toolName: meta.name,
-        toolInput: formatCursorToolInput(meta.name, meta.args).slice(0, 500),
+        toolInput,
         refId,
       }];
     }

@@ -6,6 +6,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
@@ -13,6 +14,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:speech_to_text/speech_recognition_error.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
 import '../rpc/models.dart';
@@ -23,6 +25,7 @@ import '../state/connection.dart';
 import '../state/last_cwd.dart';
 import '../widgets/agent_activity_icon.dart';
 import '../widgets/code_block_builder.dart';
+import '../widgets/file_viewer_modal.dart';
 import '../util/voice_input.dart';
 import '../widgets/link_actions.dart';
 import '../widgets/not_connected_view.dart';
@@ -70,6 +73,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   String? _error;
   final SpeechToText _speech = SpeechToText();
   bool _isListening = false;
+  bool _userWantsListen = false;
+  bool _listenStarting = false;
+  bool _listenSessionWasActive = false;
+  int _listenGen = 0;
   String _preListeningText = '';
   final _unsubs = <void Function()>[];
   RpcClient? _boundClient;
@@ -1579,6 +1586,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       u();
     }
     _unsubs.clear();
+    _userWantsListen = false;
+    _listenGen++;
     _speech.stop();
     _input.dispose();
     _scroll.dispose();
@@ -2264,9 +2273,29 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
   }
 
+  void _openToolFile(ToolFileInfo info) {
+    final client = _client;
+    if (client == null) return;
+    showFileViewerModal(
+      context: context,
+      client: client,
+      filePath: info.filePath,
+      rawContent: info.rawContent,
+      title: info.title,
+      subtitle: info.subtitle ?? info.filePath,
+      isPlan: info.isPlan,
+    );
+  }
+
   Widget _toolGroup(List<AgentEvent> tools) {
     final running = toolGroupRunning(tools);
     final summary = toolGroupSummary(tools);
+    final planEvent = tools.where((t) {
+      final info = extractToolFileInfo(t);
+      return info?.isPlan == true;
+    }).firstOrNull;
+    final planInfo = planEvent != null ? extractToolFileInfo(planEvent) : null;
+
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4),
       decoration: BoxDecoration(
@@ -2289,11 +2318,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   size: 18,
                 )
               : Icon(
-                  running ? Icons.hourglass_top : Icons.check_circle_outline,
+                  running
+                      ? Icons.hourglass_top
+                      : (planInfo != null ? Icons.assignment_turned_in_outlined : Icons.check_circle_outline),
                   size: 18,
                   color: running
                       ? const Color(0xFFF0C040)
-                      : const Color(0xFF4ADE80),
+                      : (planInfo != null ? const Color(0xFFC084FC) : const Color(0xFF4ADE80)),
                 ),
           title: Text(
             toolGroupTitle(tools),
@@ -2305,7 +2336,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   summary,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 11, color: Colors.white54),
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: planInfo != null ? const Color(0xFFC084FC).withOpacity(0.85) : Colors.white54,
+                  ),
                 ),
           trailing: running
               ? IconButton(
@@ -2313,7 +2347,44 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   icon: const Icon(Icons.stop, size: 20),
                   onPressed: _cancel,
                 )
-              : null,
+              : (planInfo != null && _client != null)
+                  ? Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        InkWell(
+                          onTap: () => _openToolFile(planInfo),
+                          borderRadius: BorderRadius.circular(6),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF9F54FF).withOpacity(0.18),
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(
+                                color: const Color(0xFF9F54FF).withOpacity(0.5),
+                              ),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.assignment_outlined, size: 12, color: Color(0xFFC084FC)),
+                                SizedBox(width: 4),
+                                Text(
+                                  'View plan',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: Color(0xFFC084FC),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        const Icon(Icons.expand_more, size: 20, color: Colors.white54),
+                      ],
+                    )
+                  : null,
           children: [
             for (final e in tools)
               _toolCard(e, running: e.kind == 'tool-start', nested: true),
@@ -2326,63 +2397,150 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   Widget _toolCard(AgentEvent e, {required bool running, bool nested = false}) {
     final detail = (e.toolInput ?? '').trim();
     final output = (e.toolOutput ?? '').trim();
-    final showDetail = detail.isNotEmpty && detail != (e.toolName ?? '');
+    final fileInfo = extractToolFileInfo(e);
+    final isPlan = fileInfo?.isPlan == true;
+    final isFile = fileInfo != null && !isPlan && (fileInfo.filePath != null || fileInfo.rawContent != null);
+    final canOpen = !running && fileInfo != null && _client != null;
+
+    final displayName = fileInfo != null
+        ? (isPlan
+            ? (fileInfo.title.isNotEmpty && fileInfo.title != 'Plan' ? fileInfo.title : 'Implementation Plan')
+            : fileInfo.title)
+        : (e.toolName ?? 'tool');
+
+    String? displaySubtitle;
+    if (fileInfo != null && isPlan) {
+      if (fileInfo.subtitle != null && fileInfo.subtitle!.isNotEmpty && fileInfo.subtitle != 'Agent Plan') {
+        displaySubtitle = fileInfo.subtitle;
+      } else if (detail.isNotEmpty && detail != (e.toolName ?? '') && !detail.startsWith('{')) {
+        displaySubtitle = detail;
+      } else if (fileInfo.rawContent != null) {
+        final firstLine = fileInfo.rawContent!.split('\n').firstWhere((l) => l.trim().isNotEmpty, orElse: () => '');
+        displaySubtitle = firstLine.replaceFirst(RegExp(r'^[#\s*-]+'), '').trim();
+      }
+    } else {
+      if (detail.isNotEmpty && detail != (e.toolName ?? '')) {
+        displaySubtitle = detail;
+      }
+    }
+
+    final showDetail = displaySubtitle != null && displaySubtitle.trim().isNotEmpty;
+
     return SelectionArea(
-      child: Container(
-        margin: EdgeInsets.symmetric(vertical: nested ? 3 : 2),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        decoration: BoxDecoration(
-          color: nested ? _appBackgroundColor(_active?.agent) : _panelBackgroundColor(_active?.agent),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: canOpen ? () => _openToolFile(fileInfo) : null,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: _borderColor(_active?.agent)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+          child: Container(
+            margin: EdgeInsets.symmetric(vertical: nested ? 3 : 2),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: nested
+                  ? (isPlan ? const Color(0xFF1E1333) : _appBackgroundColor(_active?.agent))
+                  : _panelBackgroundColor(_active?.agent),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(
+                color: isPlan
+                    ? const Color(0xFF9F54FF).withOpacity(0.4)
+                    : _borderColor(_active?.agent),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(running ? Icons.play_arrow : Icons.check,
-                    size: 14,
-                    color: running
-                        ? const Color(0xFFF0C040)
-                        : const Color(0xFF4ADE80)),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    e.toolName ?? 'tool',
-                    style: const TextStyle(
-                        fontWeight: FontWeight.w600, fontSize: 12),
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                Row(
+                  children: [
+                    Icon(
+                      running
+                          ? Icons.play_arrow
+                          : (isPlan
+                              ? Icons.assignment_outlined
+                              : (isFile ? Icons.description_outlined : Icons.check)),
+                      size: 14,
+                      color: running
+                          ? const Color(0xFFF0C040)
+                          : (isPlan
+                              ? const Color(0xFFC084FC)
+                              : (isFile ? const Color(0xFF93C5FD) : const Color(0xFF4ADE80))),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        displayName,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 12,
+                          color: isPlan ? const Color(0xFFE9D5FF) : Colors.white,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (canOpen) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: (isPlan ? const Color(0xFF9F54FF) : const Color(0xFF38BDF8)).withOpacity(0.18),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: (isPlan ? const Color(0xFF9F54FF) : const Color(0xFF38BDF8)).withOpacity(0.4),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              isPlan ? Icons.assignment_outlined : Icons.description_outlined,
+                              size: 11,
+                              color: isPlan ? const Color(0xFFC084FC) : const Color(0xFF93C5FD),
+                            ),
+                            const SizedBox(width: 3),
+                            Text(
+                              isPlan ? 'View plan' : 'View file',
+                              style: TextStyle(
+                                fontSize: 10.5,
+                                fontWeight: FontWeight.w600,
+                                color: isPlan ? const Color(0xFFC084FC) : const Color(0xFF93C5FD),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
+                if (showDetail)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4, left: 20),
+                    child: Text(
+                      displaySubtitle,
+                      maxLines: isPlan ? 3 : 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: isPlan ? const Color(0xFFD8B4FE).withOpacity(0.8) : Colors.white54,
+                      ),
+                    ),
+                  ),
+                if (!running && output.isNotEmpty && !isPlan)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4, left: 20),
+                    child: Text(
+                      output,
+                      maxLines: _looksLikeDiff(output) ? 12 : 4,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontFamily: _looksLikeDiff(output) ? 'monospace' : null,
+                          fontSize: 11,
+                          color: _looksLikeDiff(output)
+                              ? const Color(0xFF93C5FD)
+                              : const Color(0xFF6EE7B7)),
+                    ),
+                  ),
               ],
             ),
-            if (showDetail)
-              Padding(
-                padding: const EdgeInsets.only(top: 4, left: 20),
-                child: Text(
-                  detail,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 11, color: Colors.white54),
-                ),
-              ),
-            if (!running && output.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 4, left: 20),
-                child: Text(
-                  output,
-                  maxLines: _looksLikeDiff(output) ? 12 : 4,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                      fontFamily: _looksLikeDiff(output) ? 'monospace' : null,
-                      fontSize: 11,
-                      color: _looksLikeDiff(output)
-                          ? const Color(0xFF93C5FD)
-                          : const Color(0xFF6EE7B7)),
-                ),
-              ),
-          ],
+          ),
         ),
       ),
     );
@@ -2567,10 +2725,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   Future<bool> _ensureMicPermission() async {
     var status = await Permission.microphone.status;
     if (status.isGranted) return true;
-    if (status.isPermanentlyDenied) {
-      _showMicPermissionSnack(openSettings: true);
-      return false;
-    }
     status = await Permission.microphone.request();
     if (status.isGranted) return true;
     _showMicPermissionSnack(openSettings: status.isPermanentlyDenied);
@@ -2578,38 +2732,89 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   Future<void> _toggleListen() async {
-    if (_isListening) {
-      if (mounted) setState(() => _isListening = false);
-      await _speech.stop();
+    if (_userWantsListen || _isListening) {
+      await _stopListen();
       return;
     }
+    await _startListen();
+  }
 
+  Future<void> _stopListen() async {
+    _userWantsListen = false;
+    _listenGen++;
+    _listenStarting = false;
+    _listenSessionWasActive = false;
+    if (mounted) setState(() => _isListening = false);
+    await _speech.stop();
+  }
+
+  void _scheduleListenRestart() {
+    if (!_userWantsListen || _listenStarting) return;
+    _listenStarting = true;
+    unawaited(_listenSession(restart: true));
+  }
+
+  void _onSpeechStatus(String status) {
+    if (!mounted) return;
+    if (isSpeechStatusListening(status)) {
+      _listenSessionWasActive = true;
+    }
+    if (shouldRestartListen(
+      userWantsListen: _userWantsListen,
+      sessionWasActive: _listenSessionWasActive,
+      status: status,
+    )) {
+      _scheduleListenRestart();
+    }
+  }
+
+  void _onSpeechError(SpeechRecognitionError val) {
+    if (!mounted) return;
+    final errorMsg = val.errorMsg;
+    if (shouldRestartListen(
+      userWantsListen: _userWantsListen,
+      sessionWasActive: _listenSessionWasActive,
+      errorMsg: errorMsg,
+    )) {
+      _scheduleListenRestart();
+      return;
+    }
+    if (isBenignSpeechError(errorMsg)) return;
+    unawaited(_stopListen());
+    if (errorMsg == 'error_permission' ||
+        errorMsg == 'error_insufficient_permissions') {
+      Permission.microphone.isGranted.then((appGranted) {
+        if (!mounted) return;
+        if (appGranted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(speechServicePermissionErrorMessage),
+              duration: Duration(seconds: 5),
+            ),
+          );
+        } else {
+          _showMicPermissionSnack(openSettings: true);
+        }
+      });
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(speechErrorMessage(errorMsg)),
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
+  Future<void> _startListen() async {
     if (!await _ensureMicPermission()) return;
 
     try {
       // Always initialize: first tap requests the mic, later taps reuse it.
       final available = await _speech.initialize(
-        onStatus: (val) {
-          if (mounted) {
-            setState(() => _isListening = isSpeechStatusListening(val));
-          }
-        },
-        onError: (val) {
-          if (!mounted) return;
-          setState(() => _isListening = false);
-          if (isBenignSpeechError(val.errorMsg)) return;
-          if (val.errorMsg == 'error_permission' ||
-              val.errorMsg == 'error_insufficient_permissions') {
-            _showMicPermissionSnack(openSettings: true);
-            return;
-          }
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(speechErrorMessage(val.errorMsg)),
-              duration: const Duration(seconds: 3),
-            ),
-          );
-        },
+        onStatus: _onSpeechStatus,
+        onError: _onSpeechError,
+        debugLogging: kDebugMode,
         options: speechInitOptions(),
       );
 
@@ -2628,45 +2833,98 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
       if (!await _speech.hasPermission) {
         if (mounted) {
+          final appGranted = await Permission.microphone.isGranted;
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(speechErrorMessage('error_permission'))),
+            SnackBar(
+              content: Text(
+                appGranted
+                    ? speechServicePermissionErrorMessage
+                    : speechErrorMessage('error_permission'),
+              ),
+              action: appGranted
+                  ? null
+                  : SnackBarAction(
+                      label: 'Settings',
+                      onPressed: openAppSettings,
+                    ),
+              duration: const Duration(seconds: 5),
+            ),
           );
         }
         return;
       }
 
-      // Google's recognizer often returns error_client if listen() races
-      // the just-created SpeechRecognizer.
-      await Future<void>.delayed(const Duration(milliseconds: 150));
-
+      _userWantsListen = true;
+      _listenSessionWasActive = false;
       _preListeningText = _input.text.isNotEmpty && !_input.text.endsWith(' ')
           ? '${_input.text} '
           : _input.text;
-
-      await _speech.listen(
-        onResult: (val) {
-          if (mounted) {
-            setState(() {
-              _input.text = '$_preListeningText${val.recognizedWords}';
-              _input.selection = TextSelection.fromPosition(
-                TextPosition(offset: _input.text.length),
-              );
-            });
-          }
-        },
-        localeId: speechLocaleId(Localizations.localeOf(context)),
-        listenOptions: speechListenOptions(),
-      );
-      if (mounted) {
-        setState(() => _isListening = _speech.isListening);
-      }
+      if (mounted) setState(() => _isListening = true);
+      _listenStarting = true;
+      await _listenSession(restart: false);
     } catch (e) {
+      _userWantsListen = false;
+      _listenStarting = false;
       if (mounted) {
         setState(() => _isListening = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Failed to start voice input: $e')),
         );
       }
+    }
+  }
+
+  Future<void> _listenSession({required bool restart}) async {
+    final gen = ++_listenGen;
+    _listenStarting = true;
+    try {
+      // Google's recognizer often returns error_client if listen() races
+      // the just-created SpeechRecognizer.
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      if (!mounted || !_userWantsListen || gen != _listenGen) return;
+      if (restart && _speech.isListening) {
+        await _speech.stop();
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        if (!mounted || !_userWantsListen || gen != _listenGen) return;
+      }
+
+      await _speech.listen(
+        onResult: (val) {
+          if (!mounted || !_userWantsListen) return;
+          setState(() {
+            _input.text = '$_preListeningText${val.recognizedWords}';
+            _input.selection = TextSelection.fromPosition(
+              TextPosition(offset: _input.text.length),
+            );
+            if (val.finalResult) {
+              _preListeningText =
+                  commitSpeechPrefix(_preListeningText, val.recognizedWords);
+            }
+          });
+        },
+        localeId: speechLocaleId(Localizations.localeOf(context)),
+        listenOptions: speechListenOptions(),
+      );
+      if (!mounted || gen != _listenGen) return;
+      _listenSessionWasActive = true;
+      setState(() => _isListening = _userWantsListen);
+    } catch (e) {
+      if (gen != _listenGen) return;
+      _userWantsListen = false;
+      if (mounted) {
+        setState(() => _isListening = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              restart
+                  ? 'Voice input stopped: $e'
+                  : 'Failed to start voice input: $e',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (gen == _listenGen) _listenStarting = false;
     }
   }
 
@@ -2781,7 +3039,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                         tooltip: _isListening ? 'Stop listening' : 'Voice to text',
                         onPressed: _toggleListen,
                         icon: Icon(
-                          Icons.mic,
+                          _isListening ? Icons.stop_circle : Icons.mic,
                           color: _isListening ? Colors.red : Colors.white70,
                         ),
                       ),

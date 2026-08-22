@@ -572,9 +572,24 @@ describe('CLI stream parsers', () => {
     expect(formatCursorToolOutput('readLints', { totalDiagnostics: 0, fileDiagnostics: [] })).toBe(
       '',
     );
-    expect(formatCursorToolOutput('shell', { success: { stdout: 'ok\n', exitCode: 0 } })).toBe(
-      'ok',
+    expect(formatCursorToolInput('createPlan', { plan: '# Implementation Plan\n\n1. Step 1' })).toBe(
+      'Implementation Plan',
     );
+    expect(formatCursorToolInput('createPlan', { path: '/tmp/PLAN.md' })).toBe('/tmp/PLAN.md');
+    expect(formatCursorToolOutput('createPlan', { plan: '# Done plan' })).toBe('# Done plan');
+
+    const planEvent = parseCursorStreamEvent({
+      type: 'tool_call',
+      subtype: 'started',
+      call_id: 'tool_plan_1',
+      tool_call: { createPlanToolCall: { args: { plan: '# Voice Mode Plan' } } },
+    });
+    expect(planEvent[0]).toMatchObject({
+      kind: 'tool-start',
+      toolName: 'createPlan',
+      refId: 'tool_plan_1',
+    });
+    expect(planEvent[0]!.toolInput).toContain('Voice Mode Plan');
 
     expect(
       withoutDuplicateResult({ kind: 'result', text: "I'll read README.mdDone." }, true),

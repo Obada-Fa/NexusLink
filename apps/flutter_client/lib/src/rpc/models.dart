@@ -1,6 +1,8 @@
 // Dart mirrors of the RPC result types in packages/rpc-types/src/index.ts.
 // Only the fields the client actually renders are modeled.
 
+import 'dart:convert';
+
 class WindowInfo {
   final String windowId;
   final String title;
@@ -579,16 +581,191 @@ String toolGroupTitle(List<AgentEvent> tools) {
 }
 
 String _friendlyToolName(String name) {
-  final l = name.toLowerCase();
-  if (l == 'glob' || l == 'grep' || l == 'search' || l == 'glob_file_search' || l == 'find_by_name' || l == 'grep_search') return 'Searching codebase';
-  if (l == 'read' || l == 'readlints' || l == 'view_file' || l == 'read_file') return 'Reading files';
-  if (l == 'write' || l == 'edit' || l == 'replace' || l == 'edit_file' || l == 'replace_file_content' || l == 'write_to_file') return 'Editing files';
-  if (l == 'shell' || l == 'bash' || l == 'run_command' || l == 'task' || l == 'cmd') return 'Running command';
-  if (l == 'list' || l == 'ls' || l == 'list_dir') return 'Exploring folders';
-  if (l == 'webfetch' || l == 'fetch' || l == 'read_url_content' || l == 'search_web') return 'Browsing web';
-  if (l == 'ask_question' || l == 'askquestion') return 'Asking a question';
-  if (l == 'invoke_subagent' || l == 'manage_subagents' || l == 'send_message') return 'Coordinating agents';
+  final l = name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+  if (l.contains('plan') || l == 'createroadmap' || l == 'settask' || l == 'todowrite') return 'Creating plan';
+  if (l == 'glob' || l == 'grep' || l == 'search' || l == 'globfilesearch' || l == 'findbyname' || l == 'grepsearch') return 'Searching codebase';
+  if (l == 'read' || l == 'readlints' || l == 'viewfile' || l == 'readfile') return 'Reading files';
+  if (l == 'write' || l == 'edit' || l == 'replace' || l == 'editfile' || l == 'replacefilecontent' || l == 'writetofile' || l == 'writefile') return 'Editing files';
+  if (l == 'shell' || l == 'bash' || l == 'runcommand' || l == 'task' || l == 'cmd') return 'Running command';
+  if (l == 'list' || l == 'ls' || l == 'listdir') return 'Exploring folders';
+  if (l == 'webfetch' || l == 'fetch' || l == 'readurlcontent' || l == 'searchweb') return 'Browsing web';
+  if (l == 'askquestion' || l == 'askuser') return 'Asking a question';
+  if (l == 'invokesubagent' || l == 'managesubagents' || l == 'sendmessage') return 'Coordinating agents';
   return name;
+}
+
+class ToolFileInfo {
+  final String? filePath;
+  final String? rawContent;
+  final String title;
+  final String? subtitle;
+  final bool isPlan;
+  final String? diff;
+
+  const ToolFileInfo({
+    this.filePath,
+    this.rawContent,
+    required this.title,
+    this.subtitle,
+    this.isPlan = false,
+    this.diff,
+  });
+}
+
+ToolFileInfo? extractToolFileInfo(AgentEvent e) {
+  final name = (e.toolName ?? '').trim();
+  if (name.isEmpty) return null;
+  final norm = name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+
+  final isPlan = norm.contains('plan') ||
+      norm == 'createroadmap' ||
+      norm == 'settask' ||
+      norm == 'todowrite';
+
+  final isFile = norm == 'write' ||
+      norm == 'read' ||
+      norm == 'edit' ||
+      norm == 'viewfile' ||
+      norm == 'readfile' ||
+      norm == 'writefile' ||
+      norm == 'writetofile' ||
+      norm == 'replacefilecontent' ||
+      norm == 'editfile';
+
+  Map<String, dynamic>? inputMap;
+  if ((e.toolInput ?? '').trim().isNotEmpty) {
+    try {
+      final decoded = jsonDecode(e.toolInput!);
+      if (decoded is Map) {
+        inputMap = Map<String, dynamic>.from(decoded);
+      }
+    } catch (_) {}
+  }
+
+  Map<String, dynamic>? outputMap;
+  if ((e.toolOutput ?? '').trim().isNotEmpty) {
+    try {
+      final decoded = jsonDecode(e.toolOutput!);
+      if (decoded is Map) {
+        outputMap = Map<String, dynamic>.from(decoded);
+      }
+    } catch (_) {}
+  }
+
+  String? filePath;
+  String? rawContent;
+  String? title;
+  String? subtitle;
+
+  if (inputMap != null) {
+    final rawPath = inputMap['path'] ??
+        inputMap['filePath'] ??
+        inputMap['filepath'] ??
+        inputMap['target_file'] ??
+        inputMap['targetFile'] ??
+        inputMap['TargetFile'] ??
+        inputMap['AbsolutePath'] ??
+        inputMap['absolute_path'] ??
+        inputMap['planPath'] ??
+        inputMap['plan_path'] ??
+        inputMap['file'] ??
+        inputMap['destination'] ??
+        inputMap['Destination'];
+    if (rawPath != null && '$rawPath'.trim().isNotEmpty) {
+      filePath = '$rawPath'.trim();
+    }
+
+    final rawTitle = inputMap['title'] ??
+        inputMap['name'] ??
+        inputMap['Summary'] ??
+        inputMap['description'];
+    if (rawTitle != null && '$rawTitle'.trim().isNotEmpty) {
+      title = '$rawTitle'.trim();
+    }
+
+    final rawText = inputMap['plan'] ??
+        inputMap['CodeContent'] ??
+        inputMap['code_content'] ??
+        inputMap['content'] ??
+        inputMap['markdown'] ??
+        inputMap['text'] ??
+        inputMap['ReplacementContent'];
+    if (rawText != null && '$rawText'.trim().isNotEmpty) {
+      rawContent = '$rawText'.trim();
+    }
+
+    final steps = inputMap['steps'] ?? inputMap['todos'] ?? inputMap['tasks'];
+    if (steps is List && steps.isNotEmpty && rawContent == null) {
+      final buf = StringBuffer('# ${title ?? "Implementation Plan"}\n\n');
+      for (final s in steps) {
+        if (s is Map) {
+          final st = s['title'] ?? s['name'] ?? s['description'] ?? s['step'] ?? '';
+          final sd = s['description'] ?? s['details'] ?? '';
+          final status = '${s['status'] ?? ''}'.toLowerCase();
+          final done = status == 'done' || status == 'completed' || s['completed'] == true;
+          buf.writeln('- [${done ? "x" : " "}] **$st**${sd.isNotEmpty && sd != st ? "\n  $sd" : ""}');
+        } else {
+          buf.writeln('- [ ] $s');
+        }
+      }
+      rawContent = buf.toString();
+    }
+  }
+
+  if (outputMap != null) {
+    if (filePath == null) {
+      final rawPath = outputMap['path'] ?? outputMap['filePath'] ?? outputMap['targetFile'];
+      if (rawPath != null && '$rawPath'.trim().isNotEmpty) filePath = '$rawPath'.trim();
+    }
+    if (rawContent == null) {
+      final rawText = outputMap['plan'] ?? outputMap['content'] ?? outputMap['text'] ?? outputMap['result'];
+      if (rawText != null && '$rawText'.trim().isNotEmpty) rawContent = '$rawText'.trim();
+    }
+  }
+
+  final inputStr = (e.toolInput ?? '').trim();
+  final outputStr = (e.toolOutput ?? '').trim();
+
+  if (filePath == null && (inputStr.startsWith('/') || inputStr.startsWith('~/') || inputStr.startsWith('./') || inputStr.startsWith('file://'))) {
+    filePath = inputStr;
+  }
+
+  if (rawContent == null) {
+    if (isPlan) {
+      if (inputStr.isNotEmpty && inputStr != name && !inputStr.startsWith('{')) {
+        rawContent = inputStr.startsWith('#') ? inputStr : '# ${title ?? "Plan"}\n\n$inputStr';
+      } else if (outputStr.isNotEmpty && !outputStr.startsWith('{')) {
+        rawContent = outputStr.startsWith('#') ? outputStr : '# ${title ?? "Plan"}\n\n$outputStr';
+      }
+    }
+  }
+
+  if (isPlan) {
+    title ??= 'Plan';
+    subtitle ??= filePath ?? 'Agent Plan';
+    rawContent ??= '# Plan\n\nPlan created by $name.';
+    return ToolFileInfo(
+      filePath: filePath,
+      rawContent: rawContent,
+      title: title,
+      subtitle: subtitle,
+      isPlan: true,
+    );
+  }
+
+  if (filePath != null || isFile || (rawContent != null && rawContent.isNotEmpty)) {
+    final cleanPath = filePath ?? '';
+    final nameTitle = cleanPath.isNotEmpty ? cleanPath.split('/').last : name;
+    return ToolFileInfo(
+      filePath: filePath,
+      rawContent: rawContent,
+      title: title ?? nameTitle,
+      subtitle: cleanPath.isNotEmpty ? cleanPath : null,
+      isPlan: false,
+    );
+  }
+
+  return null;
 }
 
 String toolGroupSummary(List<AgentEvent> tools) {
