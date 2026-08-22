@@ -30,11 +30,16 @@ bool isPathLike(String value) {
 Future<void> showFileViewerModal({
   required BuildContext context,
   required RpcClient client,
-  required String filePath,
+  String? filePath,
+  String? rawContent,
   String? title,
+  String? subtitle,
+  bool isPlan = false,
 }) async {
-  final clean = cleanFilePath(filePath);
-  final displayName = title?.isNotEmpty == true ? title! : clean.split('/').last;
+  final clean = filePath != null && filePath.trim().isNotEmpty ? cleanFilePath(filePath) : '';
+  final displayName = title?.isNotEmpty == true
+      ? title!
+      : (clean.isNotEmpty ? clean.split('/').last : (isPlan ? 'Plan' : 'Document'));
 
   await showModalBottomSheet<void>(
     context: context,
@@ -53,7 +58,10 @@ Future<void> showFileViewerModal({
           return _FileViewerContent(
             client: client,
             filePath: clean,
+            rawContent: rawContent,
             displayName: displayName,
+            subtitle: subtitle,
+            isPlan: isPlan,
             scrollController: scrollController,
           );
         },
@@ -65,13 +73,19 @@ Future<void> showFileViewerModal({
 class _FileViewerContent extends StatefulWidget {
   final RpcClient client;
   final String filePath;
+  final String? rawContent;
   final String displayName;
+  final String? subtitle;
+  final bool isPlan;
   final ScrollController scrollController;
 
   const _FileViewerContent({
     required this.client,
     required this.filePath,
+    this.rawContent,
     required this.displayName,
+    this.subtitle,
+    this.isPlan = false,
     required this.scrollController,
   });
 
@@ -92,24 +106,50 @@ class _FileViewerContentState extends State<_FileViewerContent> {
   }
 
   Future<void> _loadFile() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final res = await widget.client.request('fs.read', {'path': widget.filePath});
-      if (!mounted) return;
+    if (widget.filePath.isNotEmpty) {
       setState(() {
-        _content = res?.toString() ?? '';
-        _loading = false;
+        _loading = true;
+        _error = null;
       });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = e.toString();
-        _loading = false;
-      });
+      try {
+        final res = await widget.client.request('fs.read', {'path': widget.filePath});
+        if (!mounted) return;
+        setState(() {
+          _content = res?.toString() ?? '';
+          _loading = false;
+        });
+        return;
+      } catch (e) {
+        if (!mounted) return;
+        if (widget.rawContent != null && widget.rawContent!.trim().isNotEmpty) {
+          setState(() {
+            _content = widget.rawContent;
+            _loading = false;
+            _error = null;
+          });
+          return;
+        }
+        setState(() {
+          _error = e.toString();
+          _loading = false;
+        });
+        return;
+      }
     }
+
+    if (widget.rawContent != null && widget.rawContent!.trim().isNotEmpty) {
+      setState(() {
+        _content = widget.rawContent;
+        _loading = false;
+        _error = null;
+      });
+      return;
+    }
+
+    setState(() {
+      _content = 'No content available.';
+      _loading = false;
+    });
   }
 
   Future<void> _copyContent() async {
@@ -131,6 +171,12 @@ class _FileViewerContentState extends State<_FileViewerContent> {
 
   @override
   Widget build(BuildContext context) {
+    final displaySubtitle = widget.subtitle?.isNotEmpty == true
+        ? widget.subtitle!
+        : (widget.filePath.isNotEmpty
+            ? widget.filePath
+            : (widget.isPlan ? 'Agent Implementation Plan' : ''));
+
     return Column(
       children: [
         // Drag handle & Header
@@ -153,7 +199,11 @@ class _FileViewerContentState extends State<_FileViewerContent> {
               ),
               Row(
                 children: [
-                  const Icon(Icons.description_outlined, size: 20, color: Color(0xFF93C5FD)),
+                  Icon(
+                    widget.isPlan ? Icons.assignment_outlined : Icons.description_outlined,
+                    size: 20,
+                    color: widget.isPlan ? const Color(0xFFC084FC) : const Color(0xFF93C5FD),
+                  ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Column(
@@ -169,16 +219,17 @@ class _FileViewerContentState extends State<_FileViewerContent> {
                             color: Colors.white,
                           ),
                         ),
-                        Text(
-                          widget.filePath,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: Color(0xFF8A8A9A),
-                            fontFamily: 'monospace',
+                        if (displaySubtitle.isNotEmpty)
+                          Text(
+                            displaySubtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFF8A8A9A),
+                              fontFamily: 'monospace',
+                            ),
                           ),
-                        ),
                       ],
                     ),
                   ),
@@ -257,7 +308,14 @@ class _FileViewerContentState extends State<_FileViewerContent> {
     }
 
     final content = _content ?? '';
-    final isMarkdown = widget.filePath.endsWith('.md') || widget.filePath.endsWith('.markdown');
+    final isMarkdown = widget.isPlan ||
+        widget.filePath.endsWith('.md') ||
+        widget.filePath.endsWith('.markdown') ||
+        widget.filePath.isEmpty ||
+        content.startsWith('#') ||
+        content.contains('```') ||
+        content.contains('- [ ]') ||
+        content.contains('- [x]');
 
     if (isMarkdown) {
       return SingleChildScrollView(

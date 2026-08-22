@@ -10,8 +10,14 @@ import 'package:speech_to_text/speech_to_text.dart';
 /// Plugin init flags that avoid OEM recognizer and Bluetooth SCO failures.
 List<SpeechConfigOption> speechInitOptions() => [
       SpeechToText.androidNoBluetooth,
-      SpeechToText.androidIntentLookup,
     ];
+
+/// Error message when the speech recognition *service* lacks mic access or fails
+/// to bind, distinct from the *app* lacking RECORD_AUDIO permission.
+const String speechServicePermissionErrorMessage =
+    'Speech recognition failed. On GrapheneOS or privacy-focused Android, '
+    'ensure "Speech Services by Google" (or your voice input provider) '
+    'has microphone permission, then try again.';
 
 /// Listen flags that Google's online recognizer actually accepts.
 SpeechListenOptions speechListenOptions() => SpeechListenOptions(
@@ -32,6 +38,9 @@ String speechLocaleId(Locale locale) {
 bool isSpeechStatusListening(String status) =>
     status == 'listening' || status == 'recording';
 
+bool isSpeechStatusEnded(String status) =>
+    status == 'done' || status == 'notListening';
+
 bool isBenignSpeechError(String errorMsg) {
   switch (errorMsg) {
     case 'error_speech_timeout':
@@ -40,6 +49,32 @@ bool isBenignSpeechError(String errorMsg) {
     default:
       return false;
   }
+}
+
+/// Google's recognizer ends on silence. Restart until the user taps Stop.
+bool shouldRestartListen({
+  required bool userWantsListen,
+  required bool sessionWasActive,
+  String? status,
+  String? errorMsg,
+}) {
+  if (!userWantsListen) return false;
+  if (errorMsg != null && errorMsg.isNotEmpty) {
+    return isBenignSpeechError(errorMsg);
+  }
+  if (!sessionWasActive) return false;
+  if (status == null || status.isEmpty) return false;
+  if (isSpeechStatusListening(status)) return false;
+  return isSpeechStatusEnded(status);
+}
+
+/// Freeze a final utterance so the next OS session appends instead of replacing.
+String commitSpeechPrefix(String committed, String recognizedWords) {
+  final words = recognizedWords.trim();
+  if (words.isEmpty) return committed;
+  if (committed.isEmpty) return '$words ';
+  if (committed.endsWith(' ')) return '$committed$words ';
+  return '$committed $words ';
 }
 
 String speechErrorMessage(String errorMsg) {
