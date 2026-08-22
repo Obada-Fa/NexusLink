@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
@@ -26,6 +27,10 @@ import '../util/voice_input.dart';
 import '../widgets/link_actions.dart';
 import '../widgets/not_connected_view.dart';
 import 'cwd_picker.dart';
+
+/// PC conversations will get their own screen. Skip the slow
+/// `agent.listHostChats` scan on this tab until then.
+const bool kAgentHostChatsInAgentTab = false;
 
 class AgentScreen extends ConsumerStatefulWidget {
   const AgentScreen({super.key});
@@ -115,14 +120,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       final sessionsRaw =
           await client.request('agent.listSessions') as List<dynamic>;
       List<dynamic> hostRaw = const [];
-      try {
-        hostRaw = await client.requestList(
-          'agent.listHostChats',
-          const {},
-          const Duration(seconds: 25),
-        );
-      } catch (_) {
-        // Older hosts have no listHostChats.
+      if (kAgentHostChatsInAgentTab) {
+        try {
+          hostRaw = await client.requestList(
+            'agent.listHostChats',
+            const {},
+            const Duration(seconds: 25),
+          );
+        } catch (_) {
+          // Older hosts have no listHostChats.
+        }
       }
       for (final u in _unsubs) {
         u();
@@ -176,13 +183,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       final sessionsRaw =
           await client.request('agent.listSessions') as List<dynamic>;
       List<dynamic> hostRaw = const [];
-      try {
-        hostRaw = await client.requestList(
-          'agent.listHostChats',
-          const {},
-          const Duration(seconds: 25),
-        );
-      } catch (_) {}
+      if (kAgentHostChatsInAgentTab) {
+        try {
+          hostRaw = await client.requestList(
+            'agent.listHostChats',
+            const {},
+            const Duration(seconds: 25),
+          );
+        } catch (_) {}
+      }
       List<AgentEvent> history = const [];
       if (shouldSyncTranscript) {
         final raw = await client.request(
@@ -1695,9 +1704,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             onTap: a.available ? () => _newChat(a) : null,
           ),
         const SizedBox(height: 16),
-        _menuTabs(),
-        const SizedBox(height: 8),
-        if (_menuTab == 0) ...[
+        if (kAgentHostChatsInAgentTab) ...[
+          _menuTabs(),
+          const SizedBox(height: 8),
+        ],
+        if (!kAgentHostChatsInAgentTab || _menuTab == 0) ...[
           if (_sessions.isEmpty)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 24, horizontal: 16),
@@ -2535,12 +2546,45 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         ),
       );
 
+  void _showMicPermissionSnack({required bool openSettings}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text(
+          'Microphone permission is required for voice input.',
+        ),
+        action: openSettings
+            ? SnackBarAction(
+                label: 'Settings',
+                onPressed: openAppSettings,
+              )
+            : null,
+        duration: const Duration(seconds: 5),
+      ),
+    );
+  }
+
+  Future<bool> _ensureMicPermission() async {
+    var status = await Permission.microphone.status;
+    if (status.isGranted) return true;
+    if (status.isPermanentlyDenied) {
+      _showMicPermissionSnack(openSettings: true);
+      return false;
+    }
+    status = await Permission.microphone.request();
+    if (status.isGranted) return true;
+    _showMicPermissionSnack(openSettings: status.isPermanentlyDenied);
+    return false;
+  }
+
   Future<void> _toggleListen() async {
     if (_isListening) {
       if (mounted) setState(() => _isListening = false);
       await _speech.stop();
       return;
     }
+
+    if (!await _ensureMicPermission()) return;
 
     try {
       // Always initialize: first tap requests the mic, later taps reuse it.
@@ -2554,6 +2598,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           if (!mounted) return;
           setState(() => _isListening = false);
           if (isBenignSpeechError(val.errorMsg)) return;
+          if (val.errorMsg == 'error_permission' ||
+              val.errorMsg == 'error_insufficient_permissions') {
+            _showMicPermissionSnack(openSettings: true);
+            return;
+          }
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(speechErrorMessage(val.errorMsg)),
@@ -2565,11 +2614,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       );
 
       if (!available) {
-        if (mounted) {
+        if (mounted && await Permission.microphone.isGranted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text(
-                'Microphone or speech recognition unavailable. Please check permissions.',
+                'Speech recognition is unavailable. Enable Speech Services by Google, then try again.',
               ),
             ),
           );
