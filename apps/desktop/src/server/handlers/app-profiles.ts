@@ -484,7 +484,6 @@ export function buildChromiumArgv(bin: string, ctx: LaunchContext): string[] {
     `--window-size=${dipW},${dipH}`,
     '--window-position=0,0',
     '--start-fullscreen',
-    '--kiosk',
     '--touch-events=enabled',
     '--no-first-run',
     '--no-default-browser-check',
