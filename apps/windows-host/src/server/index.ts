@@ -125,7 +125,13 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         result = undefined;
         break;
       case 'terminal.create':
-        result = handleTerminalCreate(params.cols as number, params.rows as number, params.shell as string | undefined, ws);
+        result = handleTerminalCreate(
+          params.cols as number,
+          params.rows as number,
+          params.shell as string | undefined,
+          ws,
+          params.cwd as string | undefined,
+        );
         break;
       case 'terminal.input':
         result = handleTerminalInput(params.terminalId as string, params.data as string);

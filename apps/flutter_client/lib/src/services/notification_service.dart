@@ -1,8 +1,10 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../rpc/models.dart';
+import '../rpc/rpc_client.dart';
 
 class NotificationService {
   NotificationService._();
@@ -12,6 +14,39 @@ class NotificationService {
       FlutterLocalNotificationsPlugin();
   bool _initialized = false;
   final Set<String> _processedEvents = <String>{};
+
+  Future<void> registerWithHost(RpcClient client) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      String? token = prefs.getString('nexuslink_push_token');
+      String? provider = prefs.getString('nexuslink_push_provider') ?? 'ntfy';
+      String? endpoint = prefs.getString('nexuslink_push_endpoint');
+
+      if (token == null || token.isEmpty) {
+        token = prefs.getString('nexuslink_device_push_id');
+        if (token == null || token.isEmpty) {
+          final rand = DateTime.now().millisecondsSinceEpoch.toString();
+          token = 'nexuslink_device_$rand';
+          await prefs.setString('nexuslink_device_push_id', token);
+        }
+      }
+
+      final deviceName = Platform.isAndroid
+          ? 'Android Device'
+          : Platform.isIOS
+              ? 'iOS Device'
+              : 'Desktop/Web Device';
+
+      await client.request('push.registerToken', {
+        'token': token,
+        'provider': provider,
+        if (endpoint != null && endpoint.isNotEmpty) 'endpoint': endpoint,
+        'name': deviceName,
+      });
+    } catch (e) {
+      debugPrint('[NotificationService] failed to register push token with host: $e');
+    }
+  }
 
   Future<void> init() async {
     if (_initialized) return;

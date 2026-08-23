@@ -62,6 +62,10 @@ export type RpcMethod =
   | 'session.authenticate'
   | 'session.heartbeat'
   | 'session.disconnect'
+  | 'push.registerToken'
+  | 'push.listTokens'
+  | 'push.removeToken'
+  | 'push.sendTest'
   | 'system.getInfo'
   | 'system.getPerf'
 
@@ -211,6 +215,14 @@ export type Params<M extends RpcMethod> =
     ? {}
     : M extends 'session.disconnect'
     ? {}
+    : M extends 'push.registerToken'
+    ? { token: string; provider?: 'fcm' | 'ntfy' | 'webhook'; endpoint?: string; name?: string }
+    : M extends 'push.listTokens'
+    ? {}
+    : M extends 'push.removeToken'
+    ? { token: string }
+    : M extends 'push.sendTest'
+    ? { title?: string; body?: string }
     : M extends 'system.getInfo'
     ? {}
     : M extends 'system.getPerf'
@@ -344,6 +356,14 @@ export type Result<M extends RpcMethod> =
     ? void
     : M extends 'session.disconnect'
     ? void
+    : M extends 'push.registerToken'
+    ? { ok: boolean; count: number }
+    : M extends 'push.listTokens'
+    ? Array<{ token: string; provider: string; endpoint?: string; name?: string; createdAt: number; lastSeenAt: number }>
+    : M extends 'push.removeToken'
+    ? { ok: boolean }
+    : M extends 'push.sendTest'
+    ? { sent: number; failed: number }
     : M extends 'system.getInfo'
     ? SystemInfo
     : M extends 'system.getPerf'

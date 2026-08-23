@@ -98,6 +98,7 @@ class _ConnectionLifecycleState extends ConsumerState<ConnectionLifecycle>
     _subscribedClient = client;
 
     if (client != null) {
+      unawaited(NotificationService.instance.registerWithHost(client));
       _unsubAgentEvent = client.subscribe('agent-event', (msg) {
         final sessionId = msg['agentSessionId'] as String?;
         final ev = msg['event'];

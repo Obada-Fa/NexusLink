@@ -31,6 +31,9 @@ import { printLaunchBanner, tailscaleIpv4FromCli } from './launch-banner';
 import { startSidecarReader } from './sidecar-reader';
 import { startMdns } from './mdns';
 import { handleFileDownload, handleFileUpload } from './handlers/files-http';
+import {
+  registerPushToken, listPushTokens, removePushToken, sendTestPush, setPushActiveSessionsCheck,
+} from './handlers/push';
 
 type Params = Record<string, unknown>;
 
@@ -104,6 +107,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   setAgentBroadcast(broadcastAll);
   setAppsBroadcast(broadcastAll);
   setWindowsBroadcast(broadcastAll);
+  setPushActiveSessionsCheck(() => getAuthenticatedSessions().length > 0);
   initAppWatcher();
   initWindowWatcher();
 
@@ -492,6 +496,26 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         result = undefined;
         break;
       }
+      case 'push.registerToken':
+        result = registerPushToken({
+          token: params.token as string,
+          provider: params.provider as any,
+          endpoint: params.endpoint as string | undefined,
+          name: params.name as string | undefined,
+        });
+        break;
+      case 'push.listTokens':
+        result = listPushTokens();
+        break;
+      case 'push.removeToken':
+        result = removePushToken(params.token as string);
+        break;
+      case 'push.sendTest':
+        result = await sendTestPush({
+          title: params.title as string | undefined,
+          body: params.body as string | undefined,
+        });
+        break;
       default:
         throw new Error(`unknown method: ${method}`);
     }
