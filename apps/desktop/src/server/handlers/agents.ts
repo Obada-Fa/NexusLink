@@ -284,14 +284,20 @@ export function listAgents(): AgentInfo[] {
       ...m,
       supportsEffort: m.supportsEffort ?? isModelEffortSupported(d.id, m.id),
     }));
+    const bin = d.bin ? which(d.bin) : null;
     return {
       id: d.id,
       name: d.name,
       icon: getCachedAgentIcon(d.id),
-      available: d.bin ? which(d.bin) !== null : true,
+      available: bin !== null || !d.bin,
       capabilities: {
         ...d.capabilities,
         models,
+        // Include Go plan status for OpenCode so the phone can show a badge.
+        // Uses cached value (populated during warm-up) — no extra blocking call.
+        ...(d.id === 'opencode' && bin
+          ? { plan: ocPlanCache.get(bin) ?? 'unknown' }
+          : {}),
       },
     };
   });
@@ -299,6 +305,13 @@ export function listAgents(): AgentInfo[] {
 
 const modelCache = new Map<string, AgentModelOption[]>();
 const modelCacheLive = new Map<string, boolean>();
+const modelCacheTime = new Map<string, number>(); // epoch ms when last fetched
+
+const MODEL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// OpenCode Go plan status cache
+const ocPlanCache = new Map<string, 'go' | 'byok' | 'unknown'>(); // keyed by bin path
+const ocPlanCacheTime = new Map<string, number>();
 
 const MODEL_VARIANT_SUFFIX =
   /-(?:low|medium|high|xhigh|max)(?:-fast)?$/i;
@@ -451,9 +464,51 @@ export function pickModelVariant(
   return best.id;
 }
 
+/**
+ * Detect whether the user has an OpenCode Go subscription configured by
+ * parsing `opencode auth list` output. Result is cached with the same TTL
+ * as the model list so we don't block every RPC call.
+ */
+export function fetchOpencodeGoStatus(bin: string): 'go' | 'byok' | 'unknown' {
+  const now = Date.now();
+  const cacheTime = ocPlanCacheTime.get(bin) ?? 0;
+  const cached = ocPlanCache.get(bin);
+  if (cached !== undefined && now - cacheTime < MODEL_CACHE_TTL_MS) return cached;
+
+  let status: 'go' | 'byok' | 'unknown' = 'unknown';
+  try {
+    const proc = Bun.spawnSync(spawnArgv([bin, 'auth', 'list']), {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      timeout: 5000,
+      env: process.env as Record<string, string>,
+    });
+    const text = (proc.stdout?.toString() ?? '').toLowerCase();
+    // OpenCode Go appears as a provider named "opencode" or "opencode-go"
+    // in the auth list. Look for the domain too as a fallback.
+    if (
+      /\bopencode\b/.test(text) ||
+      text.includes('opencode.ai') ||
+      text.includes('go.opencode')
+    ) {
+      status = 'go';
+    } else if (text.trim().length > 0) {
+      // Some providers configured, but not Go
+      status = 'byok';
+    }
+  } catch {
+    status = 'unknown';
+  }
+
+  ocPlanCache.set(bin, status);
+  ocPlanCacheTime.set(bin, now);
+  return status;
+}
+
 function fetchLiveModels(agentId: string, bin: string): AgentModelOption[] {
-  const argv = agentId === 'cursor' ? [bin, 'models'] : [bin, 'models'];
   if (agentId === 'claude' || agentId === 'mock') return [];
+  // For opencode: use --refresh flag so we always get the latest from the registry
+  const argv = agentId === 'opencode' ? [bin, 'models', '--refresh'] : [bin, 'models'];
   try {
     const proc = Bun.spawnSync(spawnArgv(argv), {
       stdout: 'pipe',
@@ -475,11 +530,14 @@ function augmentAgentModels(agentId: string, models: AgentModelOption[]): AgentM
   }));
 }
 
-export function listAgentModels(agentId: string): AgentModelOption[] {
+export function listAgentModels(agentId: string, forceRefresh = false): AgentModelOption[] {
   const def = AGENT_DEFS.find((d) => d.id === agentId);
   if (!def) return [];
 
-  if (modelCacheLive.get(agentId) && modelCache.has(agentId)) {
+  // Return cached result if it's still fresh and refresh wasn't forced
+  const cacheTime = modelCacheTime.get(agentId) ?? 0;
+  const cacheStale = Date.now() - cacheTime > MODEL_CACHE_TTL_MS;
+  if (!forceRefresh && modelCacheLive.get(agentId) && modelCache.has(agentId) && !cacheStale) {
     return augmentAgentModels(agentId, modelCache.get(agentId)!);
   }
 
@@ -491,6 +549,7 @@ export function listAgentModels(agentId: string): AgentModelOption[] {
         const augmented = augmentAgentModels(agentId, live);
         modelCache.set(agentId, augmented);
         modelCacheLive.set(agentId, true);
+        modelCacheTime.set(agentId, Date.now());
         return augmented;
       }
     }
@@ -503,16 +562,27 @@ export function listAgentModels(agentId: string): AgentModelOption[] {
   const augmented = augmentAgentModels(agentId, def.capabilities.models);
   modelCache.set(agentId, augmented);
   modelCacheLive.set(agentId, false);
+  modelCacheTime.set(agentId, Date.now());
   return augmented;
 }
 
 function warmAgentModelCatalogs(): void {
   for (const def of AGENT_DEFS) {
-    if (!def.bin || !which(def.bin)) continue;
+    if (!def.bin) continue;
+    const bin = which(def.bin);
+    if (!bin) continue;
     try {
       listAgentModels(def.id);
     } catch {
       // Offline host — fallback catalog still works.
+    }
+    // Prime the Go plan cache for OpenCode so listAgents() has it ready.
+    if (def.id === 'opencode') {
+      try {
+        fetchOpencodeGoStatus(bin);
+      } catch {
+        // Auth list unavailable — 'unknown' will be served.
+      }
     }
   }
 }

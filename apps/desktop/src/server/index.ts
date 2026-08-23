@@ -151,7 +151,13 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         result = undefined;
         break;
       case 'terminal.create':
-        result = await handleTerminalCreate(params.cols as number, params.rows as number, params.shell as string | undefined, ws);
+        result = await handleTerminalCreate(
+          params.cols as number,
+          params.rows as number,
+          params.shell as string | undefined,
+          ws,
+          params.cwd as string | undefined,
+        );
         break;
       case 'terminal.input':
         result = await handleTerminalInput(params.terminalId as string, params.data as string);
@@ -318,7 +324,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         });
         break;
       case 'agent.listModels':
-        result = listAgentModels(params.agent as string);
+        result = listAgentModels(params.agent as string, params.refresh === true);
         break;
       case 'agent.prompt':
         result = promptAgent(
