@@ -2060,7 +2060,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             children: [
               _chat(),
               EmbeddedTerminal(
-                key: ValueKey(_active?.agentSessionId),
+                key: ValueKey('${_active?.agentSessionId}_${_active?.cwd}'),
                 initialCwd: _active?.cwd,
                 sessionId: _active?.agentSessionId,
               ),

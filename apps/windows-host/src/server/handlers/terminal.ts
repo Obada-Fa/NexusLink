@@ -38,15 +38,29 @@ function conptyHostPath(): string | null {
   return candidates.find((p) => existsSync(p)) ?? null;
 }
 
+import { homedir } from 'node:os';
+
+export function resolveTerminalCwd(raw?: string): string {
+  const home = homedir();
+  if (!raw || !raw.trim() || raw.trim() === '~') return home;
+  const s = raw.trim();
+  const target = s.startsWith('~/') || s.startsWith('~\\')
+    ? join(home, s.slice(2))
+    : resolve(s);
+  return existsSync(target) ? target : home;
+}
+
 export function handleTerminalCreate(
   cols: number,
   rows: number,
   shell?: string,
   ws?: WebSocket,
+  cwd?: string,
 ): { terminalId: string } {
   const id = crypto.randomUUID();
   const cmd = shell?.trim() || defaultShell();
   const host = conptyHostPath();
+  const targetCwd = resolveTerminalCwd(cwd);
   const argv = host
     ? [host, '--cols', String(cols || 80), '--rows', String(rows || 24), '--', cmd]
     : [cmd];
@@ -55,8 +69,10 @@ export function handleTerminalCreate(
     stdin: 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
+    cwd: targetCwd,
     env: {
       ...process.env,
+      PWD: targetCwd,
       TERM: 'xterm-256color',
       COLUMNS: String(cols || 80),
       LINES: String(rows || 24),

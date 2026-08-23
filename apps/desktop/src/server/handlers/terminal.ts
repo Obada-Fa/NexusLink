@@ -4,7 +4,9 @@
 // terminal.create/input/resize/kill + `terminal-output` pushes.
 
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { existsSync } from 'node:fs';
 import type { WsMessage } from '@nexuslink/rpc-types';
 
 type SpawnOpts = Parameters<typeof Bun.spawn>[1];
@@ -45,26 +47,40 @@ function hasPty(): boolean {
   return ptyAvailable;
 }
 
+export function resolveTerminalCwd(raw?: string): string {
+  const home = homedir();
+  if (!raw || !raw.trim() || raw.trim() === '~') return home;
+  const s = raw.trim();
+  const target = s.startsWith('~/') || s.startsWith('~\\')
+    ? join(home, s.slice(2))
+    : isAbsolute(s)
+      ? s
+      : resolve(s);
+  return existsSync(target) ? target : home;
+}
+
 export function handleTerminalCreate(cols: number, rows: number, shell?: string, ws?: WebSocket, cwd?: string): { terminalId: string } {
   const id = crypto.randomUUID();
   const cmd = shell
     || process.env.SHELL
     || (process.platform === 'win32' ? (process.env.ComSpec || 'powershell.exe') : '/bin/bash');
   const usePty = hasPty();
+  const targetCwd = resolveTerminalCwd(cwd);
 
   const proc = usePty
     ? Bun.spawn(['python3', PTY_HOST, cmd, String(cols || 80), String(rows || 24)], {
         stdin: 'pipe',
         stdout: 'pipe',
         stderr: 'ignore',
-        ...(cwd ? { cwd } : {}),
+        cwd: targetCwd,
+        env: { ...process.env, PWD: targetCwd, TERM: 'xterm-256color' },
       } as unknown as SpawnOpts)
     : Bun.spawn([cmd], {
         stdin: 'pipe',
         stdout: 'pipe',
         stderr: 'pipe',
-        env: { ...process.env, TERM: 'xterm-256color', COLUMNS: String(cols), LINES: String(rows) },
-        ...(cwd ? { cwd } : {}),
+        cwd: targetCwd,
+        env: { ...process.env, PWD: targetCwd, TERM: 'xterm-256color', COLUMNS: String(cols), LINES: String(rows) },
       } as unknown as SpawnOpts);
 
   const session: TerminalSession = { proc, ws: ws!, cols, rows, pty: usePty };

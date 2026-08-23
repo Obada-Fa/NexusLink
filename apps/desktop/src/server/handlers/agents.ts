@@ -34,6 +34,7 @@ import {
   normalizeHostChat,
   type HostChatDelta,
 } from './host-chats';
+import { hasActivePushSessions, sendAgentPushNotification } from './push';
 
 type SpawnOpts = Parameters<typeof Bun.spawn>[1];
 type Proc = ReturnType<typeof Bun.spawn>;
@@ -699,7 +700,6 @@ export function buildCursorArgv(opts: {
 }): string[] {
   const argv = [
     opts.bin, '--print', '--output-format', 'stream-json',
-    '--trust', '--force',
     '--workspace', opts.cwd,
   ];
   if (opts.mode === 'plan' || opts.mode === 'ask') argv.push('--mode', opts.mode);
@@ -721,7 +721,7 @@ export function buildOpencodeArgv(opts: {
   thinking?: string;
   imagePaths?: string[];
 }): string[] {
-  const argv = [opts.bin, 'run', '--format', 'json', '--auto', '--dir', opts.cwd];
+  const argv = [opts.bin, 'run', '--format', 'json', '--dir', opts.cwd];
   if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
   if (opts.mode === 'plan') argv.push('--agent', 'plan');
   if (isModelEffortSupported('opencode', opts.model)) {
@@ -750,7 +750,6 @@ export function buildAgyArgv(opts: {
   const argv = [
     opts.bin,
     '--output-format', 'stream-json',
-    '--dangerously-skip-permissions',
     '--print-timeout', '15m',
   ];
   if (opts.cwd) argv.push('--add-dir', opts.cwd);
@@ -887,6 +886,42 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
   if (session.history.length > HISTORY_CAP) session.history.splice(0, 100);
   broadcast({ type: 'agent-event', agentSessionId: session.info.agentSessionId, event: full });
   saveAgentSessionsToDisk();
+
+  // If no active websocket clients are connected (e.g. mobile app is closed/screen off),
+  // send a native push notification to registered devices.
+  if (!hasActivePushSessions()) {
+    if (full.kind === 'result') {
+      const title = session.info.title ? `Agent Done (${session.info.title})` : 'Agent is Done';
+      const body = (full.text || '').trim() || 'The agent has finished working.';
+      void sendAgentPushNotification({
+        title,
+        body: body.slice(0, 200),
+        agentSessionId: session.info.agentSessionId,
+        sessionTitle: session.info.title,
+        kind: 'result',
+      });
+    } else if (full.kind === 'permission-request') {
+      const title = `Action Required (${session.info.title || session.info.agent})`;
+      const body = full.text || `Allow ${full.toolName ?? 'action'}?`;
+      void sendAgentPushNotification({
+        title,
+        body: body.slice(0, 200),
+        agentSessionId: session.info.agentSessionId,
+        sessionTitle: session.info.title,
+        kind: 'permission-request',
+      });
+    } else if (full.kind === 'error') {
+      const title = session.info.title ? `Agent Error (${session.info.title})` : 'Agent Encountered an Error';
+      const body = (full.text || '').trim() || 'An error occurred during execution.';
+      void sendAgentPushNotification({
+        title,
+        body: body.slice(0, 200),
+        agentSessionId: session.info.agentSessionId,
+        sessionTitle: session.info.title,
+        kind: 'error',
+      });
+    }
+  }
 }
 
 function setBusy(session: AgentSession, busy: boolean): void {
