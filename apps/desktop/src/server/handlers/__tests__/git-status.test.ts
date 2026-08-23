@@ -64,3 +64,18 @@ describe('handleFsMkdir', () => {
     }
   });
 });
+
+describe('findGitRoot', () => {
+  test('finds repository root from nested subdirectory', async () => {
+    const { findGitRoot } = await import('../fs');
+    const nested = `${process.cwd()}/src/server/handlers`;
+    const root = findGitRoot(nested);
+    expect(root.endsWith('opendesktop') || root.includes('opendesktop')).toBe(true);
+  });
+
+  test('returns original path if not inside a git repo', async () => {
+    const { findGitRoot } = await import('../fs');
+    const tmp = '/tmp';
+    expect(findGitRoot(tmp)).toBe('/tmp');
+  });
+});

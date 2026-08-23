@@ -8,6 +8,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
 import type { WsMessage } from '@nexuslink/rpc-types';
+import { findGitRoot } from './fs';
 
 type SpawnOpts = Parameters<typeof Bun.spawn>[1];
 
@@ -56,7 +57,8 @@ export function resolveTerminalCwd(raw?: string): string {
     : isAbsolute(s)
       ? s
       : resolve(s);
-  return existsSync(target) ? target : home;
+  if (!existsSync(target)) return home;
+  return findGitRoot(target);
 }
 
 export function handleTerminalCreate(cols: number, rows: number, shell?: string, ws?: WebSocket, cwd?: string): { terminalId: string } {
