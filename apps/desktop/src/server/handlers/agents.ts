@@ -35,6 +35,7 @@ import {
   type HostChatDelta,
 } from './host-chats';
 import { hasActivePushSessions, sendAgentPushNotification } from './push';
+import { findGitRoot } from './fs';
 
 type SpawnOpts = Parameters<typeof Bun.spawn>[1];
 type Proc = ReturnType<typeof Bun.spawn>;
@@ -945,9 +946,10 @@ export function resolveAgentCwd(cwd?: string, opts?: { fallbackHome?: boolean })
   }
   if (existsSync(path) && statSync(path).isDirectory()) {
     try {
-      return realpathSync(path).replace(/\\/g, '/');
+      const real = realpathSync(path).replace(/\\/g, '/');
+      return findGitRoot(real);
     } catch {
-      return path.replace(/\\/g, '/');
+      return findGitRoot(path.replace(/\\/g, '/'));
     }
   }
   if (opts?.fallbackHome) return home.replace(/\\/g, '/');

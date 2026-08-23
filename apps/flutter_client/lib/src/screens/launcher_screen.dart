@@ -9,6 +9,7 @@ import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
 import '../state/launcher.dart';
+import '../state/last_cwd.dart';
 import '../widgets/app_icon.dart';
 import 'agent_screen.dart';
 import 'files_screen.dart';
@@ -454,7 +455,12 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     void push(Widget screen) => Navigator.of(context)
         .push(MaterialPageRoute(builder: (_) => screen));
     final items = <(IconData, String, VoidCallback?, bool)>[
-      (Icons.terminal, 'Terminal', () => push(const TerminalScreen()), false),
+      (Icons.terminal, 'Terminal', () async {
+        final recent = await loadRecentAgentCwds();
+        if (mounted) {
+          push(TerminalScreen(initialCwd: recent.firstOrNull));
+        }
+      }, false),
       (Icons.code, 'Code', () => push(const IdeScreen()), false),
       (Icons.folder, 'Files', () => push(const FilesScreen()), false),
       (Icons.memory, 'System', () => push(const SystemScreen()), false),
