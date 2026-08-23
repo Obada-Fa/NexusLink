@@ -35,6 +35,9 @@ class MirrorTarget {
   /// Re-attach to an already-running virtual session.
   final String? sessionId;
 
+  /// Whether this target is a web browser (built-in or desktop-adopted).
+  final bool isBrowser;
+
   const MirrorTarget({
     this.windowId,
     this.appId,
@@ -42,6 +45,7 @@ class MirrorTarget {
     this.title,
     this.sessionAppId,
     this.sessionId,
+    this.isBrowser = false,
   });
 
   bool get isVirtual => sessionAppId != null || sessionId != null;
@@ -709,8 +713,42 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     _engine.onTouchEnd(_touches, _nowMs);
   }
 
+  static final _browserRe = RegExp(
+    r'brave|chrom(e|ium)|msedge|microsoft.edge|nexus\.chrome',
+    caseSensitive: false,
+  );
+
+  bool get _isBrowserSession {
+    if (widget.target.isBrowser) return true;
+    final sessionAppId = widget.target.sessionAppId ?? _session?.appId ?? '';
+    if (_browserRe.hasMatch(sessionAppId)) return true;
+    final appId = widget.target.appId ?? '';
+    final wmClass = widget.target.wmClass ?? '';
+    return _browserRe.hasMatch(appId) || _browserRe.hasMatch(wmClass);
+  }
+
   void _sendKey(String key) =>
       _client?.notify('input.keyEvent', _sid({'key': key}));
+
+  void _sendKeyMods(String key, List<String> mods) =>
+      _client?.notify('input.keyEvent', _sid({'key': key, 'modifiers': mods}));
+
+  void _toggleKeyboard() {
+    setState(() => _keyboardOpen = !_keyboardOpen);
+    if (_keyboardOpen) {
+      _kbFocus.requestFocus();
+      _chromeHideTimer?.cancel();
+    } else {
+      _scheduleHideChrome();
+    }
+  }
+
+  void _focusBrowserAddressBar() {
+    _client?.notify('input.keyEvent', _sid({'key': 'l', 'modifiers': ['ctrl']}));
+    setState(() => _keyboardOpen = true);
+    _kbFocus.requestFocus();
+    _chromeHideTimer?.cancel();
+  }
 
   void _onKbChanged(String value) {
     if (value.isEmpty) return;
@@ -749,6 +787,113 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   }
 
   Widget _chromeBar() {
+    return _isBrowserSession ? _browserBar() : _genericBar();
+  }
+
+  Widget _browserBar() {
+    final title = widget.target.title ??
+        _session?.name ??
+        'Browser';
+    return Material(
+      color: const Color(0xCC0A0A0F),
+      child: SafeArea(
+        bottom: false,
+        child: SizedBox(
+          height: 48,
+          child: Row(
+            children: [
+              IconButton(
+                icon: const Icon(Icons.home_outlined, color: Colors.white),
+                onPressed: () => Navigator.of(context).maybePop(),
+              ),
+              IconButton(
+                tooltip: 'Back',
+                icon: const Icon(Icons.arrow_back_ios_new, size: 18, color: Colors.white),
+                onPressed: () => _sendKeyMods('Left', ['alt']),
+              ),
+              IconButton(
+                tooltip: 'Forward',
+                icon: const Icon(Icons.arrow_forward_ios, size: 18, color: Colors.white),
+                onPressed: () => _sendKeyMods('Right', ['alt']),
+              ),
+              Expanded(child: _urlBarTile(title)),
+              IconButton(
+                tooltip: 'Refresh',
+                icon: const Icon(Icons.refresh, color: Colors.white),
+                onPressed: () => _sendKey('F5'),
+              ),
+              IconButton(
+                tooltip: _mouseMode
+                    ? 'Mouse mode: pan the picture, tap to click'
+                    : 'Touch mode: tap where you press, swipe to scroll',
+                icon: Icon(_mouseMode ? Icons.mouse : Icons.touch_app,
+                    color: _mouseMode ? const Color(0xFF2A6AFF) : Colors.white),
+                onPressed: () {
+                  setState(() {
+                    _mouseMode = !_mouseMode;
+                    if (!_mouseMode) {
+                      _canvasPan = Offset.zero;
+                      _canvasScale = 1;
+                    }
+                  });
+                  _engine.setMode(
+                      _mouseMode ? GestureMode.mouse : GestureMode.direct);
+                  _syncCanvasTransform();
+                  _scheduleHideChrome();
+                },
+              ),
+              IconButton(
+                icon: Icon(Icons.keyboard,
+                    color: _keyboardOpen
+                        ? const Color(0xFF2A6AFF)
+                        : Colors.white),
+                onPressed: _toggleKeyboard,
+              ),
+              if (_session != null)
+                IconButton(
+                  tooltip: 'Quit this app',
+                  icon: const Icon(Icons.close, color: Colors.white),
+                  onPressed: _closeSession,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _urlBarTile(String appTitle) {
+    return GestureDetector(
+      onTap: _focusBrowserAddressBar,
+      child: Container(
+        height: 32,
+        margin: const EdgeInsets.symmetric(horizontal: 4),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1E1E2E),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0xFF2E2E44)),
+        ),
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: Row(
+          children: [
+            const Icon(Icons.lock_outline, size: 12, color: Colors.white38),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Text(
+                appTitle,
+                style: const TextStyle(color: Colors.white54, fontSize: 12),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const Icon(Icons.search, size: 14, color: Colors.white38),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _genericBar() {
     final title = widget.target.title ??
         _session?.name ??
         (widget.target.windowId != null ||
@@ -802,15 +947,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                     color: _keyboardOpen
                         ? const Color(0xFF2A6AFF)
                         : Colors.white),
-                onPressed: () {
-                  setState(() => _keyboardOpen = !_keyboardOpen);
-                  if (_keyboardOpen) {
-                    _kbFocus.requestFocus();
-                    _chromeHideTimer?.cancel();
-                  } else {
-                    _scheduleHideChrome();
-                  }
-                },
+                onPressed: _toggleKeyboard,
               ),
               if (_session != null)
                 IconButton(

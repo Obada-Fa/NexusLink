@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nexuslink/src/rpc/models.dart';
+import 'package:nexuslink/src/screens/mirror_screen.dart';
 
 void main() {
   group('AppSessionInfo', () {
@@ -205,6 +206,21 @@ void main() {
         )),
         'feat · clean',
       );
+    });
+  });
+
+  group('MirrorTarget', () {
+    test('defaults isBrowser to false and accepts true', () {
+      const defaultTarget = MirrorTarget(title: 'Terminal');
+      expect(defaultTarget.isBrowser, isFalse);
+
+      const browserTarget = MirrorTarget(
+        sessionAppId: 'nexus.chrome-mobile',
+        title: 'Browser',
+        isBrowser: true,
+      );
+      expect(browserTarget.isBrowser, isTrue);
+      expect(browserTarget.isVirtual, isTrue);
     });
   });
 }

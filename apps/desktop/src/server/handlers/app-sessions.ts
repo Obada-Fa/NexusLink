@@ -288,12 +288,14 @@ export async function createAppSession(
   const name = profile?.name ?? desktopEntry?.name ?? appId;
   const icon = await resolveIconPublic(profile?.iconName ?? desktopEntry?.iconName);
 
-  // Clone the host Brave/Chrome profile *before* paying for Xvfb so the
-  // phone session already has cookies/logins when the window appears.
   const chromiumBin = profile
     ? (isChromiumFamily(profile.appId) ? findPreferredBrowserBin() : null)
     : resolveChromiumBin(appId, desktopEntry?.exec);
-  const profileDir = chromiumBin ? checkoutSessionProfile(chromiumBin, sessionDir) : undefined;
+  // Kick off profile checkout in parallel with Xvfb startup so file I/O does
+  // not block display creation and add latency to session startup.
+  const profileDirPromise: Promise<string | undefined> = chromiumBin
+    ? Promise.resolve().then(() => checkoutSessionProfile(chromiumBin, sessionDir))
+    : Promise.resolve(undefined);
 
   const xvfb = Bun.spawn(
     [
@@ -328,6 +330,7 @@ export async function createAppSession(
 
   try {
     await waitForX(display);
+    const profileDir = await profileDirPromise;
 
     const resources = `Xft.dpi: ${Math.round(96 * geo.dpr)}\n`;
     const resPath = join(sessionDir, '.Xresources');

@@ -27,10 +27,33 @@ class LauncherScreen extends ConsumerStatefulWidget {
 class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   String _search = '';
 
+  static final _browserRe = RegExp(
+    r'brave|chrom(e|ium)|msedge|microsoft.edge|nexus\.chrome',
+    caseSensitive: false,
+  );
+
+  bool _isBrowserApp(AppInfo a) =>
+      _browserRe.hasMatch(a.appId) || _browserRe.hasMatch(a.wmClass ?? '');
+
+  bool _isBrowserAppId(String appId) => _browserRe.hasMatch(appId);
+
+  bool _isBrowserWindow(WindowInfo w, List<AppInfo> apps) {
+    if (w.appId != null && _browserRe.hasMatch(w.appId!)) return true;
+    if (_browserRe.hasMatch(w.wmClass)) return true;
+    for (final a in apps) {
+      if (windowMatchesApp(w, a) && _isBrowserApp(a)) return true;
+    }
+    return false;
+  }
+
   void _openWindow(WindowInfo w, List<AppInfo> apps) {
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => MirrorScreen(
-        target: MirrorTarget(windowId: w.windowId, title: bestWindowName(w, apps)),
+        target: MirrorTarget(
+          windowId: w.windowId,
+          title: bestWindowName(w, apps),
+          isBrowser: _isBrowserWindow(w, apps),
+        ),
       ),
     ));
   }
@@ -38,7 +61,11 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   void _attachSession(AppSessionInfo s) {
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => MirrorScreen(
-        target: MirrorTarget(sessionId: s.sessionId, title: s.name),
+        target: MirrorTarget(
+          sessionId: s.sessionId,
+          title: s.name,
+          isBrowser: _isBrowserAppId(s.appId),
+        ),
       ),
     ));
   }
@@ -68,7 +95,11 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     if (a.appId.startsWith('nexus.')) {
       Navigator.of(context).push(MaterialPageRoute(
         builder: (_) => MirrorScreen(
-          target: MirrorTarget(sessionAppId: a.appId, title: a.name),
+          target: MirrorTarget(
+            sessionAppId: a.appId,
+            title: a.name,
+            isBrowser: _isBrowserApp(a),
+          ),
         ),
       ));
     } else {
@@ -78,6 +109,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
             appId: a.appId,
             wmClass: a.wmClass,
             title: a.name,
+            isBrowser: _isBrowserApp(a),
           ),
         ),
       ));
