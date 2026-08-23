@@ -118,7 +118,7 @@ const TOOL_ITEMS = [
   { id: 'ide', label: 'Code', icon: '</>' },
   { id: 'files', label: 'Files', icon: '\u{1F4C1}' },
   { id: 'system', label: 'System', icon: '\u{1F4CA}' },
-  { id: 'mirror', label: 'Desktop', icon: '\u{1F5A5}' },
+  { id: 'mirror', label: 'Desktop (Beta)', icon: '\u{1F5A5}' },
   { id: 'agents', label: 'Agents', icon: '\u2728' },
 ] as const;
 
@@ -266,7 +266,9 @@ function HomeScreen() {
 
       {phoneSessions.length > 0 && !q && (
         <section style={styles.section}>
-          <h2 style={styles.sectionTitle}>Running on your phone</h2>
+          <h2 style={styles.sectionTitle}>
+            Running on your phone <span style={styles.betaBadge}>BETA</span>
+          </h2>
           <div style={styles.runningRow}>
             {phoneSessions.map((s) => (
               <button key={s.sessionId} style={styles.runningCard} onClick={() => attachSession(s)}>
@@ -291,7 +293,9 @@ function HomeScreen() {
 
       {windows.length > 0 && !q && (
         <section style={styles.section}>
-          <h2 style={styles.sectionTitle}>Open on your PC</h2>
+          <h2 style={styles.sectionTitle}>
+            Open on your PC <span style={styles.betaBadge}>BETA</span>
+          </h2>
           <div style={styles.runningRow}>
             {windows.map((w) => (
               <button key={w.windowId} style={styles.runningCard} onClick={() => openApp(w)}>
@@ -306,7 +310,9 @@ function HomeScreen() {
 
       <section style={{ ...styles.section, flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
         <div style={styles.appsHeader}>
-          <h2 style={styles.sectionTitle}>Apps</h2>
+          <h2 style={styles.sectionTitle}>
+            Apps <span style={styles.betaBadge}>BETA</span>
+          </h2>
           <input
             type="search"
             placeholder="Search apps…"
@@ -423,6 +429,22 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#556',
     margin: '0 0 8px 2px',
     fontWeight: 600,
+    display: 'flex',
+    alignItems: 'center',
+  },
+  betaBadge: {
+    fontSize: 9,
+    fontWeight: 700,
+    letterSpacing: '0.05em',
+    color: '#7aa2ff',
+    background: 'rgba(42, 106, 255, 0.2)',
+    border: '1px solid rgba(42, 106, 255, 0.5)',
+    borderRadius: 4,
+    padding: '1px 5px',
+    marginLeft: 6,
+    verticalAlign: 'middle',
+    textTransform: 'uppercase',
+    lineHeight: '1.2',
   },
   runningRow: {
     display: 'flex',

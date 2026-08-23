@@ -150,7 +150,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
                   padding: const EdgeInsets.symmetric(horizontal: 14),
                   children: [
                     if (sessions.isNotEmpty && q.isEmpty) ...[
-                      _sectionTitle('Running on your phone'),
+                      _sectionTitle('Running on your phone', isBeta: true),
                       _sessionRow(sessions),
                       const SizedBox(height: 8),
                     ],
@@ -229,14 +229,42 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     );
   }
 
-  Widget _sectionTitle(String s) => Padding(
+  Widget _sectionTitle(String s, {bool isBeta = false}) => Padding(
         padding: const EdgeInsets.fromLTRB(2, 4, 0, 8),
-        child: Text(s.toUpperCase(),
-            style: TextStyle(
-                fontSize: 11,
-                letterSpacing: 0.8,
-                fontWeight: FontWeight.w600,
-                color: Colors.white.withValues(alpha: 0.4))),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(s.toUpperCase(),
+                style: TextStyle(
+                    fontSize: 11,
+                    letterSpacing: 0.8,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white.withValues(alpha: 0.4))),
+            if (isBeta) ...[
+              const SizedBox(width: 6),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF2A6AFF).withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(
+                      color: const Color(0xFF2A6AFF).withValues(alpha: 0.5),
+                      width: 0.8),
+                ),
+                child: const Text(
+                  'BETA',
+                  style: TextStyle(
+                    fontSize: 8.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.5,
+                    color: Color(0xFF7AA2FF),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
       );
 
   /// Windows-style taskbar of everything open on the PC: always visible above
@@ -349,7 +377,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
       padding: const EdgeInsets.only(bottom: 8),
       child: Row(
         children: [
-          _sectionTitle('Apps'),
+          _sectionTitle('Apps', isBeta: true),
           const Spacer(),
           SizedBox(
             width: 180,
@@ -425,13 +453,13 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   Widget _dock(BuildContext context) {
     void push(Widget screen) => Navigator.of(context)
         .push(MaterialPageRoute(builder: (_) => screen));
-    final items = <(IconData, String, VoidCallback?)>[
-      (Icons.terminal, 'Terminal', () => push(const TerminalScreen())),
-      (Icons.code, 'Code', () => push(const IdeScreen())),
-      (Icons.folder, 'Files', () => push(const FilesScreen())),
-      (Icons.memory, 'System', () => push(const SystemScreen())),
-      (Icons.desktop_windows, 'Desktop', () => _openDesktop(context)),
-      (Icons.auto_awesome, 'Agents', () => push(const AgentScreen())),
+    final items = <(IconData, String, VoidCallback?, bool)>[
+      (Icons.terminal, 'Terminal', () => push(const TerminalScreen()), false),
+      (Icons.code, 'Code', () => push(const IdeScreen()), false),
+      (Icons.folder, 'Files', () => push(const FilesScreen()), false),
+      (Icons.memory, 'System', () => push(const SystemScreen()), false),
+      (Icons.desktop_windows, 'Desktop', () => _openDesktop(context), true),
+      (Icons.auto_awesome, 'Agents', () => push(const AgentScreen()), false),
     ];
     return Container(
       margin: const EdgeInsets.fromLTRB(14, 4, 14, 8),
@@ -453,13 +481,40 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(it.$1,
-                            size: 20,
-                            color: it.$3 == null
-                                ? Colors.white.withValues(alpha: 0.25)
-                                : Colors.white.withValues(alpha: 0.75)),
+                        Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            Icon(it.$1,
+                                size: 20,
+                                color: it.$3 == null
+                                    ? Colors.white.withValues(alpha: 0.25)
+                                    : Colors.white.withValues(alpha: 0.75)),
+                            if (it.$4)
+                              Positioned(
+                                top: -4,
+                                right: -12,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 3, vertical: 1),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF2A6AFF),
+                                    borderRadius: BorderRadius.circular(3),
+                                  ),
+                                  child: const Text(
+                                    'BETA',
+                                    style: TextStyle(
+                                      fontSize: 6.5,
+                                      fontWeight: FontWeight.w800,
+                                      color: Colors.white,
+                                      letterSpacing: 0.3,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
                         const SizedBox(height: 3),
-                        Text(it.$2,
+                        Text(it.$4 ? '${it.$2} (Beta)' : it.$2,
                             style: TextStyle(
                                 fontSize: 9.5,
                                 color: Colors.white.withValues(alpha: 0.4))),
