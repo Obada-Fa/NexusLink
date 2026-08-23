@@ -391,6 +391,7 @@ function MirrorView() {
         </button>
         <span style={styles.title}>
           {title}
+          <span style={styles.betaBadge}>BETA</span>
           {phase === 'streaming' && fps > 0 ? ` · ${fps}fps` : ''}
         </span>
         <button
@@ -459,10 +460,10 @@ function MirrorView() {
             <div style={styles.spinner} />
             <p style={styles.centerText}>
               {phase === 'launching'
-                ? `Opening ${title} on your PC…`
+                ? `Opening ${title} on your PC (Beta)…`
                 : phase === 'adopting'
-                  ? 'Fitting the app to your screen…'
-                  : 'Connecting…'}
+                  ? 'Fitting the app to your screen (Beta)…'
+                  : 'Connecting (Beta)…'}
             </p>
           </div>
         )}
@@ -537,6 +538,23 @@ const styles: Record<string, React.CSSProperties> = {
     whiteSpace: 'nowrap',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  betaBadge: {
+    fontSize: 9,
+    fontWeight: 700,
+    letterSpacing: '0.05em',
+    color: '#7aa2ff',
+    background: 'rgba(42, 106, 255, 0.2)',
+    border: '1px solid rgba(42, 106, 255, 0.5)',
+    borderRadius: 4,
+    padding: '1px 5px',
+    margin: '0 6px',
+    verticalAlign: 'middle',
+    textTransform: 'uppercase',
+    lineHeight: '1.2',
   },
   stage: {
     position: 'absolute',

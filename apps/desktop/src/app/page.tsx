@@ -62,6 +62,7 @@ export default function Page() {
             }}
           />
           <span style={S.headerTitle}>NexusLink Host</span>
+          <span style={S.betaBadge}>BETA</span>
         </div>
         <div style={S.headerRight}>
           <span style={S.statusBadge}>
@@ -82,6 +83,10 @@ export default function Page() {
             <span style={S.statValue}>
               {wsState === 1 ? "Online" : wsState === 3 ? "Offline" : checking ? "Checking..." : "Unknown"}
             </span>
+          </div>
+          <div style={S.statRow}>
+            <span style={S.statLabel}>Desktop & App Streaming</span>
+            <span style={S.statValue}>Ready (Beta)</span>
           </div>
           <div style={S.actions}>
             <button onClick={checkServer} disabled={checking} style={S.btn}>
@@ -131,6 +136,17 @@ const S: Record<string, React.CSSProperties> = {
     fontSize: "16px",
     fontWeight: 700,
     color: "#fff",
+  },
+  betaBadge: {
+    fontSize: "10px",
+    fontWeight: 700,
+    letterSpacing: "0.05em",
+    color: "#7aa2ff",
+    background: "rgba(42, 106, 255, 0.2)",
+    border: "1px solid rgba(42, 106, 255, 0.5)",
+    borderRadius: "4px",
+    padding: "2px 6px",
+    textTransform: "uppercase",
   },
   headerRight: {
     display: "flex",

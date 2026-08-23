@@ -886,6 +886,24 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                 overflow: TextOverflow.ellipsis,
               ),
             ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+              margin: const EdgeInsets.only(right: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFF2A6AFF).withValues(alpha: 0.25),
+                borderRadius: BorderRadius.circular(3),
+                border: Border.all(color: const Color(0xFF2A6AFF).withValues(alpha: 0.5), width: 0.8),
+              ),
+              child: const Text(
+                'BETA',
+                style: TextStyle(
+                  fontSize: 7.5,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.4,
+                  color: Color(0xFF7AA2FF),
+                ),
+              ),
+            ),
             const Icon(Icons.search, size: 14, color: Colors.white38),
           ],
         ),
@@ -914,12 +932,37 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                 onPressed: () => Navigator.of(context).maybePop(),
               ),
               Expanded(
-                child: Text(
-                  _phase == MirrorPhase.streaming
-                      ? '$title · ${_rtcLive ? 'live' : '$_fps fps'}'
-                      : title,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Colors.white, fontSize: 14),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Flexible(
+                      child: Text(
+                        _phase == MirrorPhase.streaming
+                            ? '$title · ${_rtcLive ? 'live' : '$_fps fps'}'
+                            : title,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: Colors.white, fontSize: 14),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2A6AFF).withValues(alpha: 0.25),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: const Color(0xFF2A6AFF).withValues(alpha: 0.5), width: 0.8),
+                      ),
+                      child: const Text(
+                        'BETA',
+                        style: TextStyle(
+                          fontSize: 8.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.5,
+                          color: Color(0xFF7AA2FF),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
               IconButton(
@@ -1032,8 +1075,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         return _centered(
           null,
           _phase == MirrorPhase.launching
-              ? 'Opening on your PC…'
-              : 'Fitting the app to your screen…',
+              ? 'Opening on your PC (Beta)…'
+              : 'Fitting the app to your screen (Beta)…',
         );
     }
   }
