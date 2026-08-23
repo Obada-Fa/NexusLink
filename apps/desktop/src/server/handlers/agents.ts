@@ -888,40 +888,39 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
   broadcast({ type: 'agent-event', agentSessionId: session.info.agentSessionId, event: full });
   saveAgentSessionsToDisk();
 
-  // If no active websocket clients are connected (e.g. mobile app is closed/screen off),
-  // send a native push notification to registered devices.
-  if (!hasActivePushSessions()) {
-    if (full.kind === 'result') {
-      const title = session.info.title ? `Agent Done (${session.info.title})` : 'Agent is Done';
-      const body = (full.text || '').trim() || 'The agent has finished working.';
-      void sendAgentPushNotification({
-        title,
-        body: body.slice(0, 200),
-        agentSessionId: session.info.agentSessionId,
-        sessionTitle: session.info.title,
-        kind: 'result',
-      });
-    } else if (full.kind === 'permission-request') {
-      const title = `Action Required (${session.info.title || session.info.agent})`;
-      const body = full.text || `Allow ${full.toolName ?? 'action'}?`;
-      void sendAgentPushNotification({
-        title,
-        body: body.slice(0, 200),
-        agentSessionId: session.info.agentSessionId,
-        sessionTitle: session.info.title,
-        kind: 'permission-request',
-      });
-    } else if (full.kind === 'error') {
-      const title = session.info.title ? `Agent Error (${session.info.title})` : 'Agent Encountered an Error';
-      const body = (full.text || '').trim() || 'An error occurred during execution.';
-      void sendAgentPushNotification({
-        title,
-        body: body.slice(0, 200),
-        agentSessionId: session.info.agentSessionId,
-        sessionTitle: session.info.title,
-        kind: 'error',
-      });
-    }
+  // Unconditionally send push notifications to ensure they arrive when the phone screen is off.
+  // We removed the `if (!hasActivePushSessions())` check because mobile OSs often pause the app 
+  // without severing the websocket, causing missed notifications.
+  if (full.kind === 'result') {
+    const title = session.info.title ? `Agent Done (${session.info.title})` : 'Agent is Done';
+    const body = (full.text || '').trim() || 'The agent has finished working.';
+    void sendAgentPushNotification({
+      title,
+      body: body.slice(0, 200),
+      agentSessionId: session.info.agentSessionId,
+      sessionTitle: session.info.title,
+      kind: 'result',
+    });
+  } else if (full.kind === 'permission-request') {
+    const title = `Action Required (${session.info.title || session.info.agent})`;
+    const body = full.text || `Allow ${full.toolName ?? 'action'}?`;
+    void sendAgentPushNotification({
+      title,
+      body: body.slice(0, 200),
+      agentSessionId: session.info.agentSessionId,
+      sessionTitle: session.info.title,
+      kind: 'permission-request',
+    });
+  } else if (full.kind === 'error') {
+    const title = session.info.title ? `Agent Error (${session.info.title})` : 'Agent Encountered an Error';
+    const body = (full.text || '').trim() || 'An error occurred during execution.';
+    void sendAgentPushNotification({
+      title,
+      body: body.slice(0, 200),
+      agentSessionId: session.info.agentSessionId,
+      sessionTitle: session.info.title,
+      kind: 'error',
+    });
   }
 }
 

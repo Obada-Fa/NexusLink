@@ -1592,6 +1592,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (chosen == null || !mounted) return;
     setState(() => _model = modelFamilyId(chosen));
     await _saveComposerPrefs();
+    if (_modelSupportsEffort) {
+      // Small delay to allow the model picker sheet to close smoothly
+      Future.delayed(const Duration(milliseconds: 150), () {
+        if (mounted) unawaited(_pickThinking());
+      });
+    }
   }
 
   Future<void> _attachPhoto() async {
@@ -1700,9 +1706,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   Widget build(BuildContext context) {
     ref.listen<RpcStatus>(connectionStatusProvider, (prev, next) {
       if (next == RpcStatus.connected && prev != RpcStatus.connected) {
-        // Foreground resume always resyncs (events were missed). In-app socket
-        // blips while chatting keep the live transcript — resync only when idle.
-        unawaited(_onForeground(syncTranscript: !_busy));
+        // Foreground resume always resyncs (events were missed).
+        // Ensure we always fetch the missed events even if the agent is busy.
+        unawaited(_onForeground(syncTranscript: true));
       }
     });
     return PopScope(
