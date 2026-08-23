@@ -484,6 +484,8 @@ export interface AgentCapabilities {
   thinkingLevels: string[]
   models: AgentModelOption[]
   images: boolean
+  /** OpenCode-only: subscription tier detected via `opencode auth list`. */
+  plan?: 'go' | 'byok' | 'unknown'
 }
 
 /** Photo/screenshot attached from the phone (base64, already compressed). */

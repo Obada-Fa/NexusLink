@@ -45,7 +45,7 @@ function hasPty(): boolean {
   return ptyAvailable;
 }
 
-export function handleTerminalCreate(cols: number, rows: number, shell?: string, ws?: WebSocket): { terminalId: string } {
+export function handleTerminalCreate(cols: number, rows: number, shell?: string, ws?: WebSocket, cwd?: string): { terminalId: string } {
   const id = crypto.randomUUID();
   const cmd = shell
     || process.env.SHELL
@@ -57,12 +57,14 @@ export function handleTerminalCreate(cols: number, rows: number, shell?: string,
         stdin: 'pipe',
         stdout: 'pipe',
         stderr: 'ignore',
+        ...(cwd ? { cwd } : {}),
       } as unknown as SpawnOpts)
     : Bun.spawn([cmd], {
         stdin: 'pipe',
         stdout: 'pipe',
         stderr: 'pipe',
         env: { ...process.env, TERM: 'xterm-256color', COLUMNS: String(cols), LINES: String(rows) },
+        ...(cwd ? { cwd } : {}),
       } as unknown as SpawnOpts);
 
   const session: TerminalSession = { proc, ws: ws!, cols, rows, pty: usePty };

@@ -211,12 +211,15 @@ class AgentCapabilities {
   final List<String> thinkingLevels;
   final List<AgentModelOption> models;
   final bool images;
+  /// OpenCode-only: 'go' | 'byok' | 'unknown'. Null for other agents.
+  final String? plan;
 
   const AgentCapabilities({
     required this.modes,
     required this.thinkingLevels,
     required this.models,
     required this.images,
+    this.plan,
   });
 
   static const empty = AgentCapabilities(
@@ -234,6 +237,7 @@ class AgentCapabilities {
             .where((e) => e == 'agent' || e == 'plan' || e == 'ask')
             .toList() ??
         const ['agent'];
+    final planRaw = j['plan'] as String?;
     return AgentCapabilities(
       modes: modes.isEmpty ? const ['agent'] : modes,
       thinkingLevels: (j['thinkingLevels'] as List?)
@@ -247,6 +251,9 @@ class AgentCapabilities {
               .toList() ??
           const [],
       images: j['images'] as bool? ?? false,
+      plan: (planRaw == 'go' || planRaw == 'byok' || planRaw == 'unknown')
+          ? planRaw
+          : null,
     );
   }
 }

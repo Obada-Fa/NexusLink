@@ -23,13 +23,16 @@ import '../services/notification_service.dart';
 import '../state/agent_history.dart';
 import '../state/connection.dart';
 import '../state/last_cwd.dart';
+import '../state/terminal_busy.dart';
 import '../widgets/agent_activity_icon.dart';
 import '../widgets/code_block_builder.dart';
 import '../widgets/file_viewer_modal.dart';
+import '../widgets/terminal_glow_border.dart';
 import '../util/voice_input.dart';
 import '../widgets/link_actions.dart';
 import '../widgets/not_connected_view.dart';
 import 'cwd_picker.dart';
+import 'terminal_screen.dart';
 
 /// PC conversations will get their own screen. Skip the slow
 /// `agent.listHostChats` scan on this tab until then.
@@ -70,6 +73,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   bool _busy = false;
   bool _sending = false;
   int _menuTab = 0;
+  int _chatTab = 0;
   String? _error;
   final SpeechToText _speech = SpeechToText();
   bool _isListening = false;
@@ -479,7 +483,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         _gitTree = null;
       });
       await _loadComposerPrefs(agent.id, isNewChat: true);
-      await _refreshModels(agent.id);
+      await _refreshModels(agent.id, force: true);
       await _refreshGitTree();
     } catch (e) {
       if (!mounted) return;
@@ -519,7 +523,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       _sessions.insert(0, s);
     });
     await _loadComposerPrefs(s.agent);
-    await _refreshModels(s.agent);
+    await _refreshModels(s.agent, force: true);
     await _refreshGitTree();
     _scrollToEnd();
   }
@@ -679,11 +683,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     });
   }
 
-  Future<void> _refreshModels(String agentId) async {
+  Future<void> _refreshModels(String agentId, {bool force = false}) async {
     final client = _client;
     if (client == null) return;
     try {
-      final raw = await client.requestList('agent.listModels', {'agent': agentId});
+      final raw = await client.requestList(
+        'agent.listModels',
+        {'agent': agentId, if (force) 'refresh': true},
+      );
       final models = raw
           .whereType<Map>()
           .map((e) => AgentModelOption.fromJson(Map<String, dynamic>.from(e)))
@@ -1087,6 +1094,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       _active = null;
       _events.clear();
       _busy = false;
+      _chatTab = 0;
     });
   }
 
@@ -1098,6 +1106,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       _photos.clear();
       _liveModels = [];
       _gitTree = null;
+      _chatTab = 0;
     });
   }
 
@@ -1414,13 +1423,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   Future<void> _pickModel() async {
-    if (_active != null) await _refreshModels(_active!.agent);
+    final agentId = _active?.agent;
+    if (agentId != null) await _refreshModels(agentId, force: true);
     if (!mounted) return;
     final models = _pickerModels;
     if (models.isEmpty) {
       _localStatus('This agent has no model list yet. Restart the PC host and try again.');
       return;
     }
+    final plan = _activeAgent?.capabilities.plan;
+    final isOpenCode = agentId == 'opencode';
     final chosen = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: _panelBackgroundColor(_active?.agent),
@@ -1442,12 +1454,74 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                 height: MediaQuery.of(ctx).size.height * 0.65,
                 child: Column(
                   children: [
-                    const ListTile(
-                      title: Text('Model',
-                          style: TextStyle(fontWeight: FontWeight.w600)),
-                      subtitle: Text(
+                    ListTile(
+                      title: Row(
+                        children: [
+                          const Text('Model',
+                              style: TextStyle(fontWeight: FontWeight.w600)),
+                          if (isOpenCode && plan == 'go') ...[
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 7, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.green.withValues(alpha: 0.18),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                    color: Colors.green.withValues(alpha: 0.4)),
+                              ),
+                              child: const Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.verified,
+                                      size: 11, color: Colors.green),
+                                  SizedBox(width: 3),
+                                  Text('Go plan',
+                                      style: TextStyle(
+                                          fontSize: 10.5,
+                                          color: Colors.green,
+                                          fontWeight: FontWeight.w600)),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                      subtitle: const Text(
                           'Same agent — thinking is the chip next to this'),
                     ),
+                    // Go plan info banner for OpenCode without Go
+                    if (isOpenCode && plan != 'go')
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                                color: Colors.orange.withValues(alpha: 0.35)),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(Icons.info_outline,
+                                  size: 14,
+                                  color: Colors.orange[300]),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'Free / BYOK models shown. '
+                                  'Subscribe at opencode.ai for the full catalog.',
+                                  style: TextStyle(
+                                      fontSize: 11.5,
+                                      color: Colors.orange[300]),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
                     Padding(
                       padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
                       child: TextField(
@@ -1465,11 +1539,20 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                         itemCount: filtered.length,
                         itemBuilder: (_, i) {
                           final m = filtered[i];
+                          // Warn if model looks like it needs Go but user doesn't have it
+                          final needsGo = isOpenCode &&
+                              !m.id.contains('-free') &&
+                              !m.id.contains('free') &&
+                              plan != 'go';
                           return ListTile(
                             title: Text(m.name),
-                            subtitle: Text(m.id,
-                                style: const TextStyle(
-                                    color: Colors.white38, fontSize: 12)),
+                            subtitle: needsGo
+                                ? Text('${m.id} · may require Go plan',
+                                    style: const TextStyle(
+                                        color: Colors.orange, fontSize: 12))
+                                : Text(m.id,
+                                    style: const TextStyle(
+                                        color: Colors.white38, fontSize: 12)),
                             trailing: modelFamilyId(m.id) ==
                                     modelFamilyId(_model ?? '')
                                 ? const Icon(Icons.check, color: Color(0xFF2A6AFF))
@@ -1477,6 +1560,25 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                             onTap: () => Navigator.pop(ctx, m.id),
                           );
                         },
+                      ),
+                    ),
+                    // Refresh button at the bottom of the picker
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+                      child: TextButton.icon(
+                        onPressed: () async {
+                          Navigator.pop(ctx);
+                          if (agentId != null) {
+                            await _refreshModels(agentId, force: true);
+                          }
+                          if (mounted) unawaited(_pickModel());
+                        },
+                        icon: const Icon(Icons.refresh, size: 16),
+                        label: const Text('Refresh models'),
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.white54,
+                          textStyle: const TextStyle(fontSize: 12),
+                        ),
                       ),
                     ),
                   ],
@@ -1679,7 +1781,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                             style: const TextStyle(color: Colors.white70)))
                 : _active == null
                     ? _picker()
-                    : _chat(),
+                    : _chatWithTerminal(),
       ),
     );
   }
@@ -1731,69 +1833,88 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             )
           else
             for (final s in _sessions)
-              ListTile(
-                leading: AgentActivityIcon(
-                  agentId: s.agent,
-                  icon: s.icon,
-                  active: s.busy ||
-                      (_active?.agentSessionId == s.agentSessionId && _busy),
-                ),
-                title: Text(s.title),
-                subtitle: Text(
-                  chatListSubtitle(agent: s.agent, cwd: s.cwd),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                trailing: PopupMenuButton<String>(
-                  icon: const Icon(Icons.more_vert,
-                      size: 18, color: Colors.white38),
-                  onSelected: (val) {
-                    if (val == 'rename') {
-                      _renameSessionDialog(s);
-                    } else if (val == 'folder') {
-                      _changeSessionCwd(s);
-                    } else if (val == 'delete') {
-                      _deleteSession(s);
-                    }
-                  },
-                  itemBuilder: (_) => [
-                    const PopupMenuItem(
-                      value: 'rename',
-                      child: Row(
-                        children: [
-                          Icon(Icons.edit_outlined, size: 16),
-                          SizedBox(width: 8),
-                          Text('Rename'),
-                        ],
+              Builder(builder: (context) {
+                final busy = ref.watch(terminalBusyProvider)[s.agentSessionId] ?? false;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: TerminalGlowBorder(
+                    active: busy,
+                    borderRadius: BorderRadius.circular(12),
+                    strokeWidth: 2.0,
+                    glowColor: Colors.white,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF141420),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFF1E1E30)),
+                      ),
+                      child: ListTile(
+                        leading: AgentActivityIcon(
+                          agentId: s.agent,
+                          icon: s.icon,
+                          active: s.busy ||
+                              (_active?.agentSessionId == s.agentSessionId && _busy),
+                        ),
+                        title: Text(s.title),
+                        subtitle: Text(
+                          chatListSubtitle(agent: s.agent, cwd: s.cwd),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        trailing: PopupMenuButton<String>(
+                          icon: const Icon(Icons.more_vert,
+                              size: 18, color: Colors.white38),
+                          onSelected: (val) {
+                            if (val == 'rename') {
+                              _renameSessionDialog(s);
+                            } else if (val == 'folder') {
+                              _changeSessionCwd(s);
+                            } else if (val == 'delete') {
+                              _deleteSession(s);
+                            }
+                          },
+                          itemBuilder: (_) => [
+                            const PopupMenuItem(
+                              value: 'rename',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.edit_outlined, size: 16),
+                                  SizedBox(width: 8),
+                                  Text('Rename'),
+                                ],
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              value: 'folder',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.folder_open, size: 16),
+                                  SizedBox(width: 8),
+                                  Text('Change folder'),
+                                ],
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              value: 'delete',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.delete_outline,
+                                      size: 16, color: Color(0xFFEE5555)),
+                                  SizedBox(width: 8),
+                                  Text('Delete',
+                                      style: TextStyle(color: Color(0xFFEE5555))),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        onTap: () => _openSession(s),
+                        onLongPress: () => _renameSessionDialog(s),
                       ),
                     ),
-                    const PopupMenuItem(
-                      value: 'folder',
-                      child: Row(
-                        children: [
-                          Icon(Icons.folder_open, size: 16),
-                          SizedBox(width: 8),
-                          Text('Change folder'),
-                        ],
-                      ),
-                    ),
-                    const PopupMenuItem(
-                      value: 'delete',
-                      child: Row(
-                        children: [
-                          Icon(Icons.delete_outline,
-                              size: 16, color: Color(0xFFEE5555)),
-                          SizedBox(width: 8),
-                          Text('Delete',
-                              style: TextStyle(color: Color(0xFFEE5555))),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-                onTap: () => _openSession(s),
-                onLongPress: () => _renameSessionDialog(s),
-              ),
+                  ),
+                );
+              }),
         ] else ...[
           if (_hostChats.isEmpty)
             const Padding(
@@ -1909,6 +2030,97 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       case 'opencode': return const Color(0xFF060F0D); // Slightly lighter deep teal
       default: return Colors.transparent; // Fallback to Scaffold background
     }
+  }
+
+  Widget _chatWithTerminal() {
+    return Column(
+      children: [
+        Container(
+          color: _appBackgroundColor(_active?.agent),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          child: Container(
+            decoration: BoxDecoration(
+              color: const Color(0xFF141420),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0xFF1E1E30)),
+            ),
+            padding: const EdgeInsets.all(2),
+            child: Row(
+              children: [
+                _chatTabButton(0, Icons.chat_bubble_outline, 'Chat'),
+                const SizedBox(width: 2),
+                _chatTabButton(1, Icons.terminal, 'Terminal'),
+              ],
+            ),
+          ),
+        ),
+        Expanded(
+          child: IndexedStack(
+            index: _chatTab,
+            children: [
+              _chat(),
+              EmbeddedTerminal(
+                key: ValueKey(_active?.agentSessionId),
+                initialCwd: _active?.cwd,
+                sessionId: _active?.agentSessionId,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _chatTabButton(int index, IconData icon, String label) {
+    final selected = _chatTab == index;
+    final isTerminalTab = index == 1;
+    final sessionId = _active?.agentSessionId ?? '';
+    final termBusy = isTerminalTab
+        ? (ref.watch(terminalBusyProvider)[sessionId] ?? false)
+        : false;
+
+    final pill = Container(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      decoration: BoxDecoration(
+        color: selected ? const Color(0xFF2A6AFF) : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            icon,
+            size: 15,
+            color: selected ? Colors.white : const Color(0xFF888899),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+              color: selected ? Colors.white : const Color(0xFF888899),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    return Expanded(
+      child: InkWell(
+        onTap: () => setState(() => _chatTab = index),
+        borderRadius: BorderRadius.circular(8),
+        child: isTerminalTab
+            ? TerminalGlowBorder(
+                active: termBusy,
+                borderRadius: BorderRadius.circular(8),
+                strokeWidth: 1.8,
+                glowColor: Colors.white,
+                child: pill,
+              )
+            : pill,
+      ),
+    );
   }
 
   Widget _chat() {
@@ -3105,8 +3317,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   Widget _modelChip() {
     final canPick = _pickerModels.isNotEmpty;
+    final isOpenCode = _active?.agent == 'opencode';
+    final plan = _activeAgent?.capabilities.plan;
+    final hasGo = isOpenCode && plan == 'go';
+    final noGo = isOpenCode && plan != null && plan != 'go';
     return Tooltip(
-      message: 'Model: $_modelLabel${canPick ? ' (tap to switch)' : ''}',
+      message: [
+        'Model: $_modelLabel${canPick ? ' (tap to switch)' : ''}',
+        if (hasGo) '· OpenCode Go plan active',
+        if (noGo) '· Free/BYOK plan — subscribe at opencode.ai',
+      ].join(' '),
       child: Material(
         color: _chipBackgroundColor(_active?.agent),
         borderRadius: BorderRadius.circular(8),
@@ -3137,6 +3357,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                     ),
                   ),
                 ),
+                // Go plan badge in composer bar
+                if (hasGo) ...[
+                  const SizedBox(width: 4),
+                  const Icon(Icons.verified, size: 11, color: Colors.green),
+                ],
+                if (noGo) ...[
+                  const SizedBox(width: 4),
+                  Icon(Icons.info_outline, size: 11, color: Colors.orange[300]),
+                ],
                 if (canPick) ...[
                   const SizedBox(width: 2),
                   const Icon(Icons.arrow_drop_down,
