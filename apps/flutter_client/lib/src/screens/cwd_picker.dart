@@ -39,7 +39,7 @@ class _ProjectHint {
 
 class _CwdPickerSheet extends ConsumerStatefulWidget {
   final RpcClient client;
-  const _CwdPickerSheet({super.key, required this.client});
+  const _CwdPickerSheet({required this.client});
 
   @override
   ConsumerState<_CwdPickerSheet> createState() => _CwdPickerSheetState();

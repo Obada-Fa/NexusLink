@@ -6,8 +6,10 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_highlight/flutter_highlight.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
+import 'code_viewer.dart';
 
 /// Strips outer markdown fence backticks (e.g. ```text\n...\n```) when the
 /// entire message is wrapped in a single code block.
@@ -99,6 +101,12 @@ class _CodeBlockViewState extends State<_CodeBlockView> {
 
   @override
   Widget build(BuildContext context) {
+    final lang = detectLanguage(widget.language);
+    final displayLang = widget.language.isNotEmpty
+        ? widget.language
+        : (lang != 'plaintext' ? lang : 'code');
+    final accentColor = languageAccentColor(widget.language);
+
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 6),
       decoration: BoxDecoration(
@@ -119,14 +127,28 @@ class _CodeBlockViewState extends State<_CodeBlockView> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text(
-                  widget.language.isNotEmpty ? widget.language : 'code',
-                  style: const TextStyle(
-                    color: Colors.white54,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    fontFamily: 'monospace',
-                  ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 6,
+                      height: 6,
+                      margin: const EdgeInsets.only(right: 6),
+                      decoration: BoxDecoration(
+                        color: accentColor,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    Text(
+                      displayLang,
+                      style: TextStyle(
+                        color: accentColor,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                  ],
                 ),
                 IconButton(
                   visualDensity: VisualDensity.compact,
@@ -145,14 +167,16 @@ class _CodeBlockViewState extends State<_CodeBlockView> {
           ),
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
+            physics: const BouncingScrollPhysics(),
             padding: const EdgeInsets.all(10),
-            child: SelectableText(
+            child: HighlightView(
               widget.code,
-              style: const TextStyle(
-                color: Color(0xFF6EE7B7),
+              language: lang,
+              theme: nexusLinkCodeTheme,
+              textStyle: const TextStyle(
                 fontFamily: 'monospace',
                 fontSize: 12,
-                height: 1.4,
+                height: 1.45,
               ),
             ),
           ),

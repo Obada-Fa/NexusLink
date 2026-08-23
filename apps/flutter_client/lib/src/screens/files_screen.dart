@@ -16,6 +16,7 @@ import 'package:share_plus/share_plus.dart';
 import '../rpc/models.dart';
 import '../state/connection.dart';
 import '../util/host_path.dart';
+import '../widgets/file_viewer_modal.dart';
 import '../widgets/not_connected_view.dart';
 
 enum FileSortOption {
@@ -511,7 +512,19 @@ class _FilesScreenState extends ConsumerState<FilesScreen>
                   icon: const Icon(Icons.download, size: 20),
                   onPressed: _transfer == null ? () => _download(e) : null,
                 ),
-          onTap: e.isDirectory ? () => _navigate(e.path) : null,
+          onTap: e.isDirectory
+              ? () => _navigate(e.path)
+              : () {
+                  final client = ref.read(activeClientProvider);
+                  if (client != null) {
+                    showFileViewerModal(
+                      context: context,
+                      client: client,
+                      filePath: e.path,
+                      title: e.name,
+                    );
+                  }
+                },
         );
       },
     );

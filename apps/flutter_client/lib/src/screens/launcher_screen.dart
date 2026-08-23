@@ -43,19 +43,45 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     ));
   }
 
-  void _launchApp(AppInfo a, List<AppSessionInfo> sessions) {
-    // Already running in a virtual session → re-attach (like switching apps).
+  void _launchApp(
+    AppInfo a,
+    List<AppSessionInfo> sessions,
+    List<WindowInfo> windows,
+    List<AppInfo> apps,
+  ) {
+    // 1. Already running in a virtual session → re-attach (like switching apps).
     for (final s in sessions) {
       if (s.appId == a.appId) {
         _attachSession(s);
         return;
       }
     }
-    Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => MirrorScreen(
-        target: MirrorTarget(sessionAppId: a.appId, title: a.name),
-      ),
-    ));
+    // 2. Already running as a desktop window → open and focus that window.
+    for (final w in windows) {
+      if (windowMatchesApp(w, a)) {
+        _openWindow(w, apps);
+        return;
+      }
+    }
+    // 3. Launch the app. Virtual profile apps go to a virtual session;
+    // system desktop apps launch on the real desktop and are adopted into portrait.
+    if (a.appId.startsWith('nexus.')) {
+      Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => MirrorScreen(
+          target: MirrorTarget(sessionAppId: a.appId, title: a.name),
+        ),
+      ));
+    } else {
+      Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => MirrorScreen(
+          target: MirrorTarget(
+            appId: a.appId,
+            wmClass: a.wmClass,
+            title: a.name,
+          ),
+        ),
+      ));
+    }
   }
 
   @override
@@ -330,7 +356,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
         final running = sessions.any((s) => s.appId == a.appId) ||
             windows.any((w) => windowMatchesApp(w, a));
         return InkWell(
-          onTap: () => _launchApp(a, sessions),
+          onTap: () => _launchApp(a, sessions, windows, apps),
           borderRadius: BorderRadius.circular(12),
           child: Column(
             children: [

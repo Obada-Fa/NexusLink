@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import '../rpc/rpc_client.dart';
 import 'code_block_builder.dart';
+import 'code_viewer.dart';
 import 'link_actions.dart';
 
 /// Clean a raw link (e.g. file:///home/... -> /home/...).
@@ -21,7 +22,7 @@ String cleanFilePath(String raw) {
 bool isPathLike(String value) {
   final v = cleanFilePath(value);
   if (v.startsWith('/') || v.startsWith('~/') || v.startsWith('./')) return true;
-  if (RegExp(r'\.(md|markdown|txt|json|dart|ts|js|py|rs|go|yaml|yml|toml|sh|html|css)$', caseSensitive: false).hasMatch(v)) {
+  if (RegExp(r'\.(md|markdown|txt|json|dart|ts|tsx|js|jsx|py|rs|go|yaml|yml|toml|sh|html|css|c|cpp|h|java|kt|swift|sql)$', caseSensitive: false).hasMatch(v)) {
     return true;
   }
   return false;
@@ -98,6 +99,7 @@ class _FileViewerContentState extends State<_FileViewerContent> {
   String? _error;
   bool _loading = true;
   bool _copied = false;
+  bool _wordWrap = false;
 
   @override
   void initState() {
@@ -177,6 +179,20 @@ class _FileViewerContentState extends State<_FileViewerContent> {
             ? widget.filePath
             : (widget.isPlan ? 'Agent Implementation Plan' : ''));
 
+    final content = _content ?? '';
+    final isMarkdown = widget.isPlan ||
+        widget.filePath.endsWith('.md') ||
+        widget.filePath.endsWith('.markdown') ||
+        (widget.filePath.isEmpty && (content.startsWith('#') || content.contains('```')));
+
+    final lineCount = content.isEmpty ? 0 : content.split('\n').length;
+    final accentColor = widget.isPlan
+        ? const Color(0xFFC084FC)
+        : (isMarkdown ? const Color(0xFF93C5FD) : languageAccentColor(widget.filePath));
+    final langName = isMarkdown
+        ? (widget.isPlan ? 'Plan' : 'Markdown')
+        : languageDisplayName(widget.filePath);
+
     return Column(
       children: [
         // Drag handle & Header
@@ -199,40 +215,106 @@ class _FileViewerContentState extends State<_FileViewerContent> {
               ),
               Row(
                 children: [
-                  Icon(
-                    widget.isPlan ? Icons.assignment_outlined : Icons.description_outlined,
-                    size: 20,
-                    color: widget.isPlan ? const Color(0xFFC084FC) : const Color(0xFF93C5FD),
+                  Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: accentColor.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: accentColor.withValues(alpha: 0.3)),
+                    ),
+                    child: Icon(
+                      widget.isPlan
+                          ? Icons.assignment_outlined
+                          : (isMarkdown ? Icons.description_outlined : Icons.code_rounded),
+                      size: 18,
+                      color: accentColor,
+                    ),
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          widget.displayName,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.white,
-                          ),
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                widget.displayName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                              decoration: BoxDecoration(
+                                color: accentColor.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(color: accentColor.withValues(alpha: 0.3)),
+                              ),
+                              child: Text(
+                                langName,
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w600,
+                                  color: accentColor,
+                                  fontFamily: 'monospace',
+                                ),
+                              ),
+                            ),
+                            if (lineCount > 0 && !isMarkdown) ...[
+                              const SizedBox(width: 4),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                                decoration: BoxDecoration(
+                                  color: Colors.white10,
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  '$lineCount lines',
+                                  style: const TextStyle(
+                                    fontSize: 10,
+                                    color: Colors.white54,
+                                    fontFamily: 'monospace',
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
                         if (displaySubtitle.isNotEmpty)
-                          Text(
-                            displaySubtitle,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 11,
-                              color: Color(0xFF8A8A9A),
-                              fontFamily: 'monospace',
+                          Padding(
+                            padding: const EdgeInsets.only(top: 2),
+                            child: Text(
+                              displaySubtitle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Color(0xFF8A8A9A),
+                                fontFamily: 'monospace',
+                              ),
                             ),
                           ),
                       ],
                     ),
                   ),
+                  if (!isMarkdown && _content != null && _content!.isNotEmpty)
+                    IconButton(
+                      tooltip: _wordWrap ? 'Switch to scroll mode' : 'Switch to wrap mode',
+                      icon: Icon(
+                        _wordWrap ? Icons.wrap_text : Icons.view_headline_rounded,
+                        size: 19,
+                        color: _wordWrap ? accentColor : Colors.white60,
+                      ),
+                      onPressed: () => setState(() => _wordWrap = !_wordWrap),
+                    ),
                   if (_content != null && _content!.isNotEmpty)
                     IconButton(
                       tooltip: 'Copy all',
@@ -256,13 +338,13 @@ class _FileViewerContentState extends State<_FileViewerContent> {
 
         // Body content
         Expanded(
-          child: _buildBody(),
+          child: _buildBody(isMarkdown: isMarkdown),
         ),
       ],
     );
   }
 
-  Widget _buildBody() {
+  Widget _buildBody({required bool isMarkdown}) {
     if (_loading) {
       return const Center(
         child: Column(
@@ -285,9 +367,9 @@ class _FileViewerContentState extends State<_FileViewerContent> {
             children: [
               const Icon(Icons.error_outline, size: 36, color: Color(0xFFEE5555)),
               const SizedBox(height: 12),
-              Text(
+              const Text(
                 'Could not load file',
-                style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.white),
+                style: TextStyle(fontWeight: FontWeight.w600, color: Colors.white),
               ),
               const SizedBox(height: 6),
               Text(
@@ -308,14 +390,6 @@ class _FileViewerContentState extends State<_FileViewerContent> {
     }
 
     final content = _content ?? '';
-    final isMarkdown = widget.isPlan ||
-        widget.filePath.endsWith('.md') ||
-        widget.filePath.endsWith('.markdown') ||
-        widget.filePath.isEmpty ||
-        content.startsWith('#') ||
-        content.contains('```') ||
-        content.contains('- [ ]') ||
-        content.contains('- [x]');
 
     if (isMarkdown) {
       return SingleChildScrollView(
@@ -353,18 +427,13 @@ class _FileViewerContentState extends State<_FileViewerContent> {
       );
     }
 
-    return SingleChildScrollView(
-      controller: widget.scrollController,
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-      child: SelectableText(
-        content,
-        style: const TextStyle(
-          fontFamily: 'monospace',
-          fontSize: 12.5,
-          color: Colors.white,
-          height: 1.4,
-        ),
-      ),
+    return CodeViewer(
+      code: content,
+      filePath: widget.filePath,
+      isWordWrap: _wordWrap,
+      showLineNumbers: true,
+      scrollController: widget.scrollController,
+      padding: const EdgeInsets.fromLTRB(0, 12, 16, 32),
     );
   }
 }

@@ -232,16 +232,23 @@ function HomeScreen() {
     client?.request('appSession.close', { sessionId: s.sessionId }).catch(() => {});
   };
 
-  // Tapping an app launches it into a phone-shaped VIRTUAL display on the PC
-  // (nothing moves on the real desktop). Re-tap re-attaches to the running
-  // session, exactly like switching back to an app on a phone.
   const launchApp = (a: AppInfo) => {
     const session = phoneSessions.find((s) => s.appId === a.appId);
     if (session) {
       attachSession(session);
       return;
     }
-    router.push(`/mirror?vapp=${encodeURIComponent(a.appId)}&title=${encodeURIComponent(a.name)}`);
+    const openWin = windows.find((w) => matchesApp(w, a));
+    if (openWin) {
+      openApp(openWin);
+      return;
+    }
+    if (a.appId.startsWith('nexus.')) {
+      router.push(`/mirror?vapp=${encodeURIComponent(a.appId)}&title=${encodeURIComponent(a.name)}`);
+    } else {
+      const clsParam = a.wmClass ? `&cls=${encodeURIComponent(a.wmClass)}` : '';
+      router.push(`/mirror?app=${encodeURIComponent(a.appId)}&title=${encodeURIComponent(a.name)}${clsParam}`);
+    }
   };
 
   const q = search.trim().toLowerCase();
