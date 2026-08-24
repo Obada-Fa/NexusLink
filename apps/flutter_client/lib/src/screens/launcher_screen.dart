@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
+import '../services/notification_service.dart';
 import '../state/connection.dart';
 import '../state/launcher.dart';
 import '../state/last_cwd.dart';
@@ -218,6 +219,30 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
               child: Text(label,
                   style: const TextStyle(
                       fontSize: 13, fontWeight: FontWeight.w500))),
+          IconButton(
+            tooltip: 'Send test alert',
+            icon: const Icon(Icons.notifications_outlined, size: 18),
+            onPressed: status != RpcStatus.connected
+                ? null
+                : () async {
+                    final client = ref.read(activeClientProvider);
+                    if (client == null) return;
+                    try {
+                      await NotificationService.instance.sendTestAlert(client);
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Test alert sent')),
+                        );
+                      }
+                    } catch (e) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Test alert failed: $e')),
+                        );
+                      }
+                    }
+                  },
+          ),
           IconButton(
             icon: const Icon(Icons.power_settings_new, size: 18),
             onPressed: () {

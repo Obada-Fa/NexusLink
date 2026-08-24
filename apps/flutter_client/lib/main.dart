@@ -1,11 +1,14 @@
 // NexusLink Flutter client — premium remote-desktop app for the LAN/X11 host.
 // Connect (mDNS discovery / manual) → launcher → per-app mirror sessions.
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'src/discovery/mdns_discovery.dart';
 import 'src/services/notification_service.dart';
+import 'src/rpc/rpc_client.dart';
 import 'src/state/connection.dart';
 import 'src/state/last_host.dart';
 import 'src/screens/launcher_screen.dart';
@@ -54,6 +57,7 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
   List<DiscoveredHost> _hosts = [];
   bool _scanning = false;
   bool _connecting = false;
+  bool _openedLauncher = false;
   String? _error;
   String? _lastHostUrl;
 
@@ -110,10 +114,7 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
       await saveLastHostUrl(wsUrl);
       if (!mounted) return;
       setState(() => _lastHostUrl = wsUrl.trim());
-      await Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => const LauncherScreen()),
-      );
-      // Returned from the launcher (disconnected) — nothing else to do.
+      await _openLauncher();
     } catch (e) {
       if (mounted) setState(() => _error = 'Could not connect: $e');
     } finally {
@@ -121,8 +122,22 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
     }
   }
 
+  Future<void> _openLauncher() async {
+    if (_openedLauncher || !mounted) return;
+    _openedLauncher = true;
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const LauncherScreen()),
+    );
+    _openedLauncher = false;
+  }
+
   @override
   Widget build(BuildContext context) {
+    ref.listen<RpcStatus>(connectionStatusProvider, (prev, next) {
+      if (next == RpcStatus.connected) {
+        unawaited(_openLauncher());
+      }
+    });
     return Scaffold(
       body: SafeArea(
         child: Center(

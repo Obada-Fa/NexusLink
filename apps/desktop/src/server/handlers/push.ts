@@ -223,7 +223,10 @@ async function sendFcmPush(
               android: {
                 priority: 'high',
                 notification: {
-                  channel_id: 'agent_notifications',
+                  channel_id:
+                    payload.data?.kind === 'permission-request'
+                      ? 'agent_permissions'
+                      : 'agent_status',
                   sound: 'default',
                   priority: 'high',
                 },
@@ -290,15 +293,35 @@ async function sendFcmPush(
   return false;
 }
 
+export function ntfyPublishUrl(record: PushTokenRecord): string {
+  if (record.endpoint && record.endpoint.startsWith('http')) {
+    return record.endpoint.replace(/\/$/, '');
+  }
+  if (record.token.startsWith('http')) return record.token.replace(/\/$/, '');
+  return `https://ntfy.sh/${encodeURIComponent(record.token)}`;
+}
+
+export function ntfyMessageBody(payload: {
+  title: string;
+  body: string;
+  data?: Record<string, string>;
+}): string {
+  return JSON.stringify({
+    title: payload.title,
+    body: payload.body,
+    agentSessionId: payload.data?.agentSessionId ?? '',
+    sessionTitle: payload.data?.sessionTitle ?? '',
+    kind: payload.data?.kind ?? '',
+    seq: payload.data?.seq ?? '',
+    timestamp: payload.data?.timestamp ?? '',
+  });
+}
+
 async function sendNtfyPush(
   tokenRecord: PushTokenRecord,
   payload: { title: string; body: string; data?: Record<string, string> },
 ): Promise<boolean> {
-  const url =
-    tokenRecord.endpoint ??
-    (tokenRecord.token.startsWith('http')
-      ? tokenRecord.token
-      : `https://ntfy.sh/${encodeURIComponent(tokenRecord.token)}`);
+  const url = ntfyPublishUrl(tokenRecord);
 
   try {
     const res = await fetch(url, {
@@ -308,7 +331,7 @@ async function sendNtfyPush(
         Priority: 'high',
         Tags: 'robot,nexuslink',
       },
-      body: payload.body,
+      body: ntfyMessageBody(payload),
     });
     return res.ok;
   } catch (err) {
@@ -348,6 +371,7 @@ export async function sendAgentPushNotification(opts: {
   agentSessionId?: string;
   sessionTitle?: string;
   kind?: string;
+  seq?: number;
 }): Promise<{ sent: number; failed: number }> {
   const tokens = listPushTokens();
   if (tokens.length === 0) return { sent: 0, failed: 0 };
@@ -359,6 +383,7 @@ export async function sendAgentPushNotification(opts: {
       agentSessionId: opts.agentSessionId ?? '',
       sessionTitle: opts.sessionTitle ?? '',
       kind: opts.kind ?? '',
+      seq: opts.seq != null ? String(opts.seq) : '',
       timestamp: String(Date.now()),
     },
   };
