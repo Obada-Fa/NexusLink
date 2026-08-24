@@ -1801,24 +1801,39 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                 fontSize: 11, letterSpacing: 0.8, color: Color(0xFF666677))),
         const SizedBox(height: 8),
         for (final a in _agents)
-          ListTile(
-            leading: AgentMark(
-              agentId: a.id,
-              icon: a.icon,
-              color: agentMarkColor(a.id, available: a.available),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 3),
+            child: Container(
+              decoration: BoxDecoration(
+                color: _panelBackgroundColor(a.id),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: _borderColor(a.id), width: 1.2),
+              ),
+              child: ListTile(
+                leading: AgentMark(
+                  agentId: a.id,
+                  icon: a.icon,
+                  color: agentMarkColor(a.id, available: a.available),
+                ),
+                title: Text(a.name,
+                    style: const TextStyle(fontWeight: FontWeight.w500)),
+                subtitle: Text(a.available
+                    ? 'Runs on the PC — chat here'
+                    : 'CLI not installed on the PC'),
+                enabled: a.available,
+                trailing: a.available
+                    ? FilledButton(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: _userBubbleColor(a.id),
+                          foregroundColor: Colors.white,
+                        ),
+                        onPressed: () => _newChat(a),
+                        child: const Text('Select'),
+                      )
+                    : null,
+                onTap: a.available ? () => _newChat(a) : null,
+              ),
             ),
-            title: Text(a.name),
-            subtitle: Text(a.available
-                ? 'Runs on the PC — chat here'
-                : 'CLI not installed on the PC'),
-            enabled: a.available,
-            trailing: a.available
-                ? FilledButton(
-                    onPressed: () => _newChat(a),
-                    child: const Text('Select'),
-                  )
-                : null,
-            onTap: a.available ? () => _newChat(a) : null,
           ),
         const SizedBox(height: 16),
         if (kAgentHostChatsInAgentTab) ...[
@@ -1841,18 +1856,19 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             for (final s in _sessions)
               Builder(builder: (context) {
                 final busy = ref.watch(terminalBusyProvider)[s.agentSessionId] ?? false;
+                final agentAccent = _userBubbleColor(s.agent);
                 return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  padding: const EdgeInsets.symmetric(vertical: 3),
                   child: TerminalGlowBorder(
                     active: busy,
                     borderRadius: BorderRadius.circular(12),
                     strokeWidth: 2.0,
-                    glowColor: Colors.white,
+                    glowColor: agentAccent,
                     child: Container(
                       decoration: BoxDecoration(
-                        color: const Color(0xFF141420),
+                        color: _panelBackgroundColor(s.agent),
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: const Color(0xFF1E1E30)),
+                        border: Border.all(color: _borderColor(s.agent), width: 1.2),
                       ),
                       child: ListTile(
                         leading: AgentActivityIcon(
@@ -1860,8 +1876,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                           icon: s.icon,
                           active: s.busy ||
                               (_active?.agentSessionId == s.agentSessionId && _busy),
+                          color: agentAccent,
                         ),
-                        title: Text(s.title),
+                        title: Text(
+                          s.title,
+                          style: const TextStyle(fontWeight: FontWeight.w500),
+                        ),
                         subtitle: Text(
                           chatListSubtitle(agent: s.agent, cwd: s.cwd),
                           maxLines: 1,
@@ -1935,23 +1955,37 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             )
           else
             for (final c in _hostChats)
-              ListTile(
-                leading: AgentActivityIcon(
-                  agentId: c.agent,
-                  icon: c.icon,
-                ),
-                title: Text(c.title),
-                subtitle: Text(
-                  chatListSubtitle(
-                    agent: c.agent,
-                    source: c.source,
-                    cwd: c.cwd,
-                    resumable: c.resumable,
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: _panelBackgroundColor(c.agent),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: _borderColor(c.agent), width: 1.2),
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                  child: ListTile(
+                    leading: AgentActivityIcon(
+                      agentId: c.agent,
+                      icon: c.icon,
+                      color: _userBubbleColor(c.agent),
+                    ),
+                    title: Text(
+                      c.title,
+                      style: const TextStyle(fontWeight: FontWeight.w500),
+                    ),
+                    subtitle: Text(
+                      chatListSubtitle(
+                        agent: c.agent,
+                        source: c.source,
+                        cwd: c.cwd,
+                        resumable: c.resumable,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    onTap: () => _openHostChat(c),
+                  ),
                 ),
-                onTap: () => _openHostChat(c),
               ),
         ],
       ],
@@ -2201,7 +2235,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   Color _userBubbleColor(String? agentId) {
     switch (agentId) {
       case 'cursor':
-        return const Color(0xFF2B2D37); // Sleek zinc/slate
+        return const Color(0xFF888899); // Sleek slate / zinc
       case 'antigravity':
         return const Color(0xFF9F54FF); // Bright purple
       case 'claude':
@@ -2232,20 +2266,20 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   Color _panelBackgroundColor(String? agentId) {
     switch (agentId) {
-      case 'cursor': return const Color(0xFF1A1A1A); // Dark gray
-      case 'antigravity': return const Color(0xFF120B20);
-      case 'claude': return const Color(0xFF1A100B);
-      case 'opencode': return const Color(0xFF0A1412);
+      case 'cursor': return const Color(0xFF16161A); // Sleek dark gray
+      case 'antigravity': return const Color(0xFF150D24); // Deep purple tint
+      case 'claude': return const Color(0xFF1C110C); // Deep terracotta tint
+      case 'opencode': return const Color(0xFF091715); // Deep teal tint
       default: return const Color(0xFF151522);
     }
   }
 
   Color _borderColor(String? agentId) {
     switch (agentId) {
-      case 'cursor': return const Color(0xFF27272E); // Subtle dark border
-      case 'antigravity': return const Color(0xFF281845); // Dark purple border
-      case 'claude': return const Color(0xFF3A2015); // Dark terracotta border
-      case 'opencode': return const Color(0xFF15332E); // Dark teal border
+      case 'cursor': return const Color(0xFF333340); // Subtle dark border
+      case 'antigravity': return const Color(0xFF3C2166); // Dark purple border
+      case 'claude': return const Color(0xFF522E1D); // Dark terracotta border
+      case 'opencode': return const Color(0xFF1D4A43); // Dark teal border
       default: return const Color(0xFF22223A); // Default purplish gray
     }
   }
@@ -2253,9 +2287,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   Color _inputBorderColor(String? agentId) {
     switch (agentId) {
       case 'cursor': return const Color(0xFF383842); // Lighter dark border
-      case 'antigravity': return const Color(0xFF352055); // Lighter purple border
-      case 'claude': return const Color(0xFF4A2B1C); // Lighter terracotta border
-      case 'opencode': return const Color(0xFF1C453E); // Lighter teal border
+      case 'antigravity': return const Color(0xFF4C2A80); // Lighter purple border
+      case 'claude': return const Color(0xFF653925); // Lighter terracotta border
+      case 'opencode': return const Color(0xFF255E55); // Lighter teal border
       default: return const Color(0xFF2A2A40); // Default lighter purplish gray
     }
   }
