@@ -900,6 +900,7 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
       agentSessionId: session.info.agentSessionId,
       sessionTitle: session.info.title,
       kind: 'result',
+      seq: full.seq,
     });
   } else if (full.kind === 'permission-request') {
     const title = `Action Required (${session.info.title || session.info.agent})`;
@@ -910,6 +911,7 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
       agentSessionId: session.info.agentSessionId,
       sessionTitle: session.info.title,
       kind: 'permission-request',
+      seq: full.seq,
     });
   } else if (full.kind === 'error') {
     const title = session.info.title ? `Agent Error (${session.info.title})` : 'Agent Encountered an Error';
@@ -920,6 +922,7 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
       agentSessionId: session.info.agentSessionId,
       sessionTitle: session.info.title,
       kind: 'error',
+      seq: full.seq,
     });
   }
 }
