@@ -7,7 +7,6 @@ import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
 import '../services/notification_service.dart';
 import '../state/connection.dart';
-import '../state/connection_policy.dart';
 
 class ConnectionLifecycle extends ConsumerStatefulWidget {
   final Widget child;
@@ -68,16 +67,9 @@ class _ConnectionLifecycleState extends ConsumerState<ConnectionLifecycle>
         const {},
         const Duration(seconds: 8),
       );
-      final sessions = <AgentSessionInfo>[];
       for (final row in sessionsRaw) {
         if (row is! Map<String, dynamic>) continue;
-        sessions.add(AgentSessionInfo.fromJson(row));
-      }
-      final toCatchUp = sessionsForResumeCatchUp(
-        sessions,
-        isBusy: (s) => s.busy,
-      );
-      for (final session in toCatchUp) {
+        final session = AgentSessionInfo.fromJson(row);
         final historyRaw = await client.requestList(
           'agent.history',
           {'agentSessionId': session.agentSessionId},

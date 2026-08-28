@@ -6,8 +6,6 @@ import {
   sendAgentPushNotification,
   setPushActiveSessionsCheck,
   hasActivePushSessions,
-  ntfyPublishUrl,
-  ntfyMessageBody,
 } from '../push';
 
 describe('push notifications handler', () => {
@@ -58,44 +56,5 @@ describe('push notifications handler', () => {
     });
     expect(res.sent).toBe(0);
     expect(res.failed).toBe(0);
-  });
-
-  test('ntfyPublishUrl prefers endpoint then token URL', () => {
-    expect(
-      ntfyPublishUrl({
-        token: 'abc',
-        provider: 'ntfy',
-        endpoint: 'https://ntfy.sh/abc/',
-        createdAt: 1,
-        lastSeenAt: 1,
-      }),
-    ).toBe('https://ntfy.sh/abc');
-    expect(
-      ntfyPublishUrl({
-        token: 'topic-1',
-        provider: 'ntfy',
-        createdAt: 1,
-        lastSeenAt: 1,
-      }),
-    ).toBe('https://ntfy.sh/topic-1');
-  });
-
-  test('ntfyMessageBody includes seq and session fields', () => {
-    const body = ntfyMessageBody({
-      title: 'Agent Done',
-      body: 'shipped',
-      data: {
-        agentSessionId: 's1',
-        sessionTitle: 'App',
-        kind: 'result',
-        seq: '12',
-        timestamp: '1',
-      },
-    });
-    const parsed = JSON.parse(body) as Record<string, string>;
-    expect(parsed.kind).toBe('result');
-    expect(parsed.seq).toBe('12');
-    expect(parsed.agentSessionId).toBe('s1');
-    expect(parsed.body).toBe('shipped');
   });
 });

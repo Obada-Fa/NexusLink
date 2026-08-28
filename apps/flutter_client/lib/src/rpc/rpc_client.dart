@@ -13,8 +13,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
-
 import '../auth/pairing.dart';
 
 const frameMagic = 0x4e4c4631; // 'NLF1'
@@ -118,14 +116,6 @@ class RpcClient {
   RpcStatus get status => _currentStatus;
   Stream<RpcStatus> get statusStream => _status.stream;
 
-  bool get isClosed => _closed;
-  bool get socketOpen =>
-      _ws != null && _ws!.readyState == WebSocket.open;
-
-  Future<void>? _connectInFlight;
-  bool _replacingSocket = false;
-  bool _reconnectQueued = false;
-
   /// Parsed binary mirror frames (all streams; filter by streamKey).
   Stream<MirrorFrame> get frames => _frames.stream;
 
@@ -135,36 +125,10 @@ class RpcClient {
   }
 
   Future<void> connect() async {
-    if (_connectInFlight != null) {
-      await _connectInFlight;
-      return;
-    }
-    if (!_closed &&
-        _currentStatus == RpcStatus.connected &&
-        socketOpen) {
-      return;
-    }
-    final op = _connectInternal();
-    _connectInFlight = op;
-    try {
-      await op;
-    } finally {
-      if (identical(_connectInFlight, op)) _connectInFlight = null;
-    }
-  }
-
-  Future<void> _connectInternal() async {
     _closed = false;
-    _reconnectQueued = false;
     _reconnectTimer?.cancel();
     _stopHeartbeat();
     _setStatus(RpcStatus.connecting);
-    _replacingSocket = true;
-    try {
-      await _ws?.close();
-    } catch (_) {}
-    _ws = null;
-    _replacingSocket = false;
     try {
       final ws = await WebSocket.connect(wsUrl)
           .timeout(const Duration(seconds: 8));
@@ -183,7 +147,6 @@ class RpcClient {
       // UI layer) means reconnects re-authenticate too.
       await performPairingHandshake(_requestRaw);
       _reconnectAttempts = 0;
-      _reconnectQueued = false;
       _startHeartbeat();
       _setStatus(RpcStatus.connected);
     } catch (e) {
@@ -197,7 +160,6 @@ class RpcClient {
   }
 
   void _onClosed() {
-    if (_replacingSocket) return;
     _stopHeartbeat();
     _ws = null;
     _failPending('connection closed');
@@ -206,20 +168,15 @@ class RpcClient {
   }
 
   void _scheduleReconnect() {
-    if (_closed || _reconnectQueued) return;
-    _reconnectQueued = true;
+    if (_closed) return;
     _reconnectTimer?.cancel();
     final delayMs = reconnectDelayMs(_reconnectAttempts);
     _reconnectAttempts++;
     _reconnectTimer = Timer(Duration(milliseconds: delayMs), () {
-      _reconnectQueued = false;
       if (_closed) return;
       connect().catchError((_) {});
     });
   }
-
-  @visibleForTesting
-  void debugSetStatus(RpcStatus s) => _setStatus(s);
 
   void _startHeartbeat() {
     _stopHeartbeat();
