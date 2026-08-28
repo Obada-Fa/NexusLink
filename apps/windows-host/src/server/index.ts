@@ -19,13 +19,6 @@ import {
   cancelAgent, closeAgentSession, agentHistory, resolveAgentPermission, setAgentBroadcast,
   listAgentModels, AGENT_ICON_NAMES, resolveAgentIcon,
 } from '../../../desktop/src/server/handlers/agents';
-import {
-  registerPushToken,
-  listPushTokens,
-  removePushToken,
-  sendTestPush,
-  setPushActiveSessionsCheck,
-} from '../../../desktop/src/server/handlers/push';
 import { serveStatic, staticAvailable } from './static-server';
 import { printLaunchBanner, tailscaleIpv4FromCli } from './launch-banner';
 import { startMdns } from './mdns';
@@ -95,7 +88,6 @@ export async function startRpcServer(port = 45678, hostname?: string) {
     for (const ws of getAuthenticatedSessions()) send(ws, msg);
   };
   setAgentBroadcast(broadcastAll);
-  setPushActiveSessionsCheck(() => getAuthenticatedSessions().length > 0);
   void Promise.all(Object.keys(AGENT_ICON_NAMES).map((id) => resolveAgentIcon(id))).catch(() => {});
 
   async function dispatch(method: RpcMethod, params: Params, req: RpcRequest<RpcMethod>, ws: WebSocket) {
@@ -402,26 +394,6 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         result = undefined;
         break;
       }
-      case 'push.registerToken':
-        result = registerPushToken({
-          token: params.token as string,
-          provider: params.provider as 'fcm' | 'ntfy' | 'webhook' | undefined,
-          endpoint: params.endpoint as string | undefined,
-          name: params.name as string | undefined,
-        });
-        break;
-      case 'push.listTokens':
-        result = listPushTokens();
-        break;
-      case 'push.removeToken':
-        result = removePushToken(params.token as string);
-        break;
-      case 'push.sendTest':
-        result = await sendTestPush({
-          title: params.title as string | undefined,
-          body: params.body as string | undefined,
-        });
-        break;
       default:
         throw new Error(`unknown method: ${method}`);
     }

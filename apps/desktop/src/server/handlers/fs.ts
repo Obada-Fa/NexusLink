@@ -1,7 +1,7 @@
 import type { FileEntry, GitWorkingTree, ProjectInfo } from '@nexuslink/rpc-types';
 import fs from 'fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, join } from 'node:path';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 
 export function toPosixPath(p: string): string {
@@ -22,27 +22,6 @@ export function expandHostPath(rawPath: string): string {
   if (process.platform === 'win32' && (p.startsWith('/home/') || p === '/home')) return home;
   if (/^[A-Za-z]:$/.test(p)) return `${p}\\`;
   return p;
-}
-
-export function canonicalDir(dir: string): string {
-  try {
-    return realpathSync(dir);
-  } catch {
-    return dir;
-  }
-}
-
-/** Walk up directory tree to find top-level Git repository root if inside a repo. */
-export function findGitRoot(startDir: string): string {
-  if (!startDir || !startDir.trim()) return startDir;
-  let cur = canonicalDir(expandHostPath(startDir));
-  while (cur && cur !== '/' && !/^[A-Za-z]:[\\/]?$/.test(cur)) {
-    if (existsSync(join(cur, '.git'))) return toPosixPath(cur);
-    const parent = dirname(cur);
-    if (parent === cur) break;
-    cur = parent;
-  }
-  return toPosixPath(startDir);
 }
 
 export async function handleFsRead(rawPath: string): Promise<string> {
@@ -125,6 +104,14 @@ export async function handleFsList(path: string, showHidden = false): Promise<Fi
   });
 }
 
+function canonicalDir(dir: string): string {
+  try {
+    return realpathSync(dir);
+  } catch {
+    return dir;
+  }
+}
+
 /** Working-directory picker for agent chats: git roots under common folders. */
 export async function listProjects(): Promise<ProjectInfo[]> {
   const home = homedir();
@@ -138,8 +125,6 @@ export async function listProjects(): Promise<ProjectInfo[]> {
     join(home, 'dev'),
     join(home, 'src'),
     join(home, 'work'),
-    '/mnt/shared',
-    '/mnt/shared/projects',
     'D:\\projects',
     'C:\\projects',
   ];

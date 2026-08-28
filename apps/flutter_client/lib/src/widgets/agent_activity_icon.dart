@@ -58,13 +58,7 @@ bool hasOfficialAgentLogo(String id) =>
 
 Color agentMarkColor(String id, {required bool available}) {
   if (!available) return Colors.white24;
-  return switch (id) {
-    'antigravity' => const Color(0xFF9F54FF),
-    'claude' => const Color(0xFFE57A55),
-    'opencode' => const Color(0xFF12C9B6),
-    'cursor' => const Color(0xFFC0C0D0),
-    _ => const Color(0xFF2A6AFF),
-  };
+  return Colors.white;
 }
 
 /// Agent brand mark for list rows and pickers. Renders unified official brand vector
@@ -102,7 +96,7 @@ class AgentMark extends StatelessWidget {
             height: size,
             fit: BoxFit.contain,
             gaplessPlayback: true,
-            errorBuilder: (_, _, _) => _fallbackWidget(),
+            errorBuilder: (_, __, ___) => _fallbackWidget(),
           ),
         );
       }
@@ -232,7 +226,7 @@ class _AgentActivityIconState extends State<AgentActivityIcon>
     super.dispose();
   }
 
-  Color get _markColor => widget.color;
+  Color get _markColor => Colors.white;
 
   @override
   Widget build(BuildContext context) {

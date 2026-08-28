@@ -671,12 +671,7 @@ export default function AgentsPage() {
               key={a.id}
               disabled={!a.available}
               onClick={() => newChat(a)}
-              style={{
-                ...styles.row,
-                background: getAgentThemeBackground(a.id),
-                borderColor: getUserThemeBackground(a.id) + '50',
-                opacity: a.available ? 1 : 0.4,
-              }}
+              style={{ ...styles.row, opacity: a.available ? 1 : 0.4 }}
             >
               <AgentIcon agentId={a.id} name={a.name} icon={a.icon} />
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
@@ -684,16 +679,7 @@ export default function AgentsPage() {
                 <span style={styles.muted}>
                   {a.available ? 'Runs on the PC — chat here' : 'CLI not installed on the PC'}
                 </span>
-                {a.available && (
-                  <span
-                    style={{
-                      ...styles.selectBtn,
-                      background: getUserThemeBackground(a.id),
-                    }}
-                  >
-                    Select
-                  </span>
-                )}
+                {a.available && <span style={styles.selectBtn}>Select</span>}
               </div>
             </button>
           ))}
@@ -736,13 +722,7 @@ export default function AgentsPage() {
                   <button
                     type="button"
                     onClick={() => openSession(s)}
-                    style={{
-                      ...styles.row,
-                      marginBottom: 0,
-                      flex: 1,
-                      background: getAgentThemeBackground(s.agent),
-                      borderColor: getUserThemeBackground(s.agent) + '50',
-                    }}
+                    style={{ ...styles.row, marginBottom: 0, flex: 1 }}
                   >
                     <AgentIcon agentId={s.agent} name={s.title} icon={s.icon} />
                     <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
@@ -780,15 +760,7 @@ export default function AgentsPage() {
                 return <p style={styles.emptyTabMessage}>No PC conversations found.</p>;
               }
               return visible.map((c) => (
-                <button
-                  key={`${c.agent}-${c.hostChatId}`}
-                  onClick={() => openHostChat(c)}
-                  style={{
-                    ...styles.row,
-                    background: getAgentThemeBackground(c.agent),
-                    borderColor: getUserThemeBackground(c.agent) + '50',
-                  }}
-                >
+                <button key={`${c.agent}-${c.hostChatId}`} onClick={() => openHostChat(c)} style={styles.row}>
                   <AgentIcon agentId={c.agent} name={c.title} icon={c.icon} />
                   <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                     <strong>{c.title}</strong>

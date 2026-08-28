@@ -7,10 +7,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
-import '../services/notification_service.dart';
 import '../state/connection.dart';
 import '../state/launcher.dart';
-import '../state/last_cwd.dart';
 import '../widgets/app_icon.dart';
 import 'agent_screen.dart';
 import 'files_screen.dart';
@@ -219,30 +217,6 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
               child: Text(label,
                   style: const TextStyle(
                       fontSize: 13, fontWeight: FontWeight.w500))),
-          IconButton(
-            tooltip: 'Send test alert',
-            icon: const Icon(Icons.notifications_outlined, size: 18),
-            onPressed: status != RpcStatus.connected
-                ? null
-                : () async {
-                    final client = ref.read(activeClientProvider);
-                    if (client == null) return;
-                    try {
-                      await NotificationService.instance.sendTestAlert(client);
-                      if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Test alert sent')),
-                        );
-                      }
-                    } catch (e) {
-                      if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Test alert failed: $e')),
-                        );
-                      }
-                    }
-                  },
-          ),
           IconButton(
             icon: const Icon(Icons.power_settings_new, size: 18),
             onPressed: () {
@@ -480,12 +454,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     void push(Widget screen) => Navigator.of(context)
         .push(MaterialPageRoute(builder: (_) => screen));
     final items = <(IconData, String, VoidCallback?, bool)>[
-      (Icons.terminal, 'Terminal', () async {
-        final recent = await loadRecentAgentCwds();
-        if (mounted) {
-          push(TerminalScreen(initialCwd: recent.firstOrNull));
-        }
-      }, false),
+      (Icons.terminal, 'Terminal', () => push(const TerminalScreen()), false),
       (Icons.code, 'Code', () => push(const IdeScreen()), false),
       (Icons.folder, 'Files', () => push(const FilesScreen()), false),
       (Icons.memory, 'System', () => push(const SystemScreen()), false),

@@ -3,13 +3,10 @@
 // `activeClientProvider` and watch `connectionStatusProvider`; the connect
 // screen drives connect/disconnect.
 
-import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../rpc/rpc_client.dart';
-import 'connection_policy.dart';
 import 'last_host.dart';
 
 class ConnectionState {
@@ -40,16 +37,10 @@ class ConnectionState {
 }
 
 class ConnectionNotifier extends Notifier<ConnectionState> {
-  ConnectionNotifier({RpcClient Function(String wsUrl)? createClient})
-      : _createClient = createClient ?? RpcClient.new;
-
-  final RpcClient Function(String wsUrl) _createClient;
-
   VoidCallback? _statusSub;
   RpcClient? _currentClient;
   bool _disposed = false;
   Future<void>? _inFlightConnect;
-  Future<void>? _inFlightEnsure;
 
   @override
   ConnectionState build() {
@@ -66,19 +57,7 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
   /// Connect to a host ws URL. Derives the matching http base for file transfer.
   Future<void> connect(String wsUrl) async {
     wsUrl = normalizeHostWsUrl(wsUrl);
-    final previous = _inFlightConnect;
-    final run = () async {
-      if (previous != null) {
-        try {
-          await previous;
-        } catch (_) {}
-        if (_disposed) return;
-        if (state.status == RpcStatus.connected && state.hostUrl == wsUrl) {
-          return;
-        }
-      }
-      await _connect(wsUrl);
-    }();
+    final run = _connect(wsUrl);
     _inFlightConnect = run;
     try {
       await run;
@@ -88,40 +67,8 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
   }
 
   Future<void> _connect(String wsUrl) async {
-    final existing = _currentClient;
-    if (existing != null &&
-        shouldReuseRpcClient(
-          targetUrl: wsUrl,
-          currentUrl: state.hostUrl,
-          clientClosed: existing.isClosed,
-        )) {
-      if (existing.status == RpcStatus.connected && existing.socketOpen) {
-        if (!_disposed) {
-          state = state.copyWith(status: RpcStatus.connected, hostUrl: wsUrl);
-        }
-        return;
-      }
-      try {
-        await existing.connect();
-        if (_disposed) return;
-        await saveLastHostUrl(wsUrl);
-        state = state.copyWith(status: RpcStatus.connected, hostUrl: wsUrl);
-        return;
-      } catch (_) {
-        if (!_disposed) {
-          state = state.copyWith(
-            client: existing,
-            status: RpcStatus.disconnected,
-            hostUrl: wsUrl,
-            httpBase: _httpBaseFromWs(wsUrl),
-          );
-        }
-        rethrow;
-      }
-    }
-
     _teardown();
-    final client = _createClient(wsUrl);
+    final client = RpcClient(wsUrl);
     _currentClient = client;
     final sub = client.statusStream.listen((s) {
       if (!_disposed) state = state.copyWith(status: s);
@@ -142,19 +89,9 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
       await saveLastHostUrl(wsUrl);
       state = state.copyWith(status: RpcStatus.connected);
     } catch (_) {
-      if (_disposed) {
-        client.dispose();
-        rethrow;
-      }
-      // Keep the client so its backoff reconnect can recover, and keep the
-      // host URL so resume/retry still know where to dial.
-      _currentClient = client;
-      state = ConnectionState(
-        client: client,
-        status: RpcStatus.disconnected,
-        hostUrl: wsUrl,
-        httpBase: _httpBaseFromWs(wsUrl),
-      );
+      client.dispose();
+      _currentClient = null;
+      if (!_disposed) state = const ConnectionState();
       rethrow;
     }
   }
@@ -184,24 +121,6 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
   /// if this session already had a host (explicit disconnect clears it).
   Future<void> ensureConnected() async {
     if (_disposed) return;
-    final existingEnsure = _inFlightEnsure;
-    if (existingEnsure != null) {
-      try {
-        await existingEnsure;
-      } catch (_) {}
-      return;
-    }
-    final run = _ensureConnected();
-    _inFlightEnsure = run;
-    try {
-      await run;
-    } finally {
-      if (identical(_inFlightEnsure, run)) _inFlightEnsure = null;
-    }
-  }
-
-  Future<void> _ensureConnected() async {
-    if (_disposed) return;
     if (state.status == RpcStatus.connected) {
       final client = state.client;
       if (client == null) return;
@@ -211,23 +130,11 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
         await client.request(
           'session.heartbeat',
           const {},
-          livenessProbeTimeout,
+          const Duration(seconds: 3),
         );
         return;
       } catch (_) {
-        if (!shouldReplaceLiveSocket(
-          status: client.status,
-          socketOpen: client.socketOpen,
-          probeFailed: true,
-        )) {
-          return;
-        }
-        if (!client.isClosed) {
-          try {
-            await client.connect();
-          } catch (_) {}
-          return;
-        }
+        // Force a clean reconnect below using the last known host URL.
       }
     }
     final inflight = _inFlightConnect;
@@ -241,15 +148,10 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
       await _waitWhileConnecting();
       return;
     }
-    final existing = state.client ?? _currentClient;
-    if (existing != null && !existing.isClosed) {
-      if (existing.status == RpcStatus.connecting) {
-        await _waitWhileConnecting();
-      }
-      // Auto-reconnect is already scheduled. Do not replace the client.
-      return;
+    var url = state.hostUrl?.trim();
+    if (url == null || url.isEmpty) {
+      url = await loadLastHostUrl();
     }
-    final url = state.hostUrl?.trim();
     if (url == null || url.isEmpty) return;
     try {
       await connect(url);

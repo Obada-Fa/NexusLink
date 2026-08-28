@@ -6,7 +6,6 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { Database } from 'bun:sqlite';
 import type { AgentEvent, AgentHostChat } from '@nexuslink/rpc-types';
-import { findGitRoot } from './fs';
 
 export type HostChatDelta = Omit<AgentEvent, 'seq'>;
 
@@ -159,7 +158,7 @@ export function parseAgyWorkspaceUris(raw: string | null | undefined): string {
     if (typeof value !== 'string' || !value.trim()) return '';
     const path = fileUriToPath(value);
     if (!path) return '';
-    return existsSync(path) ? findGitRoot(canonicalDir(path)) : path;
+    return existsSync(path) ? canonicalDir(path) : path;
   };
   try {
     const parsed = JSON.parse(text) as unknown;
@@ -182,14 +181,14 @@ export function cwdFromAgyProjectResources(raw: unknown): string {
     const uri = String(git?.folderUri ?? it.folderUri ?? '');
     if (!uri) continue;
     const path = fileUriToPath(uri);
-    if (path && existsSync(path)) return findGitRoot(canonicalDir(path));
-    if (path.startsWith('/')) return findGitRoot(path);
+    if (path && existsSync(path)) return canonicalDir(path);
+    if (path.startsWith('/')) return path;
   }
   const name = String(rec.name ?? '').trim();
   if (name.startsWith('/') || name.startsWith('file:')) {
     const path = fileUriToPath(name);
-    if (path && existsSync(path)) return findGitRoot(canonicalDir(path));
-    if (path.startsWith('/')) return findGitRoot(path);
+    if (path && existsSync(path)) return canonicalDir(path);
+    if (path.startsWith('/')) return path;
   }
   return '';
 }
@@ -213,7 +212,7 @@ export function parseAgyCliHistoryLine(raw: unknown): AgyCliHistoryEntry | null 
   if (!workspace) return null;
   return {
     conversationId: String(rec.conversationId ?? '').trim(),
-    workspace: existsSync(workspace) ? findGitRoot(canonicalDir(workspace)) : workspace,
+    workspace: existsSync(workspace) ? canonicalDir(workspace) : workspace,
     display: String(rec.display ?? '').trim(),
   };
 }
@@ -857,9 +856,8 @@ function agyListMeta(id: string, summary: AgySummary | undefined, history: AgyCl
   source: string;
 } {
   const title = agyListTitle(id, summary);
-  const rawCwd = summary?.cwd
+  const cwd = summary?.cwd
     || cwdFromAgyCliHistory(id, `${summary?.title ?? ''} ${summary?.preview ?? ''} ${title}`, history);
-  const cwd = rawCwd && existsSync(rawCwd) ? findGitRoot(rawCwd) : rawCwd;
   return {
     title,
     cwd,
