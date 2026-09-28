@@ -60,5 +60,8 @@ List<AgentEvent> applyAgentHistorySnapshot(
   final merged = mergeAgentHistory(history, current);
   if (merged.isEmpty && current.isNotEmpty) return current;
   if (busy && merged.length < current.length) return current;
+  if (!busy && transcriptHasOpenTools(merged)) {
+    return closeOpenTools(merged, output: 'Interrupted — host restarted.');
+  }
   return merged;
 }

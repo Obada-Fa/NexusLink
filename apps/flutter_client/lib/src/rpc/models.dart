@@ -214,12 +214,19 @@ class AgentCapabilities {
   /// OpenCode-only: 'go' | 'byok' | 'unknown'. Null for other agents.
   final String? plan;
 
+  /// How the host answers this agent's permission requests.
+  /// 'ask' (default) surfaces a card on the phone; 'auto' answers immediately
+  /// so a turn never blocks on a phone that is not watching that session.
+  /// Null means the host is too old to report it — treat as 'ask'.
+  final String? approvalMode;
+
   const AgentCapabilities({
     required this.modes,
     required this.thinkingLevels,
     required this.models,
     required this.images,
     this.plan,
+    this.approvalMode,
   });
 
   static const empty = AgentCapabilities(
@@ -228,6 +235,15 @@ class AgentCapabilities {
     models: [],
     images: false,
   );
+
+  AgentCapabilities copyWith({String? approvalMode}) => AgentCapabilities(
+        modes: modes,
+        thinkingLevels: thinkingLevels,
+        models: models,
+        images: images,
+        plan: plan,
+        approvalMode: approvalMode ?? this.approvalMode,
+      );
 
   factory AgentCapabilities.fromJson(dynamic raw) {
     if (raw is! Map) return AgentCapabilities.empty;
@@ -254,6 +270,10 @@ class AgentCapabilities {
       plan: (planRaw == 'go' || planRaw == 'byok' || planRaw == 'unknown')
           ? planRaw
           : null,
+      approvalMode:
+          (j['approvalMode'] == 'ask' || j['approvalMode'] == 'auto')
+              ? j['approvalMode'] as String
+              : null,
     );
   }
 }
@@ -272,6 +292,14 @@ class AgentInfo {
     this.icon,
     this.capabilities = AgentCapabilities.empty,
   });
+
+  AgentInfo copyWith({AgentCapabilities? capabilities}) => AgentInfo(
+        id: id,
+        name: name,
+        available: available,
+        icon: icon,
+        capabilities: capabilities ?? this.capabilities,
+      );
 
   factory AgentInfo.fromJson(Map<String, dynamic> j) => AgentInfo(
         id: j['id'] as String,
@@ -464,30 +492,37 @@ bool isAgentToolEvent(AgentEvent e) =>
     e.toolName != 'askQuestion';
 
 /// Collapse a tool-start + matching tool-end into one row.
+///
+/// Pairing is FIFO per refId so duplicate refs (Antigravity repeating ACTIVE
+/// for the same step, or tools keyed only by name) each get their own end.
+/// Empty refIds are paired with each other in order instead of being ignored.
 List<AgentEvent> mergeToolEvents(List<AgentEvent> events) {
   final out = <AgentEvent>[];
-  final startIdx = <String, int>{};
+  final startIdx = <String, List<int>>{};
 
   for (final e in events) {
     final ref = e.refId ?? '';
-    if (e.kind == 'tool-start' && ref.isNotEmpty) {
-      startIdx[ref] = out.length;
+    if (e.kind == 'tool-start') {
+      startIdx.putIfAbsent(ref, () => []).add(out.length);
       out.add(e);
       continue;
     }
-    if (e.kind == 'tool-end' && ref.isNotEmpty && startIdx.containsKey(ref)) {
-      final i = startIdx.remove(ref)!;
-      final start = out[i];
-      out[i] = AgentEvent(
-        seq: e.seq,
-        ts: e.ts,
-        kind: 'tool-end',
-        toolName: e.toolName ?? start.toolName,
-        toolInput: start.toolInput,
-        toolOutput: e.toolOutput,
-        refId: ref,
-      );
-      continue;
+    if (e.kind == 'tool-end') {
+      final q = startIdx[ref];
+      if (q != null && q.isNotEmpty) {
+        final i = q.removeAt(0);
+        final start = out[i];
+        out[i] = AgentEvent(
+          seq: e.seq,
+          ts: e.ts,
+          kind: 'tool-end',
+          toolName: e.toolName ?? start.toolName,
+          toolInput: start.toolInput,
+          toolOutput: e.toolOutput,
+          refId: ref.isNotEmpty ? ref : start.refId,
+        );
+        continue;
+      }
     }
     out.add(e);
   }
@@ -576,7 +611,10 @@ List<AgentEvent> closeOpenTools(
         toolName: e.toolName,
         toolInput: e.toolInput,
         toolOutput: output,
-        refId: (e.refId ?? '').isNotEmpty ? e.refId : 'orphan-$seq',
+        // Keep the start's ref (including empty) so mergeToolEvents FIFO
+        // can pair every leftover start. A synthetic orphan id would miss
+        // empty-ref starts and leave Stop stuck in the composer.
+        refId: e.refId,
       ),
   ];
 }

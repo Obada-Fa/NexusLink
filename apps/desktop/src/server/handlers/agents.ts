@@ -26,6 +26,7 @@ import {
   clipTitle,
   getAgyChatTitle,
   listAgyHostChats,
+  listCodexHostChats,
   listClaudeHostChats,
   listCursorCliHostChats,
   listCursorIdeHostChats,
@@ -85,12 +86,15 @@ function extraBinDirs(): string[] {
     join(home, '.opencode', 'bin'),
     join(home, '.cursor', 'bin'),
     join(home, '.gemini', 'antigravity-cli'),
+    join(home, '.gemini', 'antigravity', 'bin'),
+    join(home, '.gemini', 'antigravity'),
     join(local, 'agy', 'bin'),
     join(home, 'bin'),
     join(local, 'Programs', 'cursor', 'resources', 'app', 'bin'),
     join(roaming, 'npm'),
     join(home, 'AppData', 'Roaming', 'npm'),
     '/usr/local/bin',
+    '/usr/bin',
     ...cursorAgentInstallDirs(roaming),
   ];
   return dirs;
@@ -194,6 +198,15 @@ const ANTIGRAVITY_MODELS: AgentModelOption[] = [
   { id: 'gpt-oss-120b', name: 'GPT-OSS 120B', supportsEffort: false },
 ];
 
+
+const CODEX_MODELS: AgentModelOption[] = [
+  { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', supportsEffort: true },
+  { id: 'gpt-5.6-sol-medium', name: 'GPT-5.6', supportsEffort: true },
+  { id: 'gpt-6-sol', name: 'GPT-6 Sol', supportsEffort: true },
+  { id: 'o3-mini', name: 'o3-mini', supportsEffort: true },
+  { id: 'o4-mini', name: 'o4-mini', supportsEffort: true },
+];
+
 const CLAUDE_MODELS: AgentModelOption[] = [
   { id: 'default', name: 'Default', supportsEffort: true },
   { id: 'sonnet', name: 'Sonnet', supportsEffort: true },
@@ -202,6 +215,19 @@ const CLAUDE_MODELS: AgentModelOption[] = [
 ];
 
 const AGENT_DEFS: AgentDef[] = [
+  {
+    id: 'codex',
+    name: 'Codex',
+    bin: 'codex',
+    capabilities: {
+      modes: ['agent', 'plan'],
+      thinkingLevels: ['low', 'medium', 'high'],
+      models: CODEX_MODELS,
+      images: true,
+    },
+    makeAdapter: (s) => new CodexAdapter(s),
+  },
+
   {
     id: 'claude',
     name: 'Claude Code',
@@ -294,6 +320,7 @@ export function listAgents(): AgentInfo[] {
       capabilities: {
         ...d.capabilities,
         models,
+        approvalMode: getAgentApprovalMode(d.id),
         // Include Go plan status for OpenCode so the phone can show a badge.
         // Uses cached value (populated during warm-up) — no extra blocking call.
         ...(d.id === 'opencode' && bin
@@ -750,6 +777,7 @@ export function buildAgyArgv(opts: {
   const argv = [
     opts.bin,
     '--output-format', 'stream-json',
+    '--dangerously-skip-permissions',
     '--print-timeout', '15m',
   ];
   if (opts.cwd) argv.push('--add-dir', opts.cwd);
@@ -825,6 +853,121 @@ interface AgentAdapter {
 
 const agentSessions = new Map<string, AgentSession>();
 
+/**
+ * Per-agent approval policy.
+ *
+ * 'ask' — surface every permission request to the phone and wait for an answer.
+ * 'auto' — never ask; approve immediately so a turn can never block on a
+ *          phone that is closed, backgrounded, or attached to another session.
+ *
+ * A permission request that nobody answers is worse than an unwanted one: the
+ * agent sits blocked until its own timeout, so 'auto' is the escape hatch.
+ */
+export type AgentApprovalMode = 'ask' | 'auto';
+
+const APPROVAL_MODES: readonly AgentApprovalMode[] = ['ask', 'auto'];
+
+const approvalModes = new Map<string, AgentApprovalMode>();
+
+function getApprovalStorePath(): string {
+  const dir = join(homedir(), '.cache', 'nexuslink');
+  if (!existsSync(dir)) {
+    try {
+      mkdirSync(dir, { recursive: true });
+    } catch (_) {}
+  }
+  return join(dir, 'agent_approval.json');
+}
+
+function loadApprovalModes(): void {
+  try {
+    const p = getApprovalStorePath();
+    if (!existsSync(p)) return;
+    const parsed = JSON.parse(readFileSync(p, 'utf-8')) as unknown;
+    if (!parsed || typeof parsed !== 'object') return;
+    for (const [agent, mode] of Object.entries(parsed as Record<string, unknown>)) {
+      if (APPROVAL_MODES.includes(mode as AgentApprovalMode)) {
+        approvalModes.set(agent, mode as AgentApprovalMode);
+      }
+    }
+  } catch (_) {}
+}
+
+function saveApprovalModes(): void {
+  try {
+    writeFileSync(
+      getApprovalStorePath(),
+      JSON.stringify(Object.fromEntries(approvalModes), null, 2),
+      'utf-8',
+    );
+  } catch (_) {}
+}
+
+loadApprovalModes();
+
+export function getAgentApprovalMode(agentId: string): AgentApprovalMode {
+  return approvalModes.get(agentId) ?? (agentId === 'antigravity' ? 'auto' : 'ask');
+}
+
+export function setAgentApprovalMode(agentId: string, mode: string): { ok: boolean; mode?: AgentApprovalMode } {
+  if (!APPROVAL_MODES.includes(mode as AgentApprovalMode)) return { ok: false };
+  approvalModes.set(agentId, mode as AgentApprovalMode);
+  saveApprovalModes();
+  return { ok: true, mode: mode as AgentApprovalMode };
+}
+
+/** How long a surfaced permission request may wait before the host auto-denies it. */
+const PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+
+const permissionTimers = new Map<string, Map<string, ReturnType<typeof setTimeout>>>();
+
+/**
+ * Deny a permission request that nobody answered. Without this the CLI holds the
+ * request open and the session is wedged until its own timeout, which is the
+ * "asked on my PC, never reached my phone, request died" failure.
+ */
+function trackPermissionTimeout(session: AgentSession, requestId: string): void {
+  const key = session.info.agentSessionId;
+  let byRequest = permissionTimers.get(key);
+  if (!byRequest) {
+    byRequest = new Map();
+    permissionTimers.set(key, byRequest);
+  }
+  byRequest.get(requestId)?.unref?.();
+  const timer = setTimeout(() => {
+    const pending = permissionTimers.get(key);
+    pending?.delete(requestId);
+    if (pending && !pending.size) permissionTimers.delete(key);
+    const resolve = session.pendingPermissions.get(requestId);
+    if (!resolve) return;
+    session.pendingPermissions.delete(requestId);
+    emit(session, {
+      kind: 'status',
+      text: 'No answer on the phone — denied automatically after 5 minutes.',
+    });
+    resolve(false);
+  }, PERMISSION_TIMEOUT_MS);
+  timer.unref?.();
+  byRequest.set(requestId, timer);
+}
+
+function clearPermissionTimeout(agentSessionId: string, requestId: string): void {
+  const byRequest = permissionTimers.get(agentSessionId);
+  const timer = byRequest?.get(requestId);
+  if (!byRequest || timer === undefined) return;
+  timer.unref?.();
+  clearTimeout(timer);
+  byRequest.delete(requestId);
+  if (!byRequest.size) permissionTimers.delete(agentSessionId);
+}
+
+function clearAllPermissionTimeouts(agentSessionId: string): void {
+  const byRequest = permissionTimers.get(agentSessionId);
+  if (!byRequest) return;
+  for (const timer of byRequest.values()) clearTimeout(timer);
+  permissionTimers.delete(agentSessionId);
+}
+
 function getSessionsStorePath(): string {
   const dir = join(homedir(), '.cache', 'nexuslink');
   if (!existsSync(dir)) {
@@ -881,6 +1024,7 @@ function loadAgentSessionsFromDisk(): void {
 }
 
 function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): void {
+  if (isRedundantToolStart(session.history, event)) return;
   const full: AgentEvent = { ...event, seq: ++session.seq, ts: Date.now() };
   session.history.push(full);
   if (session.history.length > HISTORY_CAP) session.history.splice(0, 100);
@@ -1035,6 +1179,9 @@ export function listHostChats(agent?: string): AgentHostChat[] {
   if (want('cursor')) {
     out.push(...listCursorCliHostChats(which('cursor-agent') !== null));
     out.push(...listCursorIdeHostChats());
+  }
+  if (want('codex')) {
+    out.push(...listCodexHostChats());
   }
   if (want('antigravity')) {
     out.push(...listAgyHostChats());
@@ -1209,14 +1356,21 @@ export function cancelAgent(agentSessionId: string): { ok: boolean } {
   const session = agentSessions.get(agentSessionId);
   if (!session) return { ok: false };
   session.adapter.cancel();
-  setBusy(session, false);
+  const settled = closeDanglingToolStarts(session.history, 'Stopped.');
+  if (settled.length !== session.history.length) {
+    session.history = settled;
+    session.seq = Math.max(session.seq, settled[settled.length - 1]?.seq ?? 0);
+    saveAgentSessionsToDisk();
+  }
   emit(session, { kind: 'status', text: 'cancelled' });
+  setBusy(session, false);
   return { ok: true };
 }
 
 export function closeAgentSession(agentSessionId: string): { ok: boolean } {
   const session = agentSessions.get(agentSessionId);
   if (!session) return { ok: false };
+  clearAllPermissionTimeouts(agentSessionId);
   session.adapter?.close?.();
   session.info.status = 'exited';
   agentSessions.delete(agentSessionId);
@@ -1230,17 +1384,24 @@ export function resolveAgentPermission(
   agentSessionId: string,
   requestId: string,
   allow: boolean,
-): { ok: boolean } {
+): { ok: boolean; reason?: string } {
   const session = agentSessions.get(agentSessionId);
-  if (!session) return { ok: false };
+  if (!session) return { ok: false, reason: 'unknown session' };
   const pending = session.pendingPermissions.get(requestId);
   if (pending) {
+    clearPermissionTimeout(agentSessionId, requestId);
     session.pendingPermissions.delete(requestId);
     pending(allow);
     return { ok: true };
   }
-  session.adapter.permission?.(requestId, allow);
-  return { ok: true };
+  if (session.adapter.permission) {
+    clearPermissionTimeout(agentSessionId, requestId);
+    session.adapter.permission(requestId, allow);
+    return { ok: true };
+  }
+  // Previously this returned ok:true unconditionally, so a stale card in the
+  // phone looked accepted while the agent was still blocked. Say so instead.
+  return { ok: false, reason: 'request already expired' };
 }
 
 // ---------------------------------------------------------------------------
@@ -1392,7 +1553,6 @@ export function isInternalCliNoise(text: string): boolean {
   if (!text || typeof text !== 'string') return false;
   const trimmed = text.trim();
   return (
-    /^declaring permissions:\s*cortex tool/i.test(trimmed) ||
     /invalid tool call error \(invalid_args\)/i.test(trimmed) ||
     /is not a valid artifact path; artifacts must be in/i.test(trimmed)
   );
@@ -1407,8 +1567,10 @@ export function sanitizeCliError(text: string, agentName: string): string {
   if (/^declaring permissions:\s*cortex tool/i.test(cleaned)) {
     const m = cleaned.match(/invalid tool call error \([^)]*\)\s*(.*)$/i)
       ?? cleaned.match(/model output error:\s*(.*)$/i);
-    if (m?.[1]) {
+    if (m?.[1] && m[1].trim()) {
       cleaned = m[1].trim();
+    } else {
+      cleaned = `${agentName} requires tool permissions on the host PC.`;
     }
   }
   return cleaned;
@@ -1423,32 +1585,49 @@ export function sanitizeAgentHistory(history: AgentEvent[]): AgentEvent[] {
   });
 }
 
+/** Tool-starts that never got a matching tool-end, FIFO per refId (including empty). */
+export function unmatchedToolStarts(history: AgentEvent[]): AgentEvent[] {
+  const open: AgentEvent[] = [];
+  for (const e of history) {
+    if (e.kind === 'tool-start') {
+      open.push(e);
+    } else if (e.kind === 'tool-end') {
+      const ref = (e.refId ?? '').trim();
+      const i = open.findIndex((s) => (s.refId ?? '').trim() === ref);
+      if (i >= 0) open.splice(i, 1);
+    }
+  }
+  return open;
+}
+
+/** Repeated ACTIVE/start for a ref that is already in flight. */
+export function isRedundantToolStart(
+  history: AgentEvent[],
+  event: { kind?: string; refId?: string },
+): boolean {
+  if (event.kind !== 'tool-start') return false;
+  const ref = (event.refId ?? '').trim();
+  if (!ref) return false;
+  return unmatchedToolStarts(history).some((s) => (s.refId ?? '').trim() === ref);
+}
+
 /** Close tool-start events that never got a tool-end (host crash / restart). */
 export function closeDanglingToolStarts(
   history: AgentEvent[],
   output = 'Interrupted — host restarted.',
 ): AgentEvent[] {
-  const open = new Map<string, AgentEvent>();
-  let orphan = 0;
-  for (const e of history) {
-    const ref = (e.refId ?? '').trim() || `__orphan_${++orphan}`;
-    if (e.kind === 'tool-start') open.set(ref, e);
-    else if (e.kind === 'tool-end') open.delete(ref);
-  }
-  if (open.size === 0) return history;
+  const open = unmatchedToolStarts(history);
+  if (open.length === 0) return history;
   let seq = history.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
-  const extra: AgentEvent[] = [];
-  for (const [ref, start] of open) {
-    extra.push({
-      seq: ++seq,
-      ts: Date.now(),
-      kind: 'tool-end',
-      toolName: start.toolName,
-      toolInput: start.toolInput,
-      toolOutput: output,
-      refId: start.refId || ref,
-    });
-  }
+  const extra: AgentEvent[] = open.map((start) => ({
+    seq: ++seq,
+    ts: Date.now(),
+    kind: 'tool-end',
+    toolName: start.toolName,
+    toolInput: start.toolInput,
+    toolOutput: output,
+    refId: start.refId,
+  }));
   return [...history, ...extra];
 }
 
@@ -1731,7 +1910,6 @@ export function withoutDuplicateResult(
   streamedText: boolean,
 ): AgentDelta {
   if (ev.kind === 'result' && streamedText) return { kind: 'result', text: '' };
-  if (ev.kind === 'error' && streamedText) return { kind: 'result', text: '' };
   return ev;
 }
 
@@ -1780,30 +1958,160 @@ export function parseOpencodeStreamEvent(msg: Record<string, unknown>): AgentDel
 export function parseAgyStreamEvent(msg: Record<string, unknown>): AgentDelta[] {
   const event = String(msg.event ?? msg.type ?? '');
   if (event === 'init') return [];
+
+  // 1. Direct model / planner responses (e.g. from stream-json or transcript replay)
+  if (event === 'PLANNER_RESPONSE' || event === 'MODEL_RESPONSE') {
+    const out: AgentDelta[] = [];
+    if (typeof msg.thinking === 'string' && msg.thinking.trim()) {
+      out.push({ kind: 'thinking', text: msg.thinking.trim() });
+    }
+    if (typeof msg.content === 'string' && msg.content.trim()) {
+      out.push({ kind: 'text', text: msg.content.trim() });
+    }
+    if (Array.isArray(msg.tool_calls)) {
+      for (const tc of msg.tool_calls) {
+        if (!tc || typeof tc !== 'object') continue;
+        const name = String(tc.name ?? 'tool');
+        const input = typeof tc.args === 'string'
+          ? tc.args
+          : JSON.stringify(tc.args ?? {}, null, 2);
+        out.push({
+          kind: 'tool-start',
+          toolName: name,
+          toolInput: input.slice(0, 4000),
+          refId: String(tc.id ?? tc.name ?? name),
+        });
+      }
+    }
+    if (out.length) return out;
+  }
+
+  // 2. Control / Permission Requests from agy
+  if (
+    event === 'control_request' ||
+    event === 'permission_request' ||
+    event === 'can_use_tool' ||
+    msg.subtype === 'can_use_tool'
+  ) {
+    const tool = (msg.request as Record<string, unknown> | undefined) ?? msg;
+    const name = String(tool.tool_name ?? tool.name ?? 'tool');
+    const refId = String(msg.request_id ?? msg.id ?? crypto.randomUUID());
+    const input = JSON.stringify(tool.input ?? tool.tool_input ?? tool.parameters ?? {}, null, 2).slice(0, 4000);
+    const reason = typeof msg.reason === 'string'
+      ? msg.reason
+      : typeof tool.reason === 'string'
+        ? tool.reason
+        : `Allow ${name}?`;
+    return [{
+      kind: 'permission-request',
+      toolName: name,
+      toolInput: input,
+      refId,
+      text: reason,
+    }];
+  }
+
+  // 3. Thinking / Thought events
+  if (event === 'thinking' || event === 'thought') {
+    const text = String(msg.text ?? msg.content ?? msg.thinking ?? msg.thought ?? '').trim();
+    if (text) return [{ kind: 'thinking', text }];
+  }
+
+  // 4. Step Updates
   if (event === 'step_update') {
     const step = (msg.step_update as Record<string, unknown> | undefined) ?? {};
     const stepType = String(step.step_type ?? '');
     const state = String(step.state ?? '');
-    if (stepType === 'agent_response') {
-      const text = typeof step.text_delta === 'string' ? step.text_delta : '';
-      if (text) return [{ kind: 'text-delta', text }];
+
+    // Planner response (may contain both thinking and text)
+    if (stepType === 'planner_response') {
+      const out: AgentDelta[] = [];
+      if (typeof step.thinking === 'string' && step.thinking.trim()) {
+        out.push({ kind: 'thinking', text: step.thinking.trim() });
+      }
+      const content = step.content ?? step.text ?? step.response ?? step.text_delta;
+      if (typeof content === 'string' && content.trim()) {
+        out.push({ kind: typeof step.text_delta === 'string' ? 'text-delta' : 'text', text: content.trim() });
+      }
+      if (out.length) return out;
+    }
+
+    // Thinking / reasoning step
+    if (
+      stepType === 'thought' ||
+      stepType === 'thinking' ||
+      stepType === 'reasoning' ||
+      typeof step.thinking === 'string' ||
+      typeof step.thought === 'string'
+    ) {
+      const text = String(step.thinking ?? step.thought ?? step.text ?? step.content ?? '').trim();
+      if (text) return [{ kind: 'thinking', text }];
+    }
+
+    // Agent response text
+    if (stepType === 'agent_response' || stepType === 'response' || stepType === 'model_response') {
+      if (typeof step.text_delta === 'string' && step.text_delta) {
+        return [{ kind: 'text-delta', text: step.text_delta }];
+      }
+      const fullText = typeof step.text === 'string'
+        ? step.text
+        : typeof step.content === 'string'
+          ? step.content
+          : typeof step.response === 'string'
+            ? step.response
+            : '';
+      if (fullText) return [{ kind: 'text', text: fullText }];
       return [];
     }
+
+    // Permission request within step
+    if (stepType === 'waiting_for_input' || stepType === 'permission_request' || state === 'WAITING_FOR_INPUT' || state === 'WAITING_INPUT') {
+      const info = (step.tool_info as Record<string, unknown> | undefined) ?? {};
+      const name = String(step.tool_name ?? info.name ?? 'tool');
+      const refId = String(step.step_index ?? info.name ?? name);
+      const input = JSON.stringify(info.parameters ?? {}, null, 2).slice(0, 4000);
+      const reason = typeof step.reason === 'string' ? step.reason : `Allow ${name}?`;
+      return [{
+        kind: 'permission-request',
+        toolName: name,
+        toolInput: input,
+        refId,
+        text: reason,
+      }];
+    }
+
+    // Tool execution
     if (stepType === 'tool') {
       const info = (step.tool_info as Record<string, unknown> | undefined) ?? {};
       const name = String(step.tool_name ?? info.name ?? 'tool');
       const refId = String(step.step_index ?? info.name ?? name);
       const input = JSON.stringify(info.parameters ?? {}, null, 2).slice(0, 4000);
+      const errStr = typeof info.error === 'string'
+        ? info.error
+        : typeof step.error === 'string'
+          ? step.error
+          : '';
       const output = typeof info.output === 'string'
         ? info.output.slice(0, 4000)
-        : JSON.stringify(info.output ?? {}, null, 2).slice(0, 4000);
-      if (state === 'ACTIVE') {
+        : info.output !== undefined
+          ? JSON.stringify(info.output, null, 2).slice(0, 4000)
+          : errStr
+            ? errStr.slice(0, 4000)
+            : '';
+      if (state === 'ACTIVE' || state === 'START' || state === 'RUNNING') {
         return [{ kind: 'tool-start', toolName: name, toolInput: input, refId }];
       }
       return [{ kind: 'tool-end', toolName: name, toolOutput: output, refId }];
     }
+
+    if (state === 'ERROR' || stepType === 'generic' || stepType === 'error') {
+      const err = String(step.error ?? step.content ?? '');
+      if (err) return [{ kind: 'status', text: `Tool error: ${err.slice(0, 300)}` }];
+    }
     return [];
   }
+
+  // 5. Turn Result
   if (event === 'result') {
     const result = (msg.result as Record<string, unknown> | undefined) ?? msg;
     const status = String(result.status ?? '');
@@ -1828,10 +2136,11 @@ function spawnJsonCli(
   onEvent: (msg: Record<string, unknown>) => void,
   extraEnv?: Record<string, string>,
   onStderr?: (chunk: string) => void,
+  opts?: { stdin?: 'pipe' | 'ignore' },
 ): { proc: Proc; stderr: Promise<string> } {
   const proc = Bun.spawn(spawnArgv(argv), {
     cwd,
-    stdin: 'ignore',
+    stdin: opts?.stdin ?? 'ignore',
     stdout: 'pipe',
     stderr: 'pipe',
     env: hostEnv(extraEnv),
@@ -1895,7 +2204,16 @@ export function isSafeAgentToolCall(
   cwd?: string,
 ): { safe: boolean; reason?: string } {
   const normName = (toolName || '').toLowerCase().trim();
-  const inputObj = (rawInput && typeof rawInput === 'object' ? rawInput : {}) as Record<string, unknown>;
+  let inputObj: Record<string, unknown> = {};
+  if (rawInput && typeof rawInput === 'object') {
+    inputObj = rawInput as Record<string, unknown>;
+  } else if (typeof rawInput === 'string' && rawInput.trim()) {
+    try {
+      inputObj = JSON.parse(rawInput) as Record<string, unknown>;
+    } catch {
+      inputObj = { CommandLine: rawInput.trim() };
+    }
+  }
 
   // 1. Path Safety: Check if any file/directory parameters target outside assigned cwd
   const pathKeys = [
@@ -1936,7 +2254,7 @@ export function isSafeAgentToolCall(
 
   // 2. Command / Shell Execution Safety
   const isCommandTool = [
-    'run_command', 'runcommand', 'bash', 'shell', 'exec', 'execute_command',
+    'task', 'run_command', 'runcommand', 'bash', 'shell', 'exec', 'execute_command',
     'terminal', 'cmd', 'command',
   ].includes(normName);
 
@@ -1947,12 +2265,29 @@ export function isSafeAgentToolCall(
 
     if (!cmd) return { safe: true };
 
-    // 2a. Git actions require permission
+    // 2a. Git actions require permission if mutating repository state
     if (/\bgit\b/i.test(cmd)) {
-      return {
-        safe: false,
-        reason: `Git action requested: \`${cmd}\``,
-      };
+      const parts = cmd.split(/&&|;|\|\|/).map((p) => p.trim());
+      const hasMutating = parts.some((p) => {
+        if (!/\bgit\b/i.test(p)) return false;
+        if (/(^|\s)(-D|--delete|-d|--force|-f|--hard|--amend)(\s|$)/i.test(p)) return true;
+        const m = p.match(/^\s*git\s+([a-zA-Z_-]+)/i);
+        if (!m) return true;
+        const sub = m[1].toLowerCase();
+        const mutatingSubs = [
+          'commit', 'push', 'reset', 'checkout', 'switch', 'restore',
+          'merge', 'rebase', 'cherry-pick', 'revert', 'clean', 'rm',
+          'mv', 'stash', 'pull', 'fetch'
+        ];
+        return mutatingSubs.includes(sub);
+      });
+
+      if (hasMutating) {
+        return {
+          safe: false,
+          reason: `Git action requested: \`${cmd}\``,
+        };
+      }
     }
 
     // 2b. Database operations and migrations require permission
@@ -2061,8 +2396,11 @@ class ClaudeAdapter implements AgentAdapter {
       } as unknown as SpawnOpts,
     );
     const stderrP = collectText(this.proc.stderr);
-    void pumpJsonLines(this.proc, (msg) => this.onEvent(msg)).catch(() => {});
     const spawned = this.proc;
+    void pumpJsonLines(spawned, (msg) => {
+      if (this.proc !== spawned) return;
+      this.onEvent(msg);
+    }).catch(() => {});
     spawned.exited.then(async (code) => {
       if (this.proc !== spawned) return;
       const stderr = await stderrP.catch(() => '');
@@ -2151,29 +2489,7 @@ class ClaudeAdapter implements AgentAdapter {
       const toolInput = (tool.input ?? tool.tool_input ?? {}) as Record<string, unknown>;
       const toolInputStr = JSON.stringify(toolInput, null, 2);
 
-      // Check selective safety against the session workspace folder
-      const safety = isSafeAgentToolCall(toolName, toolInput, s.info.cwd);
-      if (safety.safe) {
-        try {
-          const stdin = this.proc?.stdin as unknown as { write(s: string): unknown; flush?: () => void } | undefined;
-          stdin?.write(JSON.stringify({
-            type: 'control_response',
-            request_id: requestId,
-            response: { allowed: true },
-          }) + '\n');
-          stdin?.flush?.();
-        } catch {}
-        return;
-      }
-
-      emit(s, {
-        kind: 'permission-request',
-        refId: requestId,
-        toolName,
-        toolInput: toolInputStr,
-        text: safety.reason || `Allow ${toolName}?`,
-      });
-      s.pendingPermissions.set(requestId, (allow) => {
+      const respond = (allow: boolean) => {
         try {
           const stdin = this.proc?.stdin as unknown as { write(s: string): unknown; flush?: () => void } | undefined;
           stdin?.write(JSON.stringify({
@@ -2185,7 +2501,36 @@ class ClaudeAdapter implements AgentAdapter {
         } catch {
           emit(s, { kind: 'error', text: 'failed to send permission response' });
         }
+      };
+
+      // Check selective safety against the session workspace folder
+      const safety = isSafeAgentToolCall(toolName, toolInput, s.info.cwd);
+
+      // Auto mode answers immediately, so a turn can never block on a phone that
+      // is closed, backgrounded, or watching a different session. Actions that
+      // would have required a tap are still announced, so the log stays honest.
+      if (getAgentApprovalMode(s.info.agent) === 'auto') {
+        respond(true);
+        if (!safety.safe) {
+          emit(s, { kind: 'status', text: `Auto-approved: ${safety.reason || toolName}` });
+        }
+        return;
+      }
+
+      if (safety.safe) {
+        respond(true);
+        return;
+      }
+
+      emit(s, {
+        kind: 'permission-request',
+        refId: requestId,
+        toolName,
+        toolInput: toolInputStr,
+        text: safety.reason || `Allow ${toolName}?`,
       });
+      s.pendingPermissions.set(requestId, respond);
+      trackPermissionTimeout(s, requestId);
     }
   }
 
@@ -2229,6 +2574,7 @@ class ClaudeAdapter implements AgentAdapter {
 
 class CursorAdapter implements AgentAdapter {
   private proc: Proc | null = null;
+  private streamGen = 0;
   private chatId: string | null = null;
   private sawResult = false;
   private streamedText = false;
@@ -2289,15 +2635,19 @@ class CursorAdapter implements AgentAdapter {
       imagePaths: opts?.imagePaths,
       catalog: listAgentModels('cursor'),
     });
+    const gen = this.streamGen;
     const { proc, stderr } = spawnJsonCli(
       argv,
       this.session.info.cwd,
-      (msg) => this.onEvent(msg),
+      (msg) => {
+        if (this.streamGen !== gen) return;
+        this.onEvent(msg);
+      },
       this.extraEnv(),
     );
     this.proc = proc;
     proc.exited.then(async (code) => {
-      if (this.proc !== proc) return;
+      if (this.streamGen !== gen) return;
       const errText = await stderr.catch(() => '');
       if (!this.session.info.busy) return;
       setBusy(this.session, false);
@@ -2355,9 +2705,11 @@ class CursorAdapter implements AgentAdapter {
     this.proc = proc;
     emit(this.session, { kind: 'status', text: 'Starting Cursor sign-in on the PC…' });
 
+    const gen = this.streamGen;
     let combined = '';
     let urlEmitted = false;
     const onChunk = (chunk: string) => {
+      if (this.streamGen !== gen) return;
       combined += chunk;
       if (urlEmitted) return;
       const url = extractAuthUrl(combined);
@@ -2386,7 +2738,7 @@ class CursorAdapter implements AgentAdapter {
       pumpTextStream(proc.stderr, onChunk),
       proc.exited,
     ]).then(([, , code]) => {
-      if (this.proc !== proc) return;
+      if (this.streamGen !== gen) return;
       this.loggingIn = false;
       if (this.loginTimer) {
         clearTimeout(this.loginTimer);
@@ -2406,6 +2758,7 @@ class CursorAdapter implements AgentAdapter {
         });
       }
     }).catch(() => {
+      if (this.streamGen !== gen) return;
       this.loggingIn = false;
       setBusy(this.session, false);
     });
@@ -2453,6 +2806,7 @@ class CursorAdapter implements AgentAdapter {
   }
 
   cancel(): void {
+    this.streamGen += 1;
     this.idle.clear();
     if (this.loginTimer) {
       clearTimeout(this.loginTimer);
@@ -2479,6 +2833,7 @@ class CursorAdapter implements AgentAdapter {
 
 class OpenCodeAdapter implements AgentAdapter {
   private proc: Proc | null = null;
+  private streamGen = 0;
   private ocSession: string | null = null;
   private sawResult = false;
   private streamedText = false;
@@ -2504,10 +2859,18 @@ class OpenCodeAdapter implements AgentAdapter {
       thinking: opts?.thinking,
       imagePaths: opts?.imagePaths,
     });
-    const { proc, stderr } = spawnJsonCli(argv, this.session.info.cwd, (msg) => this.onEvent(msg));
+    const gen = this.streamGen;
+    const { proc, stderr } = spawnJsonCli(
+      argv,
+      this.session.info.cwd,
+      (msg) => {
+        if (this.streamGen !== gen) return;
+        this.onEvent(msg);
+      },
+    );
     this.proc = proc;
     proc.exited.then(async (code) => {
-      if (this.proc !== proc) return;
+      if (this.streamGen !== gen) return;
       const errText = await stderr.catch(() => '');
       if (!this.session.info.busy) return;
       setBusy(this.session, false);
@@ -2551,6 +2914,7 @@ class OpenCodeAdapter implements AgentAdapter {
   }
 
   cancel(): void {
+    this.streamGen += 1;
     try {
       this.proc?.kill();
     } catch {
@@ -2570,6 +2934,7 @@ class OpenCodeAdapter implements AgentAdapter {
 
 class AntigravityAdapter implements AgentAdapter {
   private proc: Proc | null = null;
+  private streamGen = 0;
   private conversationId: string | null = null;
   private sawResult = false;
   private streamedText = false;
@@ -2615,7 +2980,7 @@ class AntigravityAdapter implements AgentAdapter {
     this.streamedText = false;
     this.authUrlEmitted = false;
     this.authHintEmitted = false;
-    const bin = resolveBin('agy') ?? 'agy';
+    const bin = resolveBin('agy') ?? resolveBin('antigravity') ?? 'agy';
     const cwd = this.session.info.cwd;
     const projectId = cwd ? agyProjectIdForCwd(cwd) : undefined;
     const newProject = !this.conversationId && !projectId && !this.newProjectAttempted;
@@ -2634,19 +2999,25 @@ class AntigravityAdapter implements AgentAdapter {
       catalog: listAgentModels('antigravity'),
     });
     let stderrCombined = '';
+    const gen = this.streamGen;
     const { proc, stderr } = spawnJsonCli(
       argv,
       this.session.info.cwd,
-      (msg) => this.onEvent(msg),
+      (msg) => {
+        if (this.streamGen !== gen) return;
+        this.onEvent(msg);
+      },
       this.extraEnv(),
       (chunk) => {
+        if (this.streamGen !== gen) return;
         stderrCombined += chunk;
         this.onAuthNoise(stderrCombined);
       },
+      { stdin: 'pipe' },
     );
     this.proc = proc;
     proc.exited.then(async (code) => {
-      if (this.proc !== proc) return;
+      if (this.streamGen !== gen) return;
       const errText = await stderr.catch(() => '');
       if (this.conversationId) {
         let changed = false;
@@ -2668,7 +3039,7 @@ class AntigravityAdapter implements AgentAdapter {
       }
       if (!this.session.info.busy) return;
       setBusy(this.session, false);
-      const isSuccess = code === 0 || this.streamedText || this.sawResult;
+      const isSuccess = (code === 0 && (this.sawResult || this.streamedText)) || (this.sawResult && code === 0);
       const fail = finishCliTurn({
         sawResult: isSuccess,
         exitCode: code,
@@ -2681,8 +3052,16 @@ class AntigravityAdapter implements AgentAdapter {
         return;
       }
       const cleaned = sanitizeCliError(fail.text ?? '', 'Antigravity');
-      emit(this.session, withoutDuplicateResult({ kind: 'error', text: cleaned }, this.streamedText));
+      emit(this.session, { kind: 'error', text: cleaned });
     }).catch(() => {});
+  }
+
+  permission(requestId: string, allow: boolean): void {
+    const cb = this.session.pendingPermissions.get(requestId);
+    if (cb) {
+      this.session.pendingPermissions.delete(requestId);
+      cb(allow);
+    }
   }
 
   private onEvent(msg: Record<string, unknown>): void {
@@ -2713,6 +3092,55 @@ class AntigravityAdapter implements AgentAdapter {
         this.sawResult = true;
         setBusy(this.session, false);
       }
+
+      // Check tool safety & permissions
+      if (ev.kind === 'permission-request') {
+        const requestId = ev.refId || crypto.randomUUID();
+        const respond = (allow: boolean) => {
+          try {
+            const stdin = this.proc?.stdin as unknown as { write(s: string): unknown; flush?: () => void } | undefined;
+            stdin?.write(JSON.stringify({
+              type: 'control_response',
+              request_id: requestId,
+              response: { allowed: allow },
+            }) + '\n');
+            stdin?.flush?.();
+          } catch {
+            emit(this.session, { kind: 'error', text: 'failed to send permission response to Antigravity' });
+          }
+        };
+
+        const approvalMode = getAgentApprovalMode(this.session.info.agent);
+        if (approvalMode === 'auto') {
+          respond(true);
+          emit(this.session, { kind: 'status', text: `Auto-approved: ${ev.toolName || 'action'}` });
+          continue;
+        }
+
+        this.session.pendingPermissions.set(requestId, respond);
+        trackPermissionTimeout(this.session, requestId);
+        emit(this.session, ev);
+        continue;
+      }
+
+      if (ev.kind === 'tool-start') {
+        const safety = isSafeAgentToolCall(ev.toolName ?? 'tool', ev.toolInput, this.session.info.cwd);
+        const approvalMode = getAgentApprovalMode(this.session.info.agent);
+        if (approvalMode === 'auto') {
+          if (!safety.safe) {
+            emit(this.session, { kind: 'status', text: `Auto-approved: ${safety.reason || ev.toolName}` });
+          }
+        } else if (!safety.safe) {
+          this.cancel();
+          setBusy(this.session, false);
+          emit(this.session, {
+            kind: 'error',
+            text: `Action blocked by safety policy: ${safety.reason || ev.toolName}. Turn cancelled to prevent unauthorized changes. Switch approval mode to auto in chat settings to allow this command.`,
+          });
+          return;
+        }
+      }
+
       const out = ev.kind === 'error'
         ? { kind: 'error' as const, text: sanitizeCliError(ev.text ?? '', 'Antigravity') }
         : ev;
@@ -2784,8 +3212,10 @@ class AntigravityAdapter implements AgentAdapter {
       kind: 'status',
       text: 'Starting Antigravity sign-in on the PC…',
     });
+    const gen = this.streamGen;
     let combined = '';
     const onChunk = (chunk: string) => {
+      if (this.streamGen !== gen) return;
       combined += chunk;
       this.onAuthNoise(combined);
     };
@@ -2794,7 +3224,7 @@ class AntigravityAdapter implements AgentAdapter {
       pumpTextStream(proc.stderr, onChunk),
       proc.exited,
     ]).then(([, , code]) => {
-      if (this.proc !== proc) return;
+      if (this.streamGen !== gen) return;
       this.loggingIn = false;
       setBusy(this.session, false);
       if (this.authUrlEmitted) return;
@@ -2810,12 +3240,14 @@ class AntigravityAdapter implements AgentAdapter {
         text: rewriteCliAuthError(combined || 'authentication failed or timed out', 'Antigravity'),
       });
     }).catch(() => {
+      if (this.streamGen !== gen) return;
       this.loggingIn = false;
       setBusy(this.session, false);
     });
   }
 
   cancel(): void {
+    this.streamGen += 1;
     this.loggingIn = false;
     try {
       this.proc?.kill();
@@ -2886,6 +3318,163 @@ class MockAdapter implements AgentAdapter {
   cancel(): void {
     this.timers.forEach(clearTimeout);
     this.timers = [];
+  }
+
+  close(): void {
+    this.cancel();
+  }
+}
+
+export function buildCodexArgv(opts: {
+  bin: string;
+  cwd: string;
+  threadId?: string | null;
+  text: string;
+  model?: string;
+  mode?: AgentMode;
+  thinking?: string;
+  imagePaths?: string[];
+}): string[] {
+  const argv = [opts.bin, 'exec', '--json', '--cd', opts.cwd];
+  if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
+  if (opts.threadId) argv.push('--thread', opts.threadId);
+  for (const p of opts.imagePaths ?? []) argv.push('--image', p);
+  argv.push(opts.text.trim() || 'Please proceed.');
+  return argv;
+}
+
+export function parseCodexStreamEvent(msg: Record<string, unknown>): AgentDelta[] {
+  const type = String(msg.type ?? msg.event ?? '');
+  if (type === 'item.created' || type === 'item.updated' || type === 'item.completed') {
+    const item = (msg.item ?? msg.data ?? {}) as Record<string, unknown>;
+    const itemType = String(item.type ?? '');
+    if (itemType === 'message' || itemType === 'agent_message') {
+      const text = typeof item.text === 'string' ? item.text : typeof item.content === 'string' ? item.content : '';
+      if (text) return [{ kind: 'text', text }];
+      return [];
+    }
+    if (itemType === 'reasoning' || itemType === 'thinking') {
+      const text = typeof item.text === 'string' ? item.text : '';
+      if (text) return [{ kind: 'thinking', text }];
+      return [];
+    }
+    if (itemType === 'command_execution' || itemType === 'function_call' || itemType === 'tool_call') {
+      const name = String(item.command ?? item.name ?? item.tool ?? 'tool');
+      const refId = String(item.id ?? item.call_id ?? '');
+      const input = typeof item.arguments === 'string' ? item.arguments : JSON.stringify(item.input ?? item.arguments ?? {}, null, 2);
+      return [{ kind: 'tool-start', toolName: name, toolInput: input, refId }];
+    }
+    if (itemType === 'command_output' || itemType === 'function_call_output' || itemType === 'tool_output') {
+      const refId = String(item.call_id ?? item.id ?? '');
+      const output = String(item.output ?? item.content ?? '').slice(0, 4000);
+      return [{ kind: 'tool-end', toolName: 'tool', toolOutput: output, refId }];
+    }
+  }
+  if (type === 'turn.completed' || type === 'response.completed') return [{ kind: 'result', text: '' }];
+  if (type === 'error' || type === 'turn.failed') {
+    return [{ kind: 'error', text: sanitizeCliError(String(msg.message ?? msg.error ?? 'Codex error'), 'Codex') }];
+  }
+  if (type === 'text' || type === 'content_block_delta') {
+    const text = typeof msg.text === 'string' ? msg.text : typeof (msg.delta as any)?.text === 'string' ? (msg.delta as any).text : '';
+    if (text) return [{ kind: 'text-delta', text }];
+  }
+  return [];
+}
+
+class CodexAdapter implements AgentAdapter {
+  private proc: Proc | null = null;
+  private streamGen = 0;
+  private threadId: string | null = null;
+  private sawResult = false;
+  private streamedText = false;
+  private apiKey = process.env.OPENAI_API_KEY || '';
+
+  constructor(private session: AgentSession) {}
+
+  bindHostChat(id: string): void {
+    this.threadId = id;
+  }
+
+  private extraEnv(): Record<string, string> {
+    const env: Record<string, string> = {};
+    if (this.apiKey) env.OPENAI_API_KEY = this.apiKey;
+    return env;
+  }
+
+  prompt(text: string, opts?: AdapterPromptOpts): void {
+    const key = parseEnvApiKey(text, ['OPENAI_API_KEY']);
+    if (key) {
+      this.apiKey = key.value;
+      this.cancel();
+      setBusy(this.session, false);
+      emit(this.session, { kind: 'status', text: `Saved ${key.name} for this chat. Send your task again.` });
+      return;
+    }
+    this.cancel();
+    this.sawResult = false;
+    this.streamedText = false;
+    const bin = resolveBin('codex') ?? 'codex';
+    const argv = buildCodexArgv({
+      bin,
+      cwd: this.session.info.cwd,
+      threadId: this.threadId,
+      text,
+      model: opts?.model,
+      mode: opts?.mode,
+      thinking: opts?.thinking,
+      imagePaths: opts?.imagePaths,
+    });
+    const gen = this.streamGen;
+    const { proc, stderr } = spawnJsonCli(
+      argv,
+      this.session.info.cwd,
+      (msg) => {
+        if (this.streamGen !== gen) return;
+        this.onEvent(msg);
+      },
+      this.extraEnv(),
+    );
+    this.proc = proc;
+    proc.exited.then(async (code) => {
+      if (this.streamGen !== gen) return;
+      const errText = await stderr.catch(() => '');
+      if (!this.session.info.busy) return;
+      setBusy(this.session, false);
+      const isSuccess = code === 0 || this.streamedText || this.sawResult;
+      const fail = finishCliTurn({ sawResult: isSuccess, exitCode: code, stderr: isSuccess ? '' : errText });
+      if (!fail) {
+        if (!this.sawResult) emit(this.session, { kind: 'result', text: '' });
+        return;
+      }
+      emit(this.session, withoutDuplicateResult({ kind: 'error', text: sanitizeCliError(fail.text ?? '', 'Codex') }, this.streamedText));
+    }).catch(() => {});
+  }
+
+  private onEvent(msg: Record<string, unknown>): void {
+    const sid = sessionIdFromEvent(msg);
+    if (sid) {
+      this.threadId = sid;
+      if (!this.session.info.hostChatId) {
+        this.session.info.hostChatId = sid;
+        saveAgentSessionsToDisk();
+        broadcast({ type: 'agent-session-update', session: { ...this.session.info } });
+      }
+    }
+    const events = parseCodexStreamEvent(msg);
+    for (const ev of events) {
+      if (ev.kind === 'text' || ev.kind === 'text-delta') this.streamedText = true;
+      if (ev.kind === 'result' || ev.kind === 'error') {
+        this.sawResult = true;
+        setBusy(this.session, false);
+      }
+      emit(this.session, withoutDuplicateResult(ev, this.streamedText));
+    }
+  }
+
+  cancel(): void {
+    this.streamGen += 1;
+    try { this.proc?.kill(); } catch {}
+    this.proc = null;
   }
 
   close(): void {

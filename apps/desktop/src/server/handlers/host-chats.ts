@@ -81,6 +81,8 @@ export function agentSourceLabel(agentId: string, source?: string): string {
       return 'OpenCode';
     case 'antigravity':
       return 'Antigravity';
+    case 'codex':
+      return 'Codex';
     case 'mock':
       return 'Demo Agent';
     default: {
@@ -866,16 +868,24 @@ function agyListMeta(id: string, summary: AgySummary | undefined, history: AgyCl
 }
 
 export function listAgyHostChats(): AgentHostChat[] {
-  const brainDir = join(homedir(), '.gemini', 'antigravity-cli', 'brain');
-  const convDir = join(homedir(), '.gemini', 'antigravity-cli', 'conversations');
+  const brainDirs = [
+    join(homedir(), '.gemini', 'antigravity-cli', 'brain'),
+    join(homedir(), '.gemini', 'antigravity', 'brain'),
+  ];
+  const convDirs = [
+    join(homedir(), '.gemini', 'antigravity-cli', 'conversations'),
+    join(homedir(), '.gemini', 'antigravity', 'conversations'),
+  ];
   const out: AgentHostChat[] = [];
   const seen = new Set<string>();
   const summaries = loadAgySummaries();
   const history = loadAgyCliHistory();
 
-  if (existsSync(brainDir)) {
+  for (const brainDir of brainDirs) {
+    if (!existsSync(brainDir)) continue;
     try {
       for (const id of readdirSync(brainDir)) {
+        if (seen.has(id)) continue;
         const transcriptPath = join(brainDir, id, '.system_generated', 'logs', 'transcript.jsonl');
         if (!existsSync(transcriptPath)) continue;
         let updatedAt = Date.now();
@@ -901,7 +911,8 @@ export function listAgyHostChats(): AgentHostChat[] {
     }
   }
 
-  if (existsSync(convDir)) {
+  for (const convDir of convDirs) {
+    if (!existsSync(convDir)) continue;
     try {
       for (const name of readdirSync(convDir)) {
         if (!name.endsWith('.db') || name.includes('-wal') || name.includes('-shm')) continue;
@@ -923,6 +934,7 @@ export function listAgyHostChats(): AgentHostChat[] {
             title = 'Antigravity conversation';
           }
         }
+        seen.add(id);
         out.push({
           agent: 'antigravity',
           hostChatId: id,
@@ -1121,6 +1133,41 @@ export function loadHostChatHistory(agent: string, hostChatId: string, bin?: str
   if (agent === 'cursor' && hostChatId.startsWith('ide:')) return loadCursorIdeHistory(hostChatId);
   if (agent === 'cursor') return loadCursorCliHistory(hostChatId);
   if (agent === 'antigravity') return loadAgyHistory(hostChatId);
+  if (agent === 'codex') return loadCodexHistory(hostChatId);
   if (agent === 'claude') return loadClaudeHistory(hostChatId);
+  return [];
+}
+
+export function listCodexHostChats(): AgentHostChat[] {
+  const sessionIndexPath = join(homedir(), '.codex', 'session_index.jsonl');
+  if (!existsSync(sessionIndexPath)) return [];
+  const out: AgentHostChat[] = [];
+  try {
+    const raw = readFileSync(sessionIndexPath, 'utf8');
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const item = JSON.parse(trimmed);
+        if (!item.id) continue;
+        const updatedAt = item.updated_at ? Date.parse(item.updated_at) : Date.now();
+        out.push({
+          agent: 'codex',
+          hostChatId: item.id,
+          title: item.thread_name || 'Codex conversation',
+          cwd: '',
+          updatedAt: isNaN(updatedAt) ? Date.now() : updatedAt,
+          resumable: true,
+          source: agentSourceLabel('codex'),
+        });
+      } catch {}
+    }
+  } catch {
+    return [];
+  }
+  return out.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, LIST_CAP);
+}
+
+export function loadCodexHistory(_hostChatId: string): HostChatDelta[] {
   return [];
 }

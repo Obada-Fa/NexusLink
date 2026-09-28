@@ -148,6 +148,41 @@ void main() {
           'Interrupted.');
     });
 
+    test('closeOpenTools pairs every duplicate-ref start so Stop can clear', () {
+      final events = [
+        ev(1, 'tool-start', name: 'task', ref: 'task'),
+        ev(2, 'tool-start', name: 'task', ref: 'task'),
+        ev(3, 'tool-start', name: 'task', ref: 'task'),
+      ];
+      expect(transcriptHasOpenTools(events), isTrue);
+      final settled = closeOpenTools(events, output: 'Stopped.');
+      expect(transcriptHasOpenTools(settled), isFalse);
+      expect(closeOpenTools(settled, output: 'Stopped.'), settled);
+      final tools = groupAgentDisplay(settled).single.tools!;
+      expect(tools.every((e) => e.kind == 'tool-end'), isTrue);
+      expect(tools.every((e) => e.toolOutput == 'Stopped.'), isTrue);
+    });
+
+    test('closeOpenTools pairs empty-ref starts instead of minting orphan ids', () {
+      final events = [
+        ev(1, 'tool-start', name: 'shell'),
+        ev(2, 'tool-start', name: 'shell'),
+      ];
+      expect(transcriptHasOpenTools(events), isTrue);
+      final settled = closeOpenTools(events, output: 'Stopped.');
+      expect(transcriptHasOpenTools(settled), isFalse);
+    });
+
+    test('FIFO merge keeps an earlier start open when a later same-ref end arrives', () {
+      final merged = mergeToolEvents([
+        ev(1, 'tool-start', name: 'task', ref: 'task'),
+        ev(2, 'tool-start', name: 'task', ref: 'task'),
+        ev(3, 'tool-end', name: 'task', ref: 'task', output: 'done'),
+      ]);
+      expect(merged.where((e) => e.kind == 'tool-start').length, 1);
+      expect(merged.where((e) => e.kind == 'tool-end').length, 1);
+    });
+
     test('merges consecutive text deltas into a single unified assistant message', () {
       final items = groupAgentDisplay([
         AgentEvent(seq: 1, ts: 1, kind: 'user', text: 'hello'),

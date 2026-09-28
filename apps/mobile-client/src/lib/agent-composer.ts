@@ -5,6 +5,11 @@ export type AgentCapabilities = {
   thinkingLevels: string[];
   models: AgentModelOption[];
   images: boolean;
+  /**
+   * How the host answers this agent's permission requests. Absent means the host
+   * is too old to support the setting, so the phone must not offer the control.
+   */
+  approvalMode?: 'ask' | 'auto';
 };
 
 export type GitWorkingTree = {

@@ -291,6 +291,9 @@ export default function AgentsPage() {
 
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [sessions, setSessions] = useState<AgentSessionInfo[]>([]);
+  // Permission requests that arrived while another chat was open, keyed by
+  // agentSessionId. They are dropped otherwise and the agent blocks forever.
+  const [pendingApprovals, setPendingApprovals] = useState<Record<string, AgentEvent>>({});
   const [hostChats, setHostChats] = useState<AgentHostChat[]>([]);
   const [active, setActive] = useState<AgentSessionInfo | null>(null);
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -366,15 +369,18 @@ export default function AgentsPage() {
     unsubs.push(
       client.subscribe('agent-event', (msg: unknown) => {
         const m = msg as { agentSessionId?: string; event?: AgentEvent };
-        if (!m.event || m.agentSessionId !== activeIdRef.current) return;
+        if (!m.event) return;
+        if (m.agentSessionId !== activeIdRef.current) {
+          // Park a request aimed at a background chat instead of discarding it.
+          if (m.event.kind === 'permission-request' && m.event.refId && m.agentSessionId) {
+            const id = m.agentSessionId;
+            setPendingApprovals((prev) => ({ ...prev, [id]: m.event! }));
+          }
+          return;
+        }
         setEvents((prev) => [...prev, m.event!]);
         if (m.event.kind === 'permission-request' && m.event.refId) {
-          const allow = window.confirm(m.event.text || `Allow ${m.event.toolName || 'this tool'}?`);
-          void client.request('agent.permission', {
-            agentSessionId: m.agentSessionId,
-            requestId: m.event.refId,
-            allow,
-          });
+          void answerPermission(m.agentSessionId!, m.event.refId, { ev: m.event });
         }
       }),
     );
@@ -482,6 +488,76 @@ export default function AgentsPage() {
     setPicking({ kind: 'new', agent });
   }, []);
 
+  const setApprovalMode = useCallback(
+    async (agentId: string, mode: 'ask' | 'auto') => {
+      if (!client) return;
+      try {
+        const res = (await client.request('agent.setApprovalMode', {
+          agent: agentId,
+          mode,
+        })) as { ok?: boolean } | undefined;
+        if (res && res.ok === false) {
+          setError('The PC rejected that approval setting.');
+          return;
+        }
+        setAgents((prev) =>
+          prev.map((a) => {
+            if (a.id !== agentId) return a;
+            const base: AgentCapabilities = a.capabilities ?? {
+              modes: ['agent'],
+              thinkingLevels: [],
+              models: [],
+              images: false,
+            };
+            return { ...a, capabilities: { ...base, approvalMode: mode } };
+          }),
+        );
+      } catch {
+        setError('This PC does not support approval settings yet.');
+      }
+    },
+    [client],
+  );
+
+  /** Answer a permission request. Pass `allow` when the user already chose (the
+   * inline card); omit it to prompt. Reports honestly when the request is gone.
+   */
+  const answerPermission = useCallback(
+    async (
+      sessionId: string,
+      requestId: string,
+      opts?: { allow?: boolean; ev?: AgentEvent },
+    ) => {
+      if (!client) return;
+      const allow =
+        opts?.allow ??
+        window.confirm(opts?.ev?.text || `Allow ${opts?.ev?.toolName || 'this tool'}?`);
+      setPendingApprovals((prev) => {
+        if (!(sessionId in prev)) return prev;
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
+      try {
+        const res = (await client.request('agent.permission', {
+          agentSessionId: sessionId,
+          requestId,
+          allow,
+        })) as { ok?: boolean; reason?: string } | undefined;
+        if (res && res.ok === false) {
+          setError(
+            res.reason === 'request already expired'
+              ? 'That request already expired on the PC.'
+              : 'The PC could not accept that answer.',
+          );
+        }
+      } catch {
+        setError('Could not reach the PC to answer that request.');
+      }
+    },
+    [client],
+  );
+
   const openSession = useCallback(
     async (s: AgentSessionInfo) => {
       if (!client) return;
@@ -491,8 +567,17 @@ export default function AgentsPage() {
       setActive(s);
       setEvents(history);
       setSessions((prev) => [s, ...prev.filter((x) => x.agentSessionId !== s.agentSessionId)]);
+      // Surface a request that landed while this chat was in the background.
+      setPendingApprovals((prev) => {
+        const parked = prev[s.agentSessionId];
+        if (!parked?.refId) return prev;
+        void answerPermission(s.agentSessionId, parked.refId, { ev: parked });
+        const next = { ...prev };
+        delete next[s.agentSessionId];
+        return next;
+      });
     },
-    [client],
+    [client, answerPermission],
   );
 
   const openHostChatWithCwd = useCallback(
@@ -667,21 +752,42 @@ export default function AgentsPage() {
         <div style={styles.list}>
           <h2 style={styles.section}>New chat</h2>
           {agents.map((a) => (
-            <button
-              key={a.id}
-              disabled={!a.available}
-              onClick={() => newChat(a)}
-              style={{ ...styles.row, opacity: a.available ? 1 : 0.4 }}
-            >
-              <AgentIcon agentId={a.id} name={a.name} icon={a.icon} />
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
-                <strong>{a.name}</strong>
-                <span style={styles.muted}>
-                  {a.available ? 'Runs on the PC — chat here' : 'CLI not installed on the PC'}
-                </span>
-                {a.available && <span style={styles.selectBtn}>Select</span>}
-              </div>
-            </button>
+            <div key={a.id} style={styles.agentRowWrap}>
+              <button
+                disabled={!a.available}
+                onClick={() => newChat(a)}
+                style={{ ...styles.row, opacity: a.available ? 1 : 0.4 }}
+              >
+                <AgentIcon agentId={a.id} name={a.name} icon={a.icon} />
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                  <strong>{a.name}</strong>
+                  <span style={styles.muted}>
+                    {a.available ? 'Runs on the PC — chat here' : 'CLI not installed on the PC'}
+                  </span>
+                  {a.available && <span style={styles.selectBtn}>Select</span>}
+                </div>
+              </button>
+              {a.available && a.capabilities?.approvalMode && (
+                <div style={styles.approvalRow}>
+                  <span style={styles.muted}>Approvals</span>
+                  {(['ask', 'auto'] as const).map((mode) => {
+                    const selected = a.capabilities?.approvalMode === mode;
+                    return (
+                      <button
+                        key={mode}
+                        onClick={() => setApprovalMode(a.id, mode)}
+                        style={{
+                          ...styles.approvalChip,
+                          ...(selected ? styles.approvalChipActive : {}),
+                        }}
+                      >
+                        {mode === 'ask' ? 'Ask me' : 'Automatic'}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           ))}
           <div style={styles.tabContainer}>
             <button
@@ -709,7 +815,9 @@ export default function AgentsPage() {
             sessions.length === 0 ? (
               <p style={styles.emptyTabMessage}>No recent chats yet. Start a new chat above.</p>
             ) : (
-              sessions.map((s) => (
+              sessions.map((s) => {
+                const needsApproval = Boolean(pendingApprovals[s.agentSessionId]);
+                return (
                 <div
                   key={s.agentSessionId}
                   style={{
@@ -722,13 +830,18 @@ export default function AgentsPage() {
                   <button
                     type="button"
                     onClick={() => openSession(s)}
-                    style={{ ...styles.row, marginBottom: 0, flex: 1 }}
+                    style={{
+                      ...styles.row,
+                      marginBottom: 0,
+                      flex: 1,
+                      ...(needsApproval ? { border: '1px solid #f0c040' } : {}),
+                    }}
                   >
                     <AgentIcon agentId={s.agent} name={s.title} icon={s.icon} />
                     <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                       <strong>{s.title}</strong>
-                      <span style={styles.muted}>
-                        {chatListSubtitle({ agent: s.agent, cwd: s.cwd })}
+                      <span style={needsApproval ? { ...styles.muted, color: '#f0c040' } : styles.muted}>
+                        {needsApproval ? 'Waiting for your approval' : chatListSubtitle({ agent: s.agent, cwd: s.cwd })}
                       </span>
                     </div>
                   </button>
@@ -749,7 +862,8 @@ export default function AgentsPage() {
                     ✎
                   </button>
                 </div>
-              ))
+                );
+              })
             )
           ) : (
             (() => {
@@ -790,12 +904,8 @@ export default function AgentsPage() {
                   setDraft(opt);
                 }}
                 onResolvePermission={(requestId, allow) => {
-                  if (client && active) {
-                    void client.request('agent.permission', {
-                      agentSessionId: active.agentSessionId,
-                      requestId,
-                      allow,
-                    });
+                  if (active) {
+                    void answerPermission(active.agentSessionId, requestId, { allow });
                   }
                 }}
               />
@@ -1563,13 +1673,24 @@ function Bubble({
       );
     }
     const detail = e.toolInput?.trim();
+    let displayDetail = detail;
+    if (detail && detail.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(detail) as Record<string, unknown>;
+        const cmd = parsed.CommandLine ?? parsed.commandLine ?? parsed.command ?? parsed.cmd ?? parsed.path;
+        if (cmd) displayDetail = String(cmd).trim();
+      } catch {}
+    }
     const output = e.toolOutput?.trim();
+    const toolLabel = e.toolName === 'task' || e.toolName === 'run_command'
+      ? 'Command'
+      : (e.toolName || 'tool');
     return (
       <div style={styles.tool}>
         <strong>
-          {running ? '▶' : '✓'} {e.toolName || 'tool'}
+          {running ? '▶' : '✓'} {toolLabel}
         </strong>
-        {detail && detail !== e.toolName && <span style={styles.muted}>{detail}</span>}
+        {displayDetail && displayDetail !== toolLabel && <span style={styles.muted}>{displayDetail}</span>}
         {!running && output && <pre style={styles.out}>{output}</pre>}
       </div>
     );
@@ -1680,6 +1801,30 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: 'left',
   },
   muted: { fontSize: 12, color: '#778' },
+  agentRowWrap: { marginBottom: 4 },
+  approvalRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: '0 14px 10px 14px',
+    marginTop: -4,
+    marginBottom: 8,
+  },
+  approvalChip: {
+    padding: '4px 10px',
+    borderRadius: 999,
+    border: '1px solid #33334a',
+    background: 'transparent',
+    color: '#8a8a9a',
+    fontSize: 12,
+    cursor: 'pointer',
+  },
+  approvalChipActive: {
+    border: '1px solid #2a6aff',
+    background: 'rgba(42, 106, 255, 0.22)',
+    color: '#9fc0ff',
+    fontWeight: 600,
+  },
   selectBtn: {
     marginTop: 8,
     padding: '6px 12px',

@@ -75,5 +75,16 @@ void main() {
         current,
       );
     });
+
+    test('closes dangling tools in an idle snapshot so Stop can clear', () {
+      final current = [
+        AgentEvent(seq: 1, ts: 1, kind: 'tool-start', toolName: 'task', refId: 'task'),
+        AgentEvent(seq: 2, ts: 2, kind: 'tool-start', toolName: 'task', refId: 'task'),
+      ];
+      final settled = applyAgentHistorySnapshot(const [], current, busy: false);
+      expect(transcriptHasOpenTools(settled), isFalse);
+      expect(settled.last.kind, 'tool-end');
+      expect(settled.last.toolOutput, 'Interrupted — host restarted.');
+    });
   });
 }

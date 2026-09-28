@@ -63,6 +63,42 @@ void main() {
     });
   });
 
+  group('AgentCapabilities approvalMode', () {
+    AgentCapabilities parse(Object? raw) =>
+        AgentCapabilities.fromJson(raw);
+
+    test('reads ask and auto from the host', () {
+      expect(parse({'modes': ['agent'], 'approvalMode': 'ask'}).approvalMode, 'ask');
+      expect(parse({'modes': ['agent'], 'approvalMode': 'auto'}).approvalMode, 'auto');
+    });
+
+    test('an old host that omits it reads as null so the toggle stays hidden', () {
+      // Null means "host too old to support approvals" — the phone must not
+      // offer a control that would fail.
+      expect(parse({'modes': ['agent']}).approvalMode, isNull);
+      expect(parse(null).approvalMode, isNull);
+      expect(parse('nonsense').approvalMode, isNull);
+    });
+
+    test('rejects an unrecognised value rather than trusting it', () {
+      expect(parse({'modes': ['agent'], 'approvalMode': 'yolo'}).approvalMode, isNull);
+    });
+
+    test('copyWith swaps the mode and leaves everything else alone', () {
+      final base = AgentCapabilities.fromJson({
+        'modes': ['agent', 'plan'],
+        'thinkingLevels': ['low', 'high'],
+        'images': true,
+        'approvalMode': 'ask',
+      });
+      final next = base.copyWith(approvalMode: 'auto');
+      expect(next.approvalMode, 'auto');
+      expect(next.modes, base.modes);
+      expect(next.thinkingLevels, base.thinkingLevels);
+      expect(next.images, base.images);
+    });
+  });
+
   group('FileViewer helpers', () {
     test('cleanFilePath strips file:// and hash suffixes', () {
       expect(cleanFilePath('file:///home/user/plan.md'), '/home/user/plan.md');
