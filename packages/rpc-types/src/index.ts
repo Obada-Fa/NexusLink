@@ -52,6 +52,7 @@ export type RpcMethod =
   | 'agent.listModels'
   | 'agent.prompt'
   | 'agent.permission'
+  | 'agent.setApprovalMode'
   | 'agent.cancel'
   | 'agent.close'
   | 'agent.history'
@@ -195,6 +196,8 @@ export type Params<M extends RpcMethod> =
       }
     : M extends 'agent.permission'
     ? { agentSessionId: string; requestId: string; allow: boolean }
+    : M extends 'agent.setApprovalMode'
+    ? { agent: string; mode: AgentApprovalMode }
     : M extends 'agent.cancel'
     ? { agentSessionId: string }
     : M extends 'agent.close'
@@ -335,7 +338,9 @@ export type Result<M extends RpcMethod> =
     : M extends 'agent.prompt'
     ? { ok: boolean }
     : M extends 'agent.permission'
-    ? { ok: boolean }
+    ? { ok: boolean; reason?: string }
+    : M extends 'agent.setApprovalMode'
+    ? { ok: boolean; mode?: AgentApprovalMode }
     : M extends 'agent.cancel'
     ? { ok: boolean }
     : M extends 'agent.close'
@@ -506,7 +511,16 @@ export interface AgentCapabilities {
   images: boolean
   /** OpenCode-only: subscription tier detected via `opencode auth list`. */
   plan?: 'go' | 'byok' | 'unknown'
+  /**
+   * How this agent's permission requests are answered on the host.
+   * 'ask' surfaces a card on the phone; 'auto' answers immediately so a turn
+   * can never block on a phone that is not watching that session.
+   */
+  approvalMode?: AgentApprovalMode
 }
+
+/** Per-agent permission policy. See AgentCapabilities.approvalMode. */
+export type AgentApprovalMode = 'ask' | 'auto'
 
 /** Photo/screenshot attached from the phone (base64, already compressed). */
 export interface AgentImageAttachment {

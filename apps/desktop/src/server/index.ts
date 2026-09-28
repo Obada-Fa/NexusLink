@@ -22,7 +22,7 @@ import { getClipboard, setClipboard } from './handlers/clipboard';
 import {
   listAgents, createAgentSession, renameAgentSession, setAgentSessionCwd, listAgentSessions, listHostChats, openHostChat, promptAgent,
   cancelAgent, closeAgentSession, agentHistory, resolveAgentPermission, setAgentBroadcast,
-  listAgentModels, AGENT_ICON_NAMES, resolveAgentIcon,
+  listAgentModels, AGENT_ICON_NAMES, resolveAgentIcon, setAgentApprovalMode,
 } from './handlers/agents';
 import { startIde, stopIde, ideStatus } from './handlers/ide';
 import type { WebRtcSignal, AgentImageAttachment } from '@nexuslink/rpc-types';
@@ -351,6 +351,12 @@ export async function startRpcServer(port = 45678, hostname?: string) {
           params.agentSessionId as string,
           params.requestId as string,
           params.allow as boolean,
+        );
+        break;
+      case 'agent.setApprovalMode':
+        result = setAgentApprovalMode(
+          params.agent as string,
+          (params.mode as string) ?? '',
         );
         break;
       case 'agent.cancel':

@@ -65,6 +65,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   final _photos = <_PendingPhoto>[];
   final _thumbsBySeq = <int, List<Uint8List>>{};
   List<Uint8List>? _pendingThumbs;
+
+  /// Permission requests that arrived while another chat was on screen, keyed by
+  /// agentSessionId. Surfaced as a badge and asked when that chat is opened.
+  final _pendingApprovals = <String, AgentEvent>{};
+  final _resolvedApprovals = <String>{};
   String _mode = 'agent';
   String _thinking = 'medium';
   String? _model;
@@ -238,19 +243,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           }
           if (match != null) {
             _active = match;
-            _busy = match.busy;
+            // Same rule as _onSessionUpdate: a stale busy:true snapshot
+            // must not resurrect Stop after the phone already ended the turn.
+            if (!match.busy) _busy = false;
           }
           if (shouldSyncTranscript &&
               _active?.agentSessionId == activeId) {
-            if (match != null && !match.busy && transcriptHasOpenTools(_events)) {
-              final settled = closeOpenTools(_events,
-                  output: 'Interrupted — host restarted.');
-              if (settled.length != _events.length) {
-                _events
-                  ..clear()
-                  ..addAll(settled);
-              }
-            }
             final merged = applyAgentHistorySnapshot(
               history,
               _events,
@@ -263,10 +261,20 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         }
       });
       if (shouldSyncTranscript) _scrollToEnd();
+      _flushPendingApproval();
       unawaited(_refreshGitTree());
     } catch (_) {
       // Stay on the last known transcript; the next resume will try again.
     }
+  }
+
+  /// Ask a permission request that arrived while this chat was in the background.
+  void _flushPendingApproval() {
+    final sessionId = _active?.agentSessionId;
+    if (sessionId == null) return;
+    final pending = _pendingApprovals.remove(sessionId);
+    if (pending == null) return;
+    unawaited(_askPermission(pending));
   }
 
   void _onSessionUpdate(Map<String, dynamic> msg) {
@@ -351,6 +359,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     );
 
     if (sessionId != _active?.agentSessionId) {
+      // A permission request for a background chat used to be dropped here, so
+      // the agent blocked forever with nobody able to answer it. Park it and
+      // badge the chat instead, then ask as soon as that chat is opened.
+      if (parsed.kind == 'permission-request' &&
+          sessionId != null &&
+          parsed.refId != null) {
+        setState(() => _pendingApprovals[sessionId] = parsed);
+        return;
+      }
       if (sessionId != null &&
           (parsed.kind == 'result' || parsed.kind == 'error')) {
         setState(() {});
@@ -388,11 +405,27 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (client == null || session == null || requestId == null || !mounted) {
       return;
     }
-    await client.request('agent.permission', {
-      'agentSessionId': session.agentSessionId,
-      'requestId': requestId,
-      'allow': allow,
-    });
+    setState(() => _resolvedApprovals.add(requestId));
+    try {
+      final res = await client.request('agent.permission', {
+        'agentSessionId': session.agentSessionId,
+        'requestId': requestId,
+        'allow': allow,
+      });
+      if (!mounted) return;
+      if (res is Map && res['ok'] == false) {
+        _toast(res['reason'] == 'request already expired'
+            ? 'That request already expired on the PC.'
+            : 'The PC could not accept that answer.');
+      } else if (mounted) {
+        setState(() => _pendingApprovals.remove(session.agentSessionId));
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _resolvedApprovals.remove(requestId));
+        _toast('Could not reach the PC: $e');
+      }
+    }
   }
 
   Future<void> _askPermission(AgentEvent e) async {
@@ -450,7 +483,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         ),
       ),
     );
-    await _submitPermission(requestId, allow == true);
+    if (allow != null) {
+      await _submitPermission(requestId, allow);
+    }
   }
 
   Future<String?> _pickProject() async {
@@ -519,6 +554,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       }
       _photos.clear();
       _liveModels = [];
+      _resolvedApprovals.clear();
       _sessions.removeWhere((x) => x.agentSessionId == s.agentSessionId);
       _sessions.insert(0, s);
     });
@@ -526,6 +562,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     await _refreshModels(s.agent, force: true);
     await _refreshGitTree();
     _scrollToEnd();
+    // A request that landed while this chat was in the background is answered
+    // now, instead of blocking the agent with no way to reach it.
+    unawaited(Future<void>.delayed(const Duration(milliseconds: 250), _flushPendingApproval));
   }
 
   Future<void> _openHostChat(AgentHostChat chat) async {
@@ -805,12 +844,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final session = _active;
     final client = _client;
     if (session == null) return;
-    if (client != null) {
-      try {
-        await client.request(
-            'agent.cancel', {'agentSessionId': session.agentSessionId});
-      } catch (_) {}
-    }
     if (mounted) {
       setState(() {
         _setBusy(false);
@@ -819,6 +852,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           ..clear()
           ..addAll(settled);
       });
+    }
+    if (client != null) {
+      try {
+        await client.request(
+            'agent.cancel', {'agentSessionId': session.agentSessionId});
+      } catch (_) {}
     }
   }
 
@@ -1786,6 +1825,61 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     );
   }
 
+  /// Per-agent permission policy. 'auto' is the escape hatch for when a request
+  /// would otherwise sit unanswered on a phone that is not watching that chat.
+  Widget _approvalToggle(AgentInfo a) {
+    final auto = a.capabilities.approvalMode == 'auto';
+    return Row(
+      children: [
+        const Text('Approvals',
+            style: TextStyle(fontSize: 12, color: Color(0xFF8A8A9A))),
+        const SizedBox(width: 10),
+        _ApprovalChip(
+          label: 'Ask me',
+          selected: !auto,
+          onTap: () => _setApprovalMode(a, 'ask'),
+        ),
+        const SizedBox(width: 6),
+        _ApprovalChip(
+          label: 'Automatic',
+          selected: auto,
+          onTap: () => _setApprovalMode(a, 'auto'),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _setApprovalMode(AgentInfo a, String mode) async {
+    final client = _client;
+    if (client == null) return;
+    try {
+      final res = await client.request('agent.setApprovalMode', {
+        'agent': a.id,
+        'mode': mode,
+      });
+      if (!mounted) return;
+      if (res is Map && res['ok'] != true) {
+        _toast('The PC rejected that approval setting.');
+        return;
+      }
+      setState(() {
+        _agents = _agents
+            .map((x) => x.id == a.id
+                ? x.copyWith(
+                    capabilities: x.capabilities.copyWith(approvalMode: mode))
+                : x)
+            .toList();
+      });
+    } catch (_) {
+      if (mounted) _toast('This PC does not support approval settings yet.');
+    }
+  }
+
+  void _toast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+  }
+
   Widget _picker() {
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
@@ -1795,24 +1889,38 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                 fontSize: 11, letterSpacing: 0.8, color: Color(0xFF666677))),
         const SizedBox(height: 8),
         for (final a in _agents)
-          ListTile(
-            leading: AgentMark(
-              agentId: a.id,
-              icon: a.icon,
-              color: agentMarkColor(a.id, available: a.available),
-            ),
-            title: Text(a.name),
-            subtitle: Text(a.available
-                ? 'Runs on the PC — chat here'
-                : 'CLI not installed on the PC'),
-            enabled: a.available,
-            trailing: a.available
-                ? FilledButton(
-                    onPressed: () => _newChat(a),
-                    child: const Text('Select'),
-                  )
-                : null,
-            onTap: a.available ? () => _newChat(a) : null,
+          Builder(
+            builder: (context) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ListTile(
+                    leading: AgentMark(
+                      agentId: a.id,
+                      icon: a.icon,
+                      color: agentMarkColor(a.id, available: a.available),
+                    ),
+                    title: Text(a.name),
+                    subtitle: Text(a.available
+                        ? 'Runs on the PC — chat here'
+                        : 'CLI not installed on the PC'),
+                    enabled: a.available,
+                    trailing: a.available
+                        ? FilledButton(
+                            onPressed: () => _newChat(a),
+                            child: const Text('Select'),
+                          )
+                        : null,
+                    onTap: a.available ? () => _newChat(a) : null,
+                  ),
+                  if (a.available && a.capabilities.approvalMode != null)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                      child: _approvalToggle(a),
+                    ),
+                ],
+              );
+            },
           ),
         const SizedBox(height: 16),
         if (kAgentHostChatsInAgentTab) ...[
@@ -1835,6 +1943,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             for (final s in _sessions)
               Builder(builder: (context) {
                 final busy = ref.watch(terminalBusyProvider)[s.agentSessionId] ?? false;
+                final needsApproval =
+                    _pendingApprovals.containsKey(s.agentSessionId);
                 return Padding(
                   padding: const EdgeInsets.symmetric(vertical: 2),
                   child: TerminalGlowBorder(
@@ -1846,18 +1956,29 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                       decoration: BoxDecoration(
                         color: const Color(0xFF141420),
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: const Color(0xFF1E1E30)),
+                        border: Border.all(
+                          color: needsApproval
+                              ? const Color(0xFFF0C040)
+                              : const Color(0xFF1E1E30),
+                        ),
                       ),
                       child: ListTile(
-                        leading: AgentActivityIcon(
-                          agentId: s.agent,
-                          icon: s.icon,
-                          active: s.busy ||
-                              (_active?.agentSessionId == s.agentSessionId && _busy),
-                        ),
+                        leading: needsApproval
+                            ? const Icon(Icons.shield_outlined,
+                                color: Color(0xFFF0C040), size: 24)
+                            : AgentActivityIcon(
+                                agentId: s.agent,
+                                icon: s.icon,
+                                active: s.busy ||
+                                    (_active?.agentSessionId ==
+                                            s.agentSessionId &&
+                                        _busy),
+                              ),
                         title: Text(s.title),
                         subtitle: Text(
-                          chatListSubtitle(agent: s.agent, cwd: s.cwd),
+                          needsApproval
+                              ? 'Waiting for your approval'
+                              : chatListSubtitle(agent: s.agent, cwd: s.cwd),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -2318,7 +2439,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       case 'text':
       case 'text-delta':
       case 'result':
-        if ((e.text ?? '').trim().isEmpty) return const SizedBox.shrink();
+        if ((e.text ?? '').trim().isEmpty) {
+          if (e.kind == 'result' && _events.isNotEmpty && e == _events.last) {
+            return const Padding(
+              padding: EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+              child: Text('Done', style: TextStyle(color: Colors.white38, fontSize: 12, fontStyle: FontStyle.italic)),
+            );
+          }
+          return const SizedBox.shrink();
+        }
         return _align(
           Alignment.centerLeft,
           SelectionArea(
@@ -2385,7 +2514,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         }
         return _toolCard(e, running: false);
       case 'permission-request':
-        final isPending = _active != null && e == _events.last && _busy;
+        final isPending = _active != null && (e.refId == null || !_resolvedApprovals.contains(e.refId!));
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
           child: SelectionArea(
@@ -2455,7 +2584,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       case 'error':
         final errorText = (e.text ?? '').trim();
         if (errorText.isEmpty ||
-            errorText.toLowerCase().startsWith('declaring permissions: cortex tool') ||
             errorText.toLowerCase().contains('is not a valid artifact path; artifacts must be in')) {
           return const SizedBox.shrink();
         }
@@ -2618,7 +2746,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         ? (isPlan
             ? (fileInfo.title.isNotEmpty && fileInfo.title != 'Plan' ? fileInfo.title : 'Implementation Plan')
             : fileInfo.title)
-        : (e.toolName ?? 'tool');
+        : (e.toolName == 'task' || e.toolName == 'run_command'
+            ? 'Command'
+            : (e.toolName ?? 'tool'));
 
     String? displaySubtitle;
     if (fileInfo != null && isPlan) {
@@ -2631,7 +2761,22 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         displaySubtitle = firstLine.replaceFirst(RegExp(r'^[#\s*-]+'), '').trim();
       }
     } else {
-      if (detail.isNotEmpty && detail != (e.toolName ?? '')) {
+      if (detail.startsWith('{')) {
+        try {
+          final decoded = jsonDecode(detail);
+          if (decoded is Map) {
+            final cmd = decoded['CommandLine'] ??
+                decoded['commandLine'] ??
+                decoded['command'] ??
+                decoded['cmd'] ??
+                decoded['path'];
+            if (cmd != null && '$cmd'.trim().isNotEmpty) {
+              displaySubtitle = '$cmd'.trim();
+            }
+          }
+        } catch (_) {}
+      }
+      if (displaySubtitle == null && detail.isNotEmpty && detail != (e.toolName ?? '')) {
         displaySubtitle = detail;
       }
     }
@@ -3373,6 +3518,45 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                 ],
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact two-state selector for the per-agent approval policy.
+class _ApprovalChip extends StatelessWidget {
+  const _ApprovalChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(999),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xFF2F6BFF).withValues(alpha: 0.22) : null,
+          border: Border.all(
+            color: selected ? const Color(0xFF2F6BFF) : const Color(0xFF33334A),
+          ),
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            color: selected ? const Color(0xFF9FC0FF) : const Color(0xFF8A8A9A),
+            fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
           ),
         ),
       ),

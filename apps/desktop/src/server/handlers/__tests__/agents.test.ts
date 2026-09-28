@@ -34,6 +34,8 @@ import {
   sanitizeCliError,
   sanitizeAgentHistory,
   closeDanglingToolStarts,
+  unmatchedToolStarts,
+  isRedundantToolStart,
   cursorModelFlag,
   withImageMentions,
   materializeAgentImages,
@@ -52,6 +54,8 @@ import {
   pickModelVariant,
   agyEffortFlag,
   isModelEffortSupported,
+  getAgentApprovalMode,
+  setAgentApprovalMode,
   resolveAgentIcon,
   resolveBin,
   spawnArgv,
@@ -342,6 +346,7 @@ describe('composer flags and attachments', () => {
     expect(agy).toContain('--add-dir');
     expect(agy).toContain('/tmp/proj');
     expect(agy).toContain('--new-project');
+    expect(agy).toContain('--dangerously-skip-permissions');
     expect(agy).not.toContain('--conversation');
 
     const agyResume = buildAgyArgv({
@@ -665,6 +670,27 @@ describe('CLI stream parsers', () => {
         event: 'step_update',
         step_update: {
           step_index: 4,
+          state: 'ACTIVE',
+          step_type: 'tool',
+          tool_name: 'task',
+          tool_info: {
+            name: 'task',
+            parameters: { CommandLine: 'git checkout v1.0.30+36' },
+          },
+        },
+      }),
+    ).toEqual([{
+      kind: 'tool-start',
+      toolName: 'task',
+      toolInput: JSON.stringify({ CommandLine: 'git checkout v1.0.30+36' }, null, 2).slice(0, 4000),
+      refId: '4',
+    }]);
+
+    expect(
+      parseAgyStreamEvent({
+        event: 'step_update',
+        step_update: {
+          step_index: 4,
           state: 'DONE',
           step_type: 'tool',
           tool_name: 'run_command',
@@ -699,6 +725,57 @@ describe('CLI stream parsers', () => {
         result: { status: 'ERROR', error: 'authentication required', response: '' },
       }),
     ).toEqual([{ kind: 'error', text: rewriteCliAuthError('authentication required', 'Antigravity') }]);
+
+    // Thinking and planner response
+    expect(
+      parseAgyStreamEvent({
+        event: 'step_update',
+        step_update: {
+          step_type: 'thinking',
+          thinking: 'Analyzing the repository architecture...',
+        },
+      }),
+    ).toEqual([{ kind: 'thinking', text: 'Analyzing the repository architecture...' }]);
+
+    expect(
+      parseAgyStreamEvent({
+        event: 'step_update',
+        step_update: {
+          step_type: 'planner_response',
+          thinking: 'Need to run git status first',
+          content: 'I will inspect the git status.',
+        },
+      }),
+    ).toEqual([
+      { kind: 'thinking', text: 'Need to run git status first' },
+      { kind: 'text', text: 'I will inspect the git status.' },
+    ]);
+
+    // Permission request from agy
+    expect(
+      parseAgyStreamEvent({
+        event: 'control_request',
+        request_id: 'perm-1',
+        tool_name: 'task',
+        tool_input: { CommandLine: 'rm -rf node_modules' },
+        reason: 'Dangerous deletion requested',
+      }),
+    ).toEqual([{
+      kind: 'permission-request',
+      toolName: 'task',
+      toolInput: JSON.stringify({ CommandLine: 'rm -rf node_modules' }, null, 2),
+      refId: 'perm-1',
+      text: 'Dangerous deletion requested',
+    }]);
+
+    // isSafeAgentToolCall with stringified input and 'task' command tool
+    const taskSafety = isSafeAgentToolCall(
+      'task',
+      JSON.stringify({ CommandLine: 'git push origin main' }),
+      sessionCwd,
+    );
+    expect(taskSafety.safe).toBe(false);
+    expect(taskSafety.reason).toContain('Git action requested');
   });
 });
 
@@ -778,14 +855,35 @@ describe('CLI login helpers', () => {
     });
   });
 
-  test('withoutDuplicateResult suppresses trailing errors if text was already streamed', () => {
+  test('closeDanglingToolStarts ends every duplicate-ref start', () => {
+    const history: AgentEvent[] = [
+      { seq: 1, ts: 1, kind: 'tool-start', toolName: 'task', refId: 'task' },
+      { seq: 2, ts: 2, kind: 'tool-start', toolName: 'task', refId: 'task' },
+      { seq: 3, ts: 3, kind: 'tool-start', toolName: 'task', refId: 'task' },
+    ];
+    expect(unmatchedToolStarts(history)).toHaveLength(3);
+    const settled = closeDanglingToolStarts(history, 'Stopped.');
+    expect(unmatchedToolStarts(settled)).toHaveLength(0);
+    expect(settled.filter((e) => e.kind === 'tool-end')).toHaveLength(3);
+  });
+
+  test('isRedundantToolStart skips a second ACTIVE for an in-flight ref', () => {
+    const history: AgentEvent[] = [
+      { seq: 1, ts: 1, kind: 'tool-start', toolName: 'task', refId: '4' },
+    ];
+    expect(isRedundantToolStart(history, { kind: 'tool-start', refId: '4' })).toBe(true);
+    expect(isRedundantToolStart(history, { kind: 'tool-start', refId: '5' })).toBe(false);
+    expect(isRedundantToolStart(history, { kind: 'tool-end', refId: '4' })).toBe(false);
+  });
+
+  test('withoutDuplicateResult blanks result if text was streamed, but preserves errors', () => {
     expect(withoutDuplicateResult({ kind: 'result', text: 'full text' }, true)).toEqual({
       kind: 'result',
       text: '',
     });
     expect(withoutDuplicateResult({ kind: 'error', text: 'exit 1' }, true)).toEqual({
-      kind: 'result',
-      text: '',
+      kind: 'error',
+      text: 'exit 1',
     });
     expect(withoutDuplicateResult({ kind: 'error', text: 'fatal error' }, false)).toEqual({
       kind: 'error',
@@ -818,7 +916,7 @@ describe('CLI login helpers', () => {
       expect(out3.reason).toContain('navigate outside assigned directory');
     });
 
-    test('flags git actions for permission approval', () => {
+    test('flags mutating git actions for permission approval while allowing read-only queries', () => {
       const git1 = isSafeAgentToolCall('run_command', { CommandLine: 'git push origin main' }, cwd);
       expect(git1.safe).toBe(false);
       expect(git1.reason).toContain('Git action requested');
@@ -829,6 +927,12 @@ describe('CLI login helpers', () => {
 
       const git3 = isSafeAgentToolCall('shell', { command: 'git reset --hard HEAD' }, cwd);
       expect(git3.safe).toBe(false);
+
+      const gitReadOnly = isSafeAgentToolCall('run_command', { CommandLine: 'git status && git log -n 10 --oneline && git branch -a' }, cwd);
+      expect(gitReadOnly.safe).toBe(true);
+
+      const gitDiff = isSafeAgentToolCall('run_command', { CommandLine: 'git diff' }, cwd);
+      expect(gitDiff.safe).toBe(true);
     });
 
     test('flags database actions and migrations for permission approval', () => {
@@ -865,6 +969,83 @@ describe('CLI login helpers', () => {
       expect(isSafeAgentToolCall('run_command', { CommandLine: 'ls -la' }, cwd).safe).toBe(true);
       expect(isSafeAgentToolCall('run_command', { CommandLine: 'echo "hello"' }, cwd).safe).toBe(true);
     });
+  });
+});
+
+describe('approval mode', () => {
+  test('defaults to ask and rejects unknown modes', () => {
+    expect(getAgentApprovalMode('claude-nonexistent-agent')).toBe('ask');
+    expect(setAgentApprovalMode('claude-nonexistent-agent', 'yolo')).toEqual({ ok: false });
+    // A rejected write must not change the stored value.
+    expect(getAgentApprovalMode('claude-nonexistent-agent')).toBe('ask');
+  });
+
+  test('round-trips ask and auto per agent', () => {
+    const agent = 'claude-nonexistent-agent';
+    expect(setAgentApprovalMode(agent, 'auto')).toEqual({ ok: true, mode: 'auto' });
+    expect(getAgentApprovalMode(agent)).toBe('auto');
+    expect(setAgentApprovalMode(agent, 'ask')).toEqual({ ok: true, mode: 'ask' });
+    expect(getAgentApprovalMode(agent)).toBe('ask');
+  });
+
+  test('is reported on agent.list so the phone can render the toggle', () => {
+    try {
+      // agent.list only includes known agents, so assert via a real one instead.
+      const claude = listAgents().find((a) => a.id === 'claude');
+      expect(claude).toBeDefined();
+      expect(claude!.capabilities.approvalMode).toBe('ask');
+
+      setAgentApprovalMode('claude', 'auto');
+      const after = listAgents().find((a) => a.id === 'claude');
+      expect(after!.capabilities.approvalMode).toBe('auto');
+    } finally {
+      setAgentApprovalMode('claude', 'ask');
+    }
+  });
+});
+
+describe('permission resolution honesty', () => {
+  test('reports failure for an unknown session instead of pretending it worked', () => {
+    const res = resolveAgentPermission('no-such-session', 'req-1', true);
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe('unknown session');
+  });
+
+  test('reports failure for a request that already expired', async () => {
+    const info = createAgentSession('mock', sessionCwd, 'approval expiry test');
+    await promptAgent(info.agentSessionId, 'hello');
+
+    const res = resolveAgentPermission(info.agentSessionId, 'never-registered', true);
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe('request already expired');
+
+    closeAgentSession(info.agentSessionId);
+  });
+
+  test('a second answer to the same request is reported as expired, not accepted', async () => {
+    const pushed: AgentEvent[] = [];
+    setAgentBroadcast((m: WsMessage) => {
+      if (m.type === 'agent-event') pushed.push(m.event as AgentEvent);
+    });
+
+    const info = createAgentSession('mock', sessionCwd, 'double answer test');
+    await promptAgent(info.agentSessionId, 'hello');
+
+    const deadline = Date.now() + 5000;
+    while (!pushed.some((e) => e.kind === 'permission-request') && Date.now() < deadline) {
+      await Bun.sleep(50);
+    }
+    expect(pushed.some((e) => e.kind === 'permission-request')).toBe(true);
+
+    // First answer is delivered to the adapter.
+    expect(resolveAgentPermission(info.agentSessionId, 'mock-perm', true).ok).toBe(true);
+    // The card can still be on screen; the retry must not look accepted.
+    const second = resolveAgentPermission(info.agentSessionId, 'mock-perm', true);
+    expect(second.ok).toBe(false);
+    expect(second.reason).toBe('request already expired');
+
+    closeAgentSession(info.agentSessionId);
+    setAgentBroadcast(null);
   });
 });
 
