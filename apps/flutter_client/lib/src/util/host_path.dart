@@ -1,4 +1,5 @@
 /// Shared phone-side path math for Unix hosts and Windows drive letters.
+library;
 
 String toPosixPath(String path) => path.replaceAll('\\', '/');
 
@@ -32,8 +33,9 @@ String parentUnixPath(String path) => parentHostPath(path);
 String folderDisplayNameForHost(String path) {
   if (isThisPcPath(path)) return 'This PC';
   if (path.isEmpty) return path;
-  final trimmed =
-      path.endsWith('/') && path != '/' ? path.substring(0, path.length - 1) : path;
+  final trimmed = path.endsWith('/') && path != '/'
+      ? path.substring(0, path.length - 1)
+      : path;
   if (RegExp(r'^[A-Za-z]:$').hasMatch(trimmed)) return trimmed;
   final i = trimmed.lastIndexOf('/');
   return i < 0 ? trimmed : trimmed.substring(i + 1);

@@ -4,13 +4,13 @@ import 'package:nexuslink/src/widgets/link_actions.dart';
 
 void main() {
   group('reconnectDelayMs', () {
-    test('starts at 1s and doubles, then caps at 15s', () {
+    test('starts at 1s and doubles, then caps at 30s', () {
       expect(reconnectDelayMs(0), 1000);
       expect(reconnectDelayMs(1), 2000);
       expect(reconnectDelayMs(2), 4000);
       expect(reconnectDelayMs(3), 8000);
-      expect(reconnectDelayMs(4), 15000);
-      expect(reconnectDelayMs(20), 15000);
+      expect(reconnectDelayMs(4), 16000);
+      expect(reconnectDelayMs(20), 30000);
     });
   });
 

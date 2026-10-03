@@ -96,7 +96,7 @@ class AgentMark extends StatelessWidget {
             height: size,
             fit: BoxFit.contain,
             gaplessPlayback: true,
-            errorBuilder: (_, __, ___) => _fallbackWidget(),
+            errorBuilder: (_, _, _) => _fallbackWidget(),
           ),
         );
       }
@@ -348,7 +348,12 @@ class _CursorLogoPainter extends CustomPainter {
       ..lineTo(3.6481, 15.486)
       ..cubicTo(3.07656, 15.4136, 2.9019, 14.6703, 3.38136, 14.3509)
       ..close();
-    canvas.drawPath(path, Paint()..color = color..style = PaintingStyle.fill);
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.fill,
+    );
   }
 
   @override
@@ -393,7 +398,12 @@ class _AntigravityLogoPainter extends CustomPainter {
       ..cubicTo(19.617, 46.441, 17.258, 48.408, 15.875, 48.776)
       ..cubicTo(15.461, 48.886, 14.651, 48.891, 14.372, 48.786)
       ..close();
-    canvas.drawPath(path, Paint()..color = color..style = PaintingStyle.fill);
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.fill,
+    );
   }
 
   @override
@@ -420,7 +430,12 @@ class _ClaudeLogoPainter extends CustomPainter {
       ..lineTo(2.0, 12.0)
       ..lineTo(9.6, 9.6)
       ..close();
-    canvas.drawPath(path, Paint()..color = color..style = PaintingStyle.fill);
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = color
+        ..style = PaintingStyle.fill,
+    );
   }
 
   @override
@@ -453,4 +468,3 @@ class _OpenCodeLogoPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _OpenCodeLogoPainter old) => old.color != color;
 }
-

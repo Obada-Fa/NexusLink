@@ -1,109 +1,42 @@
 # NexusLink
 
-Remote desktop and AI agent controller that feels like a native phone OS: the PC runs the apps and AI agents, and your phone acts as the mobile cockpit.
+NexusLink is a mobile workspace for coding on a Linux PC over Tailscale. The Flutter Android app opens to **Agents**, with **Files**, **Terminal**, and **PC** alongside it. Desktop streaming is optional under **PC → Experimental**.
 
-* **AI Agent Control**: Seamless mobile chat interface for **Antigravity**, **Cursor CLI**, **Claude Code**, and **OpenCode** running on your PC.
-* **Per-App Virtual Display**: Tapping an app opens it in a phone-shaped virtual display on the host (your physical desktop is never resized).
-* **Remote Terminal & Files**: PTY terminal, live file browser, Git working tree inspector, and process manager.
+This checkout is under active implementation. A debug Android APK, host TypeScript checks, and automated tests have passed locally. The Android experience, background transfers, live activity, all real agent providers, and release signing still require the device and release checks in [the acceptance checklist](docs/ANDROID-ACCEPTANCE.md). No current release is claimed production ready.
 
----
+## Run the Linux host
 
-## Supported Platforms
+Install [Bun 1.3.14](https://bun.sh) and Python 3 with PTY support, connect the PC and phone to the same Tailscale network, then run:
 
-### 📱 Mobile Clients (Phone Controller)
-| Platform | Client Type | Status | How to Test / Run |
-| :--- | :--- | :--- | :--- |
-| **Android** | Flutter App | **Production Ready** | Install `NexusLink-Android.apk` from GitHub Releases. |
-| **iOS** | Flutter App | **Testing Ready** | Sideload `NexusLink-iOS.ipa` via AltStore/Sideloadly or build via Xcode. |
-| **Any Device (iOS/Android/Desktop)** | Next.js PWA | **Production Ready** | Open browser → Tap *Add to Home Screen* (Full screen, zero install). |
-
-### 💻 Desktop Hosts (Running the Agents & Apps)
-| Host OS | Agent Control | Screen Mirroring | Terminal / Files | Notes |
-| :--- | :---: | :---: | :---: | :--- |
-| **Windows** (`apps/windows-host`) | ✅ Full | ✅ Full | ✅ Full | Native Windows PowerShell & RPC service. |
-| **Linux/X11** (`apps/desktop`) | ✅ Full | ✅ Full (Xvfb/WebRTC) | ✅ Full | X11 virtual displays with GStreamer WebRTC. |
-| **macOS** (`apps/desktop`) | ✅ Full | ⚠️ In Progress | ✅ Full | Agent chat, zsh terminal, and file manager work via `bun run server`. |
-
----
-
-## Quick Start for Testing
-
-### 1. Start the Host on your PC
-
-#### Windows Host:
-```powershell
-bun run windows
-# Or double-click run-host.cmd from the release zip
-```
-
-#### Linux Host:
 ```bash
-bun run lan
+bun install --frozen-lockfile
+bun run host
 ```
 
-#### macOS Host (Agent & Terminal control):
-```bash
-bun run server
-```
+`bun run host` starts **only** the coding host. It does not build the PWA or require X11, ffmpeg, GStreamer, or a desktop session. It binds to the active Tailscale IPv4 address and exits with an error when Tailscale is unavailable. For an intentional LAN-only setup, run `bun run host:lan` and enter that PC's address manually in the app.
 
-The host prints a **QR code** for local Wi-Fi and **Tailscale** addresses.
+In another terminal on the PC, run `bun run host:pair`. Enter the one-use eight-digit code shown there on the Android connection screen. The code lasts five minutes. `bun run host:devices` lists paired devices; `bun run host:revoke <device-id>` revokes one. Keep the persistent data directory (`~/.local/share/nexuslink` by default) in your normal PC backup. The Android device credential is held in Keystore-backed storage.
 
----
+The app tries its saved host first. “Find a PC on this Wi-Fi” is a manual option. A paired PC and an arbitrary discovered machine are never interchangeable.
 
-### 2. Connect from your Phone
-
-1. **Android**: Download and install the latest `NexusLink-*.apk` from the GitHub Releases page. Launch the app and scan the QR code (or let mDNS auto-discover the PC).
-2. **iOS (Web PWA - Instant)**: Open Safari, navigate to `http://<your-pc-ip>:45678`, and tap **Share → Add to Home Screen**.
-3. **iOS (Native IPA)**: Sideload the provided `NexusLink-iOS-unsigned.ipa` using AltStore, Sideloadly, or TrollStore.
-
----
-
-## AI Agent Integration
-
-NexusLink provides native mobile chat surfaces for major developer AI agents running locally on your workstation:
-
-* **Antigravity**: Full tool execution view, diff review, permission approvals, and model picker.
-* **Cursor CLI**: Sleek zinc/charcoal dark theme matching the Cursor IDE palette, multi-model selection (Composer, Codex, Grok, Claude).
-* **Claude Code**: Native markdown rendering, code block syntax highlighting, and bash tool inspection.
-* **OpenCode**: DeepSeek / MiMo model switching with real-time reasoning transcript streaming.
-
----
+A Linux user-service template, logs, and Tailscale recovery instructions are in [host setup](docs/HOST-SETUP.md). The [protocol reference](docs/PROTOCOL.md) covers capabilities, authentication, and compatibility. [Agent history migration](docs/AGENT-MIGRATION.md) describes the SQLite migration and rollback. [Known limits](docs/KNOWN-LIMITS.md) records remaining work and observed test coverage.
 
 ## Development
 
 ```bash
-bun install
-bun run dev          # Runs all workspaces concurrently
-```
-
-### Workspace Commands:
-* `apps/windows-host`: Windows RPC daemon (`bun run start`)
-* `apps/desktop`: Linux/macOS host UI and server (`bun run dev`)
-* `apps/flutter_client`: Flutter mobile app (`flutter run`)
-* `apps/mobile-client`: Next.js PWA client (`bun run dev`)
-* `apps/relay`: Signaling server for remote NAT traversal (`bun run start`)
-
----
-
-## Building Releases
-
-### Android APK:
-```bash
+bun install --frozen-lockfile
+bun apps/desktop/node_modules/typescript/bin/tsc --project apps/desktop/tsconfig.json --incremental false
+bun test apps/desktop/src/server/workspace apps/desktop/src/server/handlers/__tests__/agents.test.ts packages/rpc-types/src/__tests__
 cd apps/flutter_client
-flutter build apk --release
-# Output: apps/flutter_client/build/app/outputs/flutter-apk/app-release.apk
+flutter pub get
+flutter analyze --no-pub
+flutter test
+cd android && bash gradlew assembleDebug
 ```
 
-### iOS Unsigned IPA (macOS):
-```bash
-cd apps/flutter_client
-flutter create . --platforms=ios
-flutter build ios --release --no-codesign
-mkdir -p Payload && cp -r build/ios/iphoneos/Runner.app Payload/
-zip -r NexusLink-iOS-unsigned.ipa Payload
-```
+Tests use a fresh temporary data directory and disable outbound push notifications. Keep `bunfig.toml` active when running host tests.
 
----
+The Windows host and PWA still live in `apps/windows-host` and `apps/mobile-client`. The new Android features use host capabilities; older hosts can still connect for their supported operations, but they cannot provide guarded editing or resumable PTY sessions. Streaming dependencies remain for the experimental viewer.
 
 ## License
 

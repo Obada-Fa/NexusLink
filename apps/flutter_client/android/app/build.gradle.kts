@@ -26,11 +26,25 @@ android {
         versionName = flutter.versionName
     }
 
+    val releaseStore = System.getenv("NEXUSLINK_RELEASE_KEYSTORE")
+    val releaseStorePassword = System.getenv("NEXUSLINK_RELEASE_STORE_PASSWORD")
+    val releaseKeyAlias = System.getenv("NEXUSLINK_RELEASE_KEY_ALIAS")
+    val releaseKeyPassword = System.getenv("NEXUSLINK_RELEASE_KEY_PASSWORD")
+    val releaseRequested = gradle.startParameter.taskNames.any { it.contains("release", ignoreCase = true) }
+    if (releaseRequested && listOf(releaseStore, releaseStorePassword, releaseKeyAlias, releaseKeyPassword).any { it.isNullOrBlank() }) {
+        throw GradleException("Release signing requires the four NEXUSLINK_RELEASE_* environment variables. Verify the existing installed APK certificate before choosing a key.")
+    }
+    if (!releaseStore.isNullOrBlank()) {
+        signingConfigs.create("nexuslinkRelease") {
+            storeFile = file(releaseStore)
+            storePassword = releaseStorePassword
+            keyAlias = releaseKeyAlias
+            keyPassword = releaseKeyPassword
+        }
+    }
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            if (!releaseStore.isNullOrBlank()) signingConfig = signingConfigs.getByName("nexuslinkRelease")
         }
     }
 }
@@ -46,5 +60,6 @@ flutter {
 }
 
 dependencies {
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }

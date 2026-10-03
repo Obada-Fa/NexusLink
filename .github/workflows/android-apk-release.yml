@@ -47,8 +47,34 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          flutter-version: '3.44.8'
           cache: true
+
+      - name: Configure existing release identity
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.NEXUSLINK_RELEASE_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.NEXUSLINK_RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.NEXUSLINK_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.NEXUSLINK_RELEASE_KEY_PASSWORD }}
+          EXPECTED_SHA256: ${{ secrets.NEXUSLINK_RELEASE_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          for value in "$KEYSTORE_BASE64" "$STORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" "$EXPECTED_SHA256"; do
+            if [[ -z "$value" ]]; then echo 'Release signing identity is not configured'; exit 1; fi
+          done
+          KEYSTORE="$RUNNER_TEMP/nexuslink-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+          chmod 600 "$KEYSTORE"
+          ACTUAL_SHA256="$(keytool -exportcert -keystore "$KEYSTORE" -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" | openssl dgst -sha256 | awk '{print $NF}')"
+          EXPECTED_NORMALIZED="$(printf '%s' "$EXPECTED_SHA256" | tr -d ':' | tr '[:upper:]' '[:lower:]')"
+          if [[ "${ACTUAL_SHA256,,}" != "$EXPECTED_NORMALIZED" ]]; then
+            echo 'Release certificate does not match the approved signing identity'; exit 1
+          fi
+          echo "NEXUSLINK_RELEASE_KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
+          echo "NEXUSLINK_RELEASE_STORE_PASSWORD=$STORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "NEXUSLINK_RELEASE_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "NEXUSLINK_RELEASE_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
 
       - name: Resolve version from tag or input
         id: ver

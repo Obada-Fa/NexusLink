@@ -1,0 +1,19 @@
+[Unit]
+Description=NexusLink Linux coding host
+After=network-online.target tailscaled.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=8
+
+[Service]
+Type=simple
+WorkingDirectory=/absolute/path/to/NexusLink
+Environment=NEXUSLINK_TAILSCALE_ONLY=1
+ExecStart=/usr/bin/env bun apps/desktop/src/server/index.ts
+Restart=on-failure
+RestartSec=10s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -21,13 +21,13 @@ class WindowInfo {
   });
 
   factory WindowInfo.fromJson(Map<String, dynamic> j) => WindowInfo(
-        windowId: j['windowId'] as String,
-        title: (j['title'] as String?) ?? '',
-        wmClass: (j['wmClass'] as String?) ?? '',
-        desktop: (j['desktop'] as num?)?.toInt() ?? 0,
-        icon: j['icon'] as String?,
-        appId: j['appId'] as String?,
-      );
+    windowId: j['windowId'] as String,
+    title: (j['title'] as String?) ?? '',
+    wmClass: (j['wmClass'] as String?) ?? '',
+    desktop: (j['desktop'] as num?)?.toInt() ?? 0,
+    icon: j['icon'] as String?,
+    appId: j['appId'] as String?,
+  );
 }
 
 class AppInfo {
@@ -39,11 +39,11 @@ class AppInfo {
   AppInfo({required this.appId, required this.name, this.icon, this.wmClass});
 
   factory AppInfo.fromJson(Map<String, dynamic> j) => AppInfo(
-        appId: j['appId'] as String,
-        name: (j['name'] as String?) ?? j['appId'] as String,
-        icon: j['icon'] as String?,
-        wmClass: j['wmClass'] as String?,
-      );
+    appId: j['appId'] as String,
+    name: (j['name'] as String?) ?? j['appId'] as String,
+    icon: j['icon'] as String?,
+    wmClass: j['wmClass'] as String?,
+  );
 }
 
 class FileEntry {
@@ -64,13 +64,13 @@ class FileEntry {
   });
 
   factory FileEntry.fromJson(Map<String, dynamic> j) => FileEntry(
-        name: j['name'] as String,
-        path: j['path'] as String,
-        size: (j['size'] as num?)?.toInt() ?? 0,
-        isDirectory: j['isDirectory'] as bool? ?? false,
-        modifiedAt: (j['modifiedAt'] as String?) ?? '',
-        mimeType: (j['mimeType'] as String?) ?? '',
-      );
+    name: j['name'] as String,
+    path: j['path'] as String,
+    size: (j['size'] as num?)?.toInt() ?? 0,
+    isDirectory: j['isDirectory'] as bool? ?? false,
+    modifiedAt: (j['modifiedAt'] as String?) ?? '',
+    mimeType: (j['mimeType'] as String?) ?? '',
+  );
 }
 
 /// A phone-shaped virtual display on the PC running one app (Tier 1).
@@ -98,16 +98,16 @@ class AppSessionInfo {
   });
 
   factory AppSessionInfo.fromJson(Map<String, dynamic> j) => AppSessionInfo(
-        sessionId: j['sessionId'] as String,
-        appId: (j['appId'] as String?) ?? '',
-        name: (j['name'] as String?) ?? 'App',
-        icon: j['icon'] as String?,
-        display: (j['display'] as String?) ?? '',
-        width: (j['width'] as num?)?.toInt() ?? 0,
-        height: (j['height'] as num?)?.toInt() ?? 0,
-        dpr: (j['dpr'] as num?)?.toDouble() ?? 1,
-        status: (j['status'] as String?) ?? 'running',
-      );
+    sessionId: j['sessionId'] as String,
+    appId: (j['appId'] as String?) ?? '',
+    name: (j['name'] as String?) ?? 'App',
+    icon: j['icon'] as String?,
+    display: (j['display'] as String?) ?? '',
+    width: (j['width'] as num?)?.toInt() ?? 0,
+    height: (j['height'] as num?)?.toInt() ?? 0,
+    dpr: (j['dpr'] as num?)?.toDouble() ?? 1,
+    status: (j['status'] as String?) ?? 'running',
+  );
 }
 
 /// An AI agent CLI on the PC (Claude Code, Cursor CLI, demo agent).
@@ -115,19 +115,26 @@ class AgentModelOption {
   final String id;
   final String name;
   final bool? supportsEffort;
-  const AgentModelOption({required this.id, required this.name, this.supportsEffort});
+  const AgentModelOption({
+    required this.id,
+    required this.name,
+    this.supportsEffort,
+  });
   factory AgentModelOption.fromJson(Map<String, dynamic> j) => AgentModelOption(
-        id: j['id'] as String,
-        name: (j['name'] as String?) ?? j['id'] as String,
-        supportsEffort: j['supportsEffort'] as bool?,
-      );
+    id: j['id'] as String,
+    name: (j['name'] as String?) ?? j['id'] as String,
+    supportsEffort: j['supportsEffort'] as bool?,
+  );
 }
 
 /// Strip thinking / effort suffixes (`-high`, `-thinking-high`, `-xhigh-fast`).
 String modelFamilyId(String id) {
   return id
       .replaceAll(RegExp(r'-thinking(?=-|$)', caseSensitive: false), '')
-      .replaceAll(RegExp(r'-(low|medium|high|xhigh|max)(-fast)?$', caseSensitive: false), '')
+      .replaceAll(
+        RegExp(r'-(low|medium|high|xhigh|max)(-fast)?$', caseSensitive: false),
+        '',
+      )
       .replaceAll(RegExp(r'-fast$', caseSensitive: false), '')
       .replaceAll(RegExp(r'-+$'), '');
 }
@@ -143,30 +150,40 @@ List<AgentModelOption> collapseModelFamilies(List<AgentModelOption> models) {
     seen.add(fam);
     final name = m.name
         .replaceAll(
-            RegExp(r'\s*\((High|Medium|Low|Extra High|Max|Thinking).*?\)',
-                caseSensitive: false),
-            '')
+          RegExp(
+            r'\s*\((High|Medium|Low|Extra High|Max|Thinking).*?\)',
+            caseSensitive: false,
+          ),
+          '',
+        )
         .replaceAll(RegExp(r'\s+Thinking\s*$', caseSensitive: false), '')
         .replaceAll(RegExp(r'\s*\(current.*\)$', caseSensitive: false), '')
         .trim();
-    out.add(AgentModelOption(
-      id: fam,
-      name: name.isEmpty ? fam : name,
-      supportsEffort: m.supportsEffort,
-    ));
+    out.add(
+      AgentModelOption(
+        id: fam,
+        name: name.isEmpty ? fam : name,
+        supportsEffort: m.supportsEffort,
+      ),
+    );
   }
   return out;
 }
 
 /// Check whether a model supports thinking/effort parameters.
-bool isModelEffortSupported(String? agentId, String? modelId, [List<AgentModelOption>? catalog]) {
+bool isModelEffortSupported(
+  String? agentId,
+  String? modelId, [
+  List<AgentModelOption>? catalog,
+]) {
   final agent = (agentId ?? '').toLowerCase().trim();
   final m = (modelId ?? '').toLowerCase().trim();
   final fam = modelFamilyId(m);
 
   if (catalog != null && catalog.isNotEmpty) {
     for (final opt in catalog) {
-      if (opt.id.toLowerCase() == m || modelFamilyId(opt.id).toLowerCase() == fam) {
+      if (opt.id.toLowerCase() == m ||
+          modelFamilyId(opt.id).toLowerCase() == fam) {
         if (opt.supportsEffort != null) {
           return opt.supportsEffort!;
         }
@@ -176,21 +193,35 @@ bool isModelEffortSupported(String? agentId, String? modelId, [List<AgentModelOp
 
   if (agent == 'antigravity') {
     if (m.isEmpty || m == 'default' || m == 'auto') return true;
-    if (m.contains('claude') || m.contains('gpt-') || m.contains('grok') || m.contains('composer')) {
+    if (m.contains('claude') ||
+        m.contains('gpt-') ||
+        m.contains('grok') ||
+        m.contains('composer')) {
       return false;
     }
     return m.contains('gemini');
   }
 
   if (agent == 'claude') {
-    if (m.isEmpty || m == 'default' || m == 'sonnet' || m.contains('sonnet')) return true;
-    if (m == 'opus' || m == 'haiku' || m.contains('opus') || m.contains('haiku')) return false;
+    if (m.isEmpty || m == 'default' || m == 'sonnet' || m.contains('sonnet')) {
+      return true;
+    }
+    if (m == 'opus' ||
+        m == 'haiku' ||
+        m.contains('opus') ||
+        m.contains('haiku')) {
+      return false;
+    }
     return true;
   }
 
   if (agent == 'cursor') {
     if (m == 'auto') return false;
-    if (m.contains('haiku') || m == 'gpt-4o-mini' || m.contains('gpt-4o-mini')) return false;
+    if (m.contains('haiku') ||
+        m == 'gpt-4o-mini' ||
+        m.contains('gpt-4o-mini')) {
+      return false;
+    }
     return true;
   }
 
@@ -211,6 +242,7 @@ class AgentCapabilities {
   final List<String> thinkingLevels;
   final List<AgentModelOption> models;
   final bool images;
+
   /// OpenCode-only: 'go' | 'byok' | 'unknown'. Null for other agents.
   final String? plan;
 
@@ -237,18 +269,19 @@ class AgentCapabilities {
   );
 
   AgentCapabilities copyWith({String? approvalMode}) => AgentCapabilities(
-        modes: modes,
-        thinkingLevels: thinkingLevels,
-        models: models,
-        images: images,
-        plan: plan,
-        approvalMode: approvalMode ?? this.approvalMode,
-      );
+    modes: modes,
+    thinkingLevels: thinkingLevels,
+    models: models,
+    images: images,
+    plan: plan,
+    approvalMode: approvalMode ?? this.approvalMode,
+  );
 
   factory AgentCapabilities.fromJson(dynamic raw) {
     if (raw is! Map) return AgentCapabilities.empty;
     final j = Map<String, dynamic>.from(raw);
-    final modes = (j['modes'] as List?)
+    final modes =
+        (j['modes'] as List?)
             ?.map((e) => '$e')
             .where((e) => e == 'agent' || e == 'plan' || e == 'ask')
             .toList() ??
@@ -256,24 +289,27 @@ class AgentCapabilities {
     final planRaw = j['plan'] as String?;
     return AgentCapabilities(
       modes: modes.isEmpty ? const ['agent'] : modes,
-      thinkingLevels: (j['thinkingLevels'] as List?)
+      thinkingLevels:
+          (j['thinkingLevels'] as List?)
               ?.map((e) => '$e')
               .where((e) => e.isNotEmpty)
               .toList() ??
           const [],
-      models: (j['models'] as List?)
+      models:
+          (j['models'] as List?)
               ?.whereType<Map>()
-              .map((e) => AgentModelOption.fromJson(Map<String, dynamic>.from(e)))
+              .map(
+                (e) => AgentModelOption.fromJson(Map<String, dynamic>.from(e)),
+              )
               .toList() ??
           const [],
       images: j['images'] as bool? ?? false,
       plan: (planRaw == 'go' || planRaw == 'byok' || planRaw == 'unknown')
           ? planRaw
           : null,
-      approvalMode:
-          (j['approvalMode'] == 'ask' || j['approvalMode'] == 'auto')
-              ? j['approvalMode'] as String
-              : null,
+      approvalMode: (j['approvalMode'] == 'ask' || j['approvalMode'] == 'auto')
+          ? j['approvalMode'] as String
+          : null,
     );
   }
 }
@@ -294,20 +330,20 @@ class AgentInfo {
   });
 
   AgentInfo copyWith({AgentCapabilities? capabilities}) => AgentInfo(
-        id: id,
-        name: name,
-        available: available,
-        icon: icon,
-        capabilities: capabilities ?? this.capabilities,
-      );
+    id: id,
+    name: name,
+    available: available,
+    icon: icon,
+    capabilities: capabilities ?? this.capabilities,
+  );
 
   factory AgentInfo.fromJson(Map<String, dynamic> j) => AgentInfo(
-        id: j['id'] as String,
-        name: (j['name'] as String?) ?? j['id'] as String,
-        available: j['available'] as bool? ?? false,
-        icon: j['icon'] as String?,
-        capabilities: AgentCapabilities.fromJson(j['capabilities']),
-      );
+    id: j['id'] as String,
+    name: (j['name'] as String?) ?? j['id'] as String,
+    available: j['available'] as bool? ?? false,
+    icon: j['icon'] as String?,
+    capabilities: AgentCapabilities.fromJson(j['capabilities']),
+  );
 }
 
 class AgentSessionInfo {
@@ -319,6 +355,10 @@ class AgentSessionInfo {
   final String status;
   final String? hostChatId;
   final String? icon;
+  final String taskState;
+  final bool archived;
+  final int updatedAt;
+  final String? preview;
 
   AgentSessionInfo({
     required this.agentSessionId,
@@ -329,18 +369,30 @@ class AgentSessionInfo {
     required this.status,
     this.hostChatId,
     this.icon,
+    this.taskState = 'idle',
+    this.archived = false,
+    this.updatedAt = 0,
+    this.preview,
   });
 
   factory AgentSessionInfo.fromJson(Map<String, dynamic> j) => AgentSessionInfo(
-        agentSessionId: j['agentSessionId'] as String,
-        agent: (j['agent'] as String?) ?? '',
-        cwd: (j['cwd'] as String?) ?? '',
-        title: (j['title'] as String?) ?? 'Agent',
-        busy: j['busy'] as bool? ?? false,
-        status: (j['status'] as String?) ?? 'running',
-        hostChatId: j['hostChatId'] as String?,
-        icon: j['icon'] as String?,
-      );
+    agentSessionId: j['agentSessionId'] as String,
+    agent: (j['agent'] as String?) ?? '',
+    cwd: (j['cwd'] as String?) ?? '',
+    title: (j['title'] as String?) ?? 'Agent',
+    busy: j['busy'] as bool? ?? false,
+    status: (j['status'] as String?) ?? 'running',
+    hostChatId: j['hostChatId'] as String?,
+    icon: j['icon'] as String?,
+    taskState:
+        j['taskState'] as String? ?? (j['busy'] == true ? 'running' : 'idle'),
+    archived: j['archived'] == true,
+    updatedAt:
+        (j['updatedAt'] as num?)?.toInt() ??
+        (j['createdAt'] as num?)?.toInt() ??
+        0,
+    preview: j['preview'] as String?,
+  );
 
   AgentSessionInfo copyWith({
     String? agentSessionId,
@@ -351,17 +403,20 @@ class AgentSessionInfo {
     String? status,
     String? hostChatId,
     String? icon,
-  }) =>
-      AgentSessionInfo(
-        agentSessionId: agentSessionId ?? this.agentSessionId,
-        agent: agent ?? this.agent,
-        cwd: cwd ?? this.cwd,
-        title: title ?? this.title,
-        busy: busy ?? this.busy,
-        status: status ?? this.status,
-        hostChatId: hostChatId ?? this.hostChatId,
-        icon: icon ?? this.icon,
-      );
+  }) => AgentSessionInfo(
+    agentSessionId: agentSessionId ?? this.agentSessionId,
+    agent: agent ?? this.agent,
+    cwd: cwd ?? this.cwd,
+    title: title ?? this.title,
+    busy: busy ?? this.busy,
+    status: status ?? this.status,
+    hostChatId: hostChatId ?? this.hostChatId,
+    icon: icon ?? this.icon,
+    taskState: taskState,
+    archived: archived,
+    updatedAt: updatedAt,
+    preview: preview,
+  );
 }
 
 class AgentHostChat {
@@ -386,15 +441,15 @@ class AgentHostChat {
   });
 
   factory AgentHostChat.fromJson(Map<String, dynamic> j) => AgentHostChat(
-        agent: (j['agent'] as String?) ?? '',
-        hostChatId: (j['hostChatId'] as String?) ?? '',
-        title: (j['title'] as String?) ?? 'Chat',
-        cwd: (j['cwd'] as String?) ?? '',
-        updatedAt: (j['updatedAt'] as num?)?.toInt() ?? 0,
-        resumable: j['resumable'] as bool? ?? true,
-        source: (j['source'] as String?) ?? '',
-        icon: j['icon'] as String?,
-      );
+    agent: (j['agent'] as String?) ?? '',
+    hostChatId: (j['hostChatId'] as String?) ?? '',
+    title: (j['title'] as String?) ?? 'Chat',
+    cwd: (j['cwd'] as String?) ?? '',
+    updatedAt: (j['updatedAt'] as num?)?.toInt() ?? 0,
+    resumable: j['resumable'] as bool? ?? true,
+    source: (j['source'] as String?) ?? '',
+    icon: j['icon'] as String?,
+  );
 }
 
 /// `git status` snapshot for the agent's current folder.
@@ -416,13 +471,13 @@ class GitWorkingTree {
   });
 
   factory GitWorkingTree.fromJson(Map<String, dynamic> j) => GitWorkingTree(
-        cwd: (j['cwd'] as String?) ?? '',
-        branch: (j['branch'] as String?) ?? '',
-        ahead: (j['ahead'] as num?)?.toInt() ?? 0,
-        behind: (j['behind'] as num?)?.toInt() ?? 0,
-        changed: (j['changed'] as num?)?.toInt() ?? 0,
-        files: (j['files'] as List?)?.map((e) => '$e').toList() ?? const [],
-      );
+    cwd: (j['cwd'] as String?) ?? '',
+    branch: (j['branch'] as String?) ?? '',
+    ahead: (j['ahead'] as num?)?.toInt() ?? 0,
+    behind: (j['behind'] as num?)?.toInt() ?? 0,
+    changed: (j['changed'] as num?)?.toInt() ?? 0,
+    files: (j['files'] as List?)?.map((e) => '$e').toList() ?? const [],
+  );
 }
 
 String workingTreeSubtitle(GitWorkingTree git) {
@@ -462,16 +517,16 @@ class AgentEvent {
   });
 
   factory AgentEvent.fromJson(Map<String, dynamic> j) => AgentEvent(
-        seq: (j['seq'] as num?)?.toInt() ?? 0,
-        ts: (j['ts'] as num?)?.toInt() ?? 0,
-        kind: (j['kind'] as String?) ?? 'status',
-        text: j['text'] as String?,
-        toolName: j['toolName'] as String?,
-        toolInput: j['toolInput'] as String?,
-        toolOutput: j['toolOutput'] as String?,
-        refId: j['refId'] as String?,
-        images: (j['images'] as List?)?.map((e) => '$e').toList() ?? const [],
-      );
+    seq: (j['seq'] as num?)?.toInt() ?? 0,
+    ts: (j['ts'] as num?)?.toInt() ?? 0,
+    kind: (j['kind'] as String?) ?? 'status',
+    text: j['text'] as String?,
+    toolName: j['toolName'] as String?,
+    toolInput: j['toolInput'] as String?,
+    toolOutput: j['toolOutput'] as String?,
+    refId: j['refId'] as String?,
+    images: (j['images'] as List?)?.map((e) => '$e').toList() ?? const [],
+  );
 }
 
 class CaptureRegion {
@@ -479,11 +534,11 @@ class CaptureRegion {
   CaptureRegion(this.x, this.y, this.width, this.height);
 
   factory CaptureRegion.fromJson(Map<String, dynamic> j) => CaptureRegion(
-        (j['x'] as num).toInt(),
-        (j['y'] as num).toInt(),
-        (j['width'] as num).toInt(),
-        (j['height'] as num).toInt(),
-      );
+    (j['x'] as num).toInt(),
+    (j['y'] as num).toInt(),
+    (j['width'] as num).toInt(),
+    (j['height'] as num).toInt(),
+  );
 }
 
 bool isAgentToolEvent(AgentEvent e) =>
@@ -565,12 +620,16 @@ List<AgentDisplayItem> groupAgentDisplay(List<AgentEvent> events) {
         buffer.write(merged[i].text ?? '');
         i++;
       }
-      out.add(AgentDisplayItem.event(AgentEvent(
-        seq: first.seq,
-        ts: first.ts,
-        kind: 'text',
-        text: buffer.toString(),
-      )));
+      out.add(
+        AgentDisplayItem.event(
+          AgentEvent(
+            seq: first.seq,
+            ts: first.ts,
+            kind: 'text',
+            text: buffer.toString(),
+          ),
+        ),
+      );
     } else {
       out.add(AgentDisplayItem.event(merged[i]));
       i++;
@@ -592,9 +651,9 @@ List<AgentEvent> closeOpenTools(
   List<AgentEvent> events, {
   String output = 'Interrupted.',
 }) {
-  final open = mergeToolEvents(events)
-      .where((e) => e.kind == 'tool-start')
-      .toList();
+  final open = mergeToolEvents(
+    events,
+  ).where((e) => e.kind == 'tool-start').toList();
   if (open.isEmpty) return events;
   var seq = 0;
   for (final e in events) {
@@ -627,15 +686,50 @@ String toolGroupTitle(List<AgentEvent> tools) {
 
 String _friendlyToolName(String name) {
   final l = name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
-  if (l.contains('plan') || l == 'createroadmap' || l == 'settask' || l == 'todowrite') return 'Creating plan';
-  if (l == 'glob' || l == 'grep' || l == 'search' || l == 'globfilesearch' || l == 'findbyname' || l == 'grepsearch') return 'Searching codebase';
-  if (l == 'read' || l == 'readlints' || l == 'viewfile' || l == 'readfile') return 'Reading files';
-  if (l == 'write' || l == 'edit' || l == 'replace' || l == 'editfile' || l == 'replacefilecontent' || l == 'writetofile' || l == 'writefile') return 'Editing files';
-  if (l == 'shell' || l == 'bash' || l == 'runcommand' || l == 'task' || l == 'cmd') return 'Running command';
+  if (l.contains('plan') ||
+      l == 'createroadmap' ||
+      l == 'settask' ||
+      l == 'todowrite') {
+    return 'Creating plan';
+  }
+  if (l == 'glob' ||
+      l == 'grep' ||
+      l == 'search' ||
+      l == 'globfilesearch' ||
+      l == 'findbyname' ||
+      l == 'grepsearch') {
+    return 'Searching codebase';
+  }
+  if (l == 'read' || l == 'readlints' || l == 'viewfile' || l == 'readfile') {
+    return 'Reading files';
+  }
+  if (l == 'write' ||
+      l == 'edit' ||
+      l == 'replace' ||
+      l == 'editfile' ||
+      l == 'replacefilecontent' ||
+      l == 'writetofile' ||
+      l == 'writefile') {
+    return 'Editing files';
+  }
+  if (l == 'shell' ||
+      l == 'bash' ||
+      l == 'runcommand' ||
+      l == 'task' ||
+      l == 'cmd') {
+    return 'Running command';
+  }
   if (l == 'list' || l == 'ls' || l == 'listdir') return 'Exploring folders';
-  if (l == 'webfetch' || l == 'fetch' || l == 'readurlcontent' || l == 'searchweb') return 'Browsing web';
+  if (l == 'webfetch' ||
+      l == 'fetch' ||
+      l == 'readurlcontent' ||
+      l == 'searchweb') {
+    return 'Browsing web';
+  }
   if (l == 'askquestion' || l == 'askuser') return 'Asking a question';
-  if (l == 'invokesubagent' || l == 'managesubagents' || l == 'sendmessage') return 'Coordinating agents';
+  if (l == 'invokesubagent' || l == 'managesubagents' || l == 'sendmessage') {
+    return 'Coordinating agents';
+  }
   return name;
 }
 
@@ -662,12 +756,14 @@ ToolFileInfo? extractToolFileInfo(AgentEvent e) {
   if (name.isEmpty) return null;
   final norm = name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
 
-  final isPlan = norm.contains('plan') ||
+  final isPlan =
+      norm.contains('plan') ||
       norm == 'createroadmap' ||
       norm == 'settask' ||
       norm == 'todowrite';
 
-  final isFile = norm == 'write' ||
+  final isFile =
+      norm == 'write' ||
       norm == 'read' ||
       norm == 'edit' ||
       norm == 'viewfile' ||
@@ -703,7 +799,8 @@ ToolFileInfo? extractToolFileInfo(AgentEvent e) {
   String? subtitle;
 
   if (inputMap != null) {
-    final rawPath = inputMap['path'] ??
+    final rawPath =
+        inputMap['path'] ??
         inputMap['filePath'] ??
         inputMap['filepath'] ??
         inputMap['target_file'] ??
@@ -720,7 +817,8 @@ ToolFileInfo? extractToolFileInfo(AgentEvent e) {
       filePath = '$rawPath'.trim();
     }
 
-    final rawTitle = inputMap['title'] ??
+    final rawTitle =
+        inputMap['title'] ??
         inputMap['name'] ??
         inputMap['Summary'] ??
         inputMap['description'];
@@ -728,7 +826,8 @@ ToolFileInfo? extractToolFileInfo(AgentEvent e) {
       title = '$rawTitle'.trim();
     }
 
-    final rawText = inputMap['plan'] ??
+    final rawText =
+        inputMap['plan'] ??
         inputMap['CodeContent'] ??
         inputMap['code_content'] ??
         inputMap['content'] ??
@@ -744,11 +843,17 @@ ToolFileInfo? extractToolFileInfo(AgentEvent e) {
       final buf = StringBuffer('# ${title ?? "Implementation Plan"}\n\n');
       for (final s in steps) {
         if (s is Map) {
-          final st = s['title'] ?? s['name'] ?? s['description'] ?? s['step'] ?? '';
+          final st =
+              s['title'] ?? s['name'] ?? s['description'] ?? s['step'] ?? '';
           final sd = s['description'] ?? s['details'] ?? '';
           final status = '${s['status'] ?? ''}'.toLowerCase();
-          final done = status == 'done' || status == 'completed' || s['completed'] == true;
-          buf.writeln('- [${done ? "x" : " "}] **$st**${sd.isNotEmpty && sd != st ? "\n  $sd" : ""}');
+          final done =
+              status == 'done' ||
+              status == 'completed' ||
+              s['completed'] == true;
+          buf.writeln(
+            '- [${done ? "x" : " "}] **$st**${sd.isNotEmpty && sd != st ? "\n  $sd" : ""}',
+          );
         } else {
           buf.writeln('- [ ] $s');
         }
@@ -759,28 +864,47 @@ ToolFileInfo? extractToolFileInfo(AgentEvent e) {
 
   if (outputMap != null) {
     if (filePath == null) {
-      final rawPath = outputMap['path'] ?? outputMap['filePath'] ?? outputMap['targetFile'];
-      if (rawPath != null && '$rawPath'.trim().isNotEmpty) filePath = '$rawPath'.trim();
+      final rawPath =
+          outputMap['path'] ?? outputMap['filePath'] ?? outputMap['targetFile'];
+      if (rawPath != null && '$rawPath'.trim().isNotEmpty) {
+        filePath = '$rawPath'.trim();
+      }
     }
     if (rawContent == null) {
-      final rawText = outputMap['plan'] ?? outputMap['content'] ?? outputMap['text'] ?? outputMap['result'];
-      if (rawText != null && '$rawText'.trim().isNotEmpty) rawContent = '$rawText'.trim();
+      final rawText =
+          outputMap['plan'] ??
+          outputMap['content'] ??
+          outputMap['text'] ??
+          outputMap['result'];
+      if (rawText != null && '$rawText'.trim().isNotEmpty) {
+        rawContent = '$rawText'.trim();
+      }
     }
   }
 
   final inputStr = (e.toolInput ?? '').trim();
   final outputStr = (e.toolOutput ?? '').trim();
 
-  if (filePath == null && (inputStr.startsWith('/') || inputStr.startsWith('~/') || inputStr.startsWith('./') || inputStr.startsWith('file://'))) {
+  if (filePath == null &&
+      (inputStr.startsWith('/') ||
+          inputStr.startsWith('~/') ||
+          inputStr.startsWith('./') ||
+          inputStr.startsWith('file://'))) {
     filePath = inputStr;
   }
 
   if (rawContent == null) {
     if (isPlan) {
-      if (inputStr.isNotEmpty && inputStr != name && !inputStr.startsWith('{')) {
-        rawContent = inputStr.startsWith('#') ? inputStr : '# ${title ?? "Plan"}\n\n$inputStr';
+      if (inputStr.isNotEmpty &&
+          inputStr != name &&
+          !inputStr.startsWith('{')) {
+        rawContent = inputStr.startsWith('#')
+            ? inputStr
+            : '# ${title ?? "Plan"}\n\n$inputStr';
       } else if (outputStr.isNotEmpty && !outputStr.startsWith('{')) {
-        rawContent = outputStr.startsWith('#') ? outputStr : '# ${title ?? "Plan"}\n\n$outputStr';
+        rawContent = outputStr.startsWith('#')
+            ? outputStr
+            : '# ${title ?? "Plan"}\n\n$outputStr';
       }
     }
   }
@@ -798,7 +922,9 @@ ToolFileInfo? extractToolFileInfo(AgentEvent e) {
     );
   }
 
-  if (filePath != null || isFile || (rawContent != null && rawContent.isNotEmpty)) {
+  if (filePath != null ||
+      isFile ||
+      (rawContent != null && rawContent.isNotEmpty)) {
     final cleanPath = filePath ?? '';
     final nameTitle = cleanPath.isNotEmpty ? cleanPath.split('/').last : name;
     return ToolFileInfo(

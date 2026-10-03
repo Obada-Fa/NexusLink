@@ -17,16 +17,10 @@ import '../rpc/models.dart';
 import '../state/connection.dart';
 import '../util/host_path.dart';
 import '../widgets/file_viewer_modal.dart';
+import '../widgets/controller_owned_dialog.dart';
 import '../widgets/not_connected_view.dart';
 
-enum FileSortOption {
-  nameAsc,
-  nameDesc,
-  dateDesc,
-  dateAsc,
-  sizeDesc,
-  sizeAsc,
-}
+enum FileSortOption { nameAsc, nameDesc, dateDesc, dateAsc, sizeDesc, sizeAsc }
 
 class FilesScreen extends ConsumerStatefulWidget {
   const FilesScreen({super.key});
@@ -128,12 +122,15 @@ class _FilesScreenState extends ConsumerState<FilesScreen>
       _error = null;
     });
     try {
-      final raw = await client.request('fs.list', {'path': path}) as List<dynamic>;
+      final raw =
+          await client.request('fs.list', {'path': path}) as List<dynamic>;
       if (!mounted) return;
       setState(() {
         _cwd = path;
         _entries = _sortEntries(
-          raw.map((e) => FileEntry.fromJson(e as Map<String, dynamic>)).toList(),
+          raw
+              .map((e) => FileEntry.fromJson(e as Map<String, dynamic>))
+              .toList(),
           _sortOption,
         );
         _loading = false;
@@ -164,8 +161,9 @@ class _FilesScreenState extends ConsumerState<FilesScreen>
     try {
       // Stream to a temp file with progress (kept off the RPC socket), then
       // hand it to the OS share sheet so the user saves it wherever they want.
-      final uri =
-          Uri.parse('$_httpBase/files?path=${Uri.encodeQueryComponent(f.path)}');
+      final uri = Uri.parse(
+        '$_httpBase/files?path=${Uri.encodeQueryComponent(f.path)}',
+      );
       final resp = await http.Client().send(http.Request('GET', uri));
       final total = resp.contentLength ?? f.size;
       final dir = await getTemporaryDirectory();
@@ -193,8 +191,9 @@ class _FilesScreenState extends ConsumerState<FilesScreen>
 
   void _toast(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 2)));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), duration: const Duration(seconds: 2)),
+    );
   }
 
   @override
@@ -285,44 +284,46 @@ class _FilesScreenState extends ConsumerState<FilesScreen>
     final controller = TextEditingController(text: _cwd ?? '/');
     final path = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1C1C2A),
-        title: const Text('Go to folder'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: InputDecoration(
-            hintText: 'D:/projects/foo or ~/code',
-            helperText: 'Any folder on the PC. ~ is home. / is This PC.',
-            suffixIcon: IconButton(
-              icon: const Icon(Icons.content_paste, size: 20),
-              tooltip: 'Paste from clipboard',
-              onPressed: () async {
-                final data = await Clipboard.getData(Clipboard.kTextPlain);
-                if (data?.text != null && data!.text!.trim().isNotEmpty) {
-                  controller.text = data.text!.trim();
-                  controller.selection = TextSelection.fromPosition(
-                    TextPosition(offset: controller.text.length),
-                  );
-                }
-              },
+      builder: (ctx) => ControllerOwnedDialog(
+        controller: controller,
+        child: AlertDialog(
+          backgroundColor: const Color(0xFF1C1C2A),
+          title: const Text('Go to folder'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: InputDecoration(
+              hintText: 'D:/projects/foo or ~/code',
+              helperText: 'Any folder on the PC. ~ is home. / is This PC.',
+              suffixIcon: IconButton(
+                icon: const Icon(Icons.content_paste, size: 20),
+                tooltip: 'Paste from clipboard',
+                onPressed: () async {
+                  final data = await Clipboard.getData(Clipboard.kTextPlain);
+                  if (data?.text != null && data!.text!.trim().isNotEmpty) {
+                    controller.text = data.text!.trim();
+                    controller.selection = TextSelection.fromPosition(
+                      TextPosition(offset: controller.text.length),
+                    );
+                  }
+                },
+              ),
             ),
+            onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
           ),
-          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+              child: const Text('Go'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
-            child: const Text('Go'),
-          ),
-        ],
       ),
     );
-    controller.dispose();
     if (path != null && path.isNotEmpty && mounted) {
       await _navigate(path);
     }
@@ -338,31 +339,33 @@ class _FilesScreenState extends ConsumerState<FilesScreen>
     final controller = TextEditingController();
     final name = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1C1C2A),
-        title: const Text('New folder'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            hintText: 'Folder name',
-            labelText: 'Name',
+      builder: (ctx) => ControllerOwnedDialog(
+        controller: controller,
+        child: AlertDialog(
+          backgroundColor: const Color(0xFF1C1C2A),
+          title: const Text('New folder'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: const InputDecoration(
+              hintText: 'Folder name',
+              labelText: 'Name',
+            ),
+            onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
           ),
-          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+              child: const Text('Create'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
-            child: const Text('Create'),
-          ),
-        ],
       ),
     );
-    controller.dispose();
     if (name == null || name.isEmpty || !mounted) return;
 
     final cleaned = name.replaceAll(RegExp(r'[/\\:]'), '_').trim();
@@ -412,12 +415,19 @@ class _FilesScreenState extends ConsumerState<FilesScreen>
                     Expanded(
                       child: Text(
                         isThisPcPath(_cwd ?? '/') ? 'This PC' : (_cwd ?? ''),
-                        style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontFamily: 'monospace',
+                        ),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
                     const SizedBox(width: 4),
-                    const Icon(Icons.edit_outlined, size: 14, color: Colors.white38),
+                    const Icon(
+                      Icons.edit_outlined,
+                      size: 14,
+                      color: Colors.white38,
+                    ),
                   ],
                 ),
               ),
@@ -479,9 +489,11 @@ class _FilesScreenState extends ConsumerState<FilesScreen>
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Text(_error!,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.redAccent)),
+          child: Text(
+            _error!,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.redAccent),
+          ),
         ),
       );
     }
@@ -495,10 +507,11 @@ class _FilesScreenState extends ConsumerState<FilesScreen>
         final e = _entries[i];
         return ListTile(
           leading: Icon(
-              e.isDirectory
-                  ? (isWindowsDriveRoot(e.path) ? Icons.storage : Icons.folder)
-                  : Icons.insert_drive_file,
-              color: e.isDirectory ? const Color(0xFF6B8CFF) : Colors.white54),
+            e.isDirectory
+                ? (isWindowsDriveRoot(e.path) ? Icons.storage : Icons.folder)
+                : Icons.insert_drive_file,
+            color: e.isDirectory ? const Color(0xFF6B8CFF) : Colors.white54,
+          ),
           title: Text(e.name, maxLines: 1, overflow: TextOverflow.ellipsis),
           subtitle: e.isDirectory
               ? null
@@ -532,7 +545,8 @@ class _FilesScreenState extends ConsumerState<FilesScreen>
 
   String _fileSubtitle(FileEntry e) {
     final size = _humanSize(e.size);
-    if (_sortOption == FileSortOption.dateDesc || _sortOption == FileSortOption.dateAsc) {
+    if (_sortOption == FileSortOption.dateDesc ||
+        _sortOption == FileSortOption.dateAsc) {
       final date = _formatDate(e.modifiedAt);
       return date.isNotEmpty ? '$size · $date' : size;
     }

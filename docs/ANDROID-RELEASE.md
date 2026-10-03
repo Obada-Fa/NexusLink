@@ -1,0 +1,11 @@
+# Android release identity
+
+The application ID remains `com.nexuslink.nexuslink`. An Android update can only install over an existing app when it is signed with the same certificate. This checkout contains no previously distributed APK or release keystore, so the correct certificate cannot be inferred from source control. Do not replace a user's installed app with a differently signed build; back up drafts and settings before any migration.
+
+1. Obtain an APK from the actual distribution channel or the certificate fingerprint from an installed device. For an APK, run `apksigner verify --print-certs existing.apk` and record the SHA-256 certificate digest. For a device, `adb shell pm path com.nexuslink.nexuslink` identifies the installed APK path, which can be pulled and inspected with `apksigner`.
+2. Locate the original release keystore and verify its certificate with `keytool -exportcert -keystore release.jks -alias YOUR_ALIAS | openssl dgst -sha256`. The digest must match the existing APK. If it does not, stop; Android cannot install it as an update.
+3. For local builds, set `NEXUSLINK_RELEASE_KEYSTORE` to the keystore path and set `NEXUSLINK_RELEASE_STORE_PASSWORD`, `NEXUSLINK_RELEASE_KEY_ALIAS`, and `NEXUSLINK_RELEASE_KEY_PASSWORD`. Run `flutter build apk --release` from `apps/flutter_client`. The build now fails instead of using a debug key when these values are absent.
+4. For CI, configure repository secrets `NEXUSLINK_RELEASE_KEYSTORE_BASE64`, `NEXUSLINK_RELEASE_STORE_PASSWORD`, `NEXUSLINK_RELEASE_KEY_ALIAS`, `NEXUSLINK_RELEASE_KEY_PASSWORD`, and `NEXUSLINK_RELEASE_CERT_SHA256`. The workflow verifies the certificate digest before building. Keep the keystore and passwords outside source control and retain an offline backup.
+5. Before publishing, install the signed APK as an update on a device with existing NexusLink drafts and paired-host settings. Verify those data survive, then complete the [Android acceptance checklist](ANDROID-ACCEPTANCE.md).
+
+No release key has been selected or uploaded by this implementation. The existing GitHub workflow still runs on a version tag, so do not push a release tag until signing identity and device acceptance have been completed.
