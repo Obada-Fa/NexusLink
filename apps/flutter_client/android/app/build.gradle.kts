@@ -43,7 +43,12 @@ android {
         }
     }
     buildTypes {
+        debug {
+            applicationIdSuffix = ".test"
+            manifestPlaceholders["appLabel"] = "NexusLink Test"
+        }
         release {
+            manifestPlaceholders["appLabel"] = "NexusLink"
             if (!releaseStore.isNullOrBlank()) signingConfig = signingConfigs.getByName("nexuslinkRelease")
         }
     }
