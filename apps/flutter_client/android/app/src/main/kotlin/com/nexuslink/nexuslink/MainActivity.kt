@@ -65,7 +65,8 @@ class MainActivity : FlutterActivity() {
                     "live.status" -> result.success(mapOf("running" to LiveActivityService.running,"overlay" to Settings.canDrawOverlays(this),"bubble" to getSharedPreferences("live",0).getBoolean("bubble",false)))
                     "live.permission" -> {startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,Uri.parse("package:$packageName")));result.success(null)}
                     "live.start" -> {
-                        val intent=Intent(this,LiveActivityService::class.java).putExtra("host",text("host")).putExtra("bubble",args["bubble"]==true)
+                        val intent=Intent(this,LiveActivityService::class.java).putExtra("host",text("host"))
+                        if(args.containsKey("bubble")) intent.putExtra("bubble",args["bubble"]==true)
                         if(Build.VERSION.SDK_INT>=26)startForegroundService(intent) else startService(intent)
                         result.success(null)
                     }
