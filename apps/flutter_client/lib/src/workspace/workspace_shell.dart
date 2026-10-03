@@ -243,14 +243,47 @@ class PcScreen extends ConsumerStatefulWidget {
   ConsumerState<PcScreen> createState() => _PcScreenState();
 }
 
-class _PcScreenState extends ConsumerState<PcScreen> {
+class _PcScreenState extends ConsumerState<PcScreen>
+    with WidgetsBindingObserver {
   Map<String, dynamic>? _info;
   bool _live = false, _bubble = false;
   String? _error;
+  bool _awaitingOverlayPermission = false;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _load();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _handleResume();
+    }
+  }
+
+  Future<void> _handleResume() async {
+    await _load();
+    if (_awaitingOverlayPermission && Platform.isAndroid) {
+      _awaitingOverlayPermission = false;
+      final status = await PlatformBridge.call('live.status');
+      if (status['overlay'] == true) {
+        await _setLive(true, bubble: true);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Floating status bubble enabled')),
+          );
+        }
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -371,19 +404,22 @@ class _PcScreenState extends ConsumerState<PcScreen> {
             SwitchListTile(
               title: const Text('Live activity'),
               subtitle: const Text(
-                'Keep task status in an ongoing Android notification',
+                'Show task status in top status bar and ongoing notification',
               ),
               value: _live,
               onChanged: (v) => _setLive(v),
             ),
             SwitchListTile(
               title: const Text('Floating status bubble'),
-              subtitle: const Text('Optional indicator over other apps'),
+              subtitle: const Text(
+                'Show live status pill on top (working, needs approval)',
+              ),
               value: _bubble,
               onChanged: (value) async {
                 if (value) {
                   final status = await PlatformBridge.call('live.status');
                   if (status['overlay'] != true) {
+                    _awaitingOverlayPermission = true;
                     await PlatformBridge.call('live.permission');
                     return;
                   }
