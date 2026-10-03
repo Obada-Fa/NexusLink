@@ -219,3 +219,29 @@ export async function performPairingHandshake(
 
   return authResp.token;
 }
+
+/** Version-two enrollment is explicitly enabled from the local PC console. */
+export async function authenticateWorkspace(
+  host: string,
+  request: (method: string, params?: unknown) => Promise<unknown>,
+  code?: string,
+): Promise<{token:string;hostId?:string}> {
+  let hello: any;
+  try { hello=await request('session.hello',{}); }
+  catch(error) { if(!/unknown method|not authenticated/i.test(String(error))) throw error; }
+  if(hello?.protocolVersion===2) {
+    const key=`nexuslink-device:${host}`;
+    const credential=localStorage.getItem(key);
+    if(!code && !credential) throw new Error('Run bun run host:pair on the PC, then enter its eight-digit code.');
+    const auth:any=code
+      ? await request('session.enroll',{code,name:'NexusLink browser'})
+      : await request('session.resume',{credential});
+    if(auth.credential) localStorage.setItem(key,auth.credential);
+    await request('session.subscribe',{topics:['agents']});
+    return auth;
+  }
+  const token=await performPairingHandshake(host,
+    params=>request('session.pair',params) as any,
+    params=>request('session.authenticate',params) as any);
+  return {token};
+}

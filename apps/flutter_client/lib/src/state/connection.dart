@@ -27,19 +27,20 @@ class ConnectionState {
     RpcStatus? status,
     String? hostUrl,
     String? httpBase,
-  }) =>
-      ConnectionState(
-        client: client ?? this.client,
-        status: status ?? this.status,
-        hostUrl: hostUrl ?? this.hostUrl,
-        httpBase: httpBase ?? this.httpBase,
-      );
+  }) => ConnectionState(
+    client: client ?? this.client,
+    status: status ?? this.status,
+    hostUrl: hostUrl ?? this.hostUrl,
+    httpBase: httpBase ?? this.httpBase,
+  );
 }
 
 class ConnectionNotifier extends Notifier<ConnectionState> {
   VoidCallback? _statusSub;
   RpcClient? _currentClient;
   bool _disposed = false;
+  bool _explicitDisconnect = false;
+  int _generation = 0;
   Future<void>? _inFlightConnect;
 
   @override
@@ -55,9 +56,14 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
   }
 
   /// Connect to a host ws URL. Derives the matching http base for file transfer.
-  Future<void> connect(String wsUrl) async {
+  Future<void> connect(String wsUrl, {String? pairingCode}) async {
+    _explicitDisconnect = false;
     wsUrl = normalizeHostWsUrl(wsUrl);
-    final run = _connect(wsUrl);
+    if (_inFlightConnect != null &&
+        state.hostUrl == normalizeHostWsUrl(wsUrl)) {
+      return _inFlightConnect!;
+    }
+    final run = _connect(wsUrl, pairingCode);
     _inFlightConnect = run;
     try {
       await run;
@@ -66,12 +72,15 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
     }
   }
 
-  Future<void> _connect(String wsUrl) async {
+  Future<void> _connect(String wsUrl, String? pairingCode) async {
+    final generation = ++_generation;
     _teardown();
-    final client = RpcClient(wsUrl);
+    final client = RpcClient(wsUrl, pairingCode: pairingCode);
     _currentClient = client;
     final sub = client.statusStream.listen((s) {
-      if (!_disposed) state = state.copyWith(status: s);
+      if (!_disposed && generation == _generation) {
+        state = state.copyWith(status: s);
+      }
     });
     _statusSub = sub.cancel;
     state = state.copyWith(
@@ -82,21 +91,33 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
     );
     try {
       await client.connect();
-      if (_disposed) {
+      if (_disposed || generation != _generation) {
         client.dispose();
         return;
+      }
+      if (client.status != RpcStatus.connected) {
+        throw RpcException('PC disconnected before synchronization finished');
       }
       await saveLastHostUrl(wsUrl);
       state = state.copyWith(status: RpcStatus.connected);
     } catch (_) {
       client.dispose();
-      _currentClient = null;
-      if (!_disposed) state = const ConnectionState();
+      if (generation == _generation) {
+        _currentClient = null;
+        if (!_disposed) {
+          state = ConnectionState(
+            hostUrl: wsUrl,
+            httpBase: _httpBaseFromWs(wsUrl),
+          );
+        }
+      }
       rethrow;
     }
   }
 
   void disconnect() {
+    _explicitDisconnect = true;
+    ++_generation;
     _teardown();
     if (!_disposed) state = const ConnectionState();
   }
@@ -120,7 +141,7 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
   /// Silent reconnect used when the app returns to the foreground. Only runs
   /// if this session already had a host (explicit disconnect clears it).
   Future<void> ensureConnected() async {
-    if (_disposed) return;
+    if (_disposed || _explicitDisconnect) return;
     if (state.status == RpcStatus.connected) {
       final client = state.client;
       if (client == null) return;
@@ -178,18 +199,25 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
   static String _httpBaseFromWs(String wsUrl) {
     final uri = Uri.parse(wsUrl);
     final scheme = uri.scheme == 'wss' ? 'https' : 'http';
-    return '$scheme://${uri.host}:${uri.port}';
+    return Uri(
+      scheme: scheme,
+      host: uri.host,
+      port: uri.hasPort ? uri.port : null,
+    ).toString();
   }
 }
 
 final connectionProvider =
     NotifierProvider<ConnectionNotifier, ConnectionState>(
-        ConnectionNotifier.new);
+      ConnectionNotifier.new,
+    );
 
 /// The active client, or null when disconnected. Screens that require a
 /// connection read this and guard on null.
-final activeClientProvider =
-    Provider<RpcClient?>((ref) => ref.watch(connectionProvider).client);
+final activeClientProvider = Provider<RpcClient?>(
+  (ref) => ref.watch(connectionProvider).client,
+);
 
-final connectionStatusProvider =
-    Provider<RpcStatus>((ref) => ref.watch(connectionProvider).status);
+final connectionStatusProvider = Provider<RpcStatus>(
+  (ref) => ref.watch(connectionProvider).status,
+);

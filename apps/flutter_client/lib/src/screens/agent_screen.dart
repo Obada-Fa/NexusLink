@@ -33,6 +33,8 @@ import '../widgets/link_actions.dart';
 import '../widgets/not_connected_view.dart';
 import 'cwd_picker.dart';
 import 'terminal_screen.dart';
+import '../workspace/project.dart';
+import '../workspace/changes_screen.dart';
 
 /// PC conversations will get their own screen. Skip the slow
 /// `agent.listHostChats` scan on this tab until then.
@@ -79,6 +81,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   bool _sending = false;
   int _menuTab = 0;
   int _chatTab = 0;
+  final Set<String> _terminalVisited = {};
+  final Map<String, String> _drafts = {};
+  String _taskQuery = '';
+  String? _agentFilter;
+  bool _showArchived = false;
+  bool _hasOlder = false;
+  bool _newActivity = false;
+  Timer? _draftTimer;
   String? _error;
   final SpeechToText _speech = SpeechToText();
   bool _isListening = false;
@@ -98,6 +108,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _input.addListener(_draftChanged);
     _load();
   }
 
@@ -179,6 +190,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         _loading = false;
         _error = null;
       });
+      _openPendingTask();
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -210,13 +222,31 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       }
       List<AgentEvent> history = const [];
       if (shouldSyncTranscript) {
-        final raw = await client.request(
-          'agent.history',
-          {'agentSessionId': activeId},
-        ) as List<dynamic>;
-        history = raw
-            .map((e) => AgentEvent.fromJson(e as Map<String, dynamic>))
-            .toList();
+        if (client.supports('agent.historyPage')) {
+          var cursor = _events.isEmpty ? 0 : _events.last.seq;
+          final missing = <AgentEvent>[];
+          while (mounted && gen == _syncGen) {
+            final page = await client.requestMap('agent.historyPage', {
+              'agentSessionId': activeId,
+              'afterSeq': cursor,
+              'limit': 200,
+            });
+            final events = (page['events'] as List)
+                .map((e) => AgentEvent.fromJson(Map<String, dynamic>.from(e)))
+                .toList();
+            missing.addAll(events);
+            if (events.isEmpty || page['hasMore'] != true) break;
+            cursor = events.last.seq;
+          }
+          history = missing;
+        } else {
+          final raw = await client.requestList('agent.history', {
+            'agentSessionId': activeId,
+          });
+          history = raw
+              .map((e) => AgentEvent.fromJson(Map<String, dynamic>.from(e)))
+              .toList();
+        }
       }
       if (!mounted || gen != _syncGen) return;
       setState(() {
@@ -247,8 +277,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             // must not resurrect Stop after the phone already ended the turn.
             if (!match.busy) _busy = false;
           }
-          if (shouldSyncTranscript &&
-              _active?.agentSessionId == activeId) {
+          if (shouldSyncTranscript && _active?.agentSessionId == activeId) {
             final merged = applyAgentHistorySnapshot(
               history,
               _events,
@@ -260,7 +289,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           }
         }
       });
-      if (shouldSyncTranscript) _scrollToEnd();
+      if (shouldSyncTranscript) {
+        await _syncApprovals(activeId);
+        _scrollToEnd();
+      }
       _flushPendingApproval();
       unawaited(_refreshGitTree());
     } catch (_) {
@@ -270,11 +302,70 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   /// Ask a permission request that arrived while this chat was in the background.
   void _flushPendingApproval() {
-    final sessionId = _active?.agentSessionId;
-    if (sessionId == null) return;
-    final pending = _pendingApprovals.remove(sessionId);
-    if (pending == null) return;
-    unawaited(_askPermission(pending));
+    /* Approval cards remain inline until explicitly answered. */
+  }
+
+  String _draftKey(String id) =>
+      'task-draft:${_client?.hostId ?? _client?.wsUrl}:$id';
+  void _draftChanged() {
+    final id = _active?.agentSessionId;
+    if (id == null) return;
+    _drafts[id] = _input.text;
+    final text = _input.text;
+    final key = _draftKey(id);
+    _draftTimer?.cancel();
+    _draftTimer = Timer(const Duration(milliseconds: 500), () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(key, text);
+    });
+  }
+
+  Future<void> _restoreDraft(String id) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted || _active?.agentSessionId != id) return;
+    _input.text = _drafts[id] ?? prefs.getString(_draftKey(id)) ?? '';
+  }
+
+  Future<void> _syncApprovals(String id) async {
+    final client = _client;
+    if (client == null || !client.supports('agent.pendingApprovals')) return;
+    final pending = await client.requestList('agent.pendingApprovals', {
+      'agentSessionId': id,
+    });
+    if (!mounted || _active?.agentSessionId != id) return;
+    final activeIds = pending.map((e) => e['refId'] as String?).toSet();
+    setState(() {
+      for (final event in _events.where(
+        (e) => e.kind == 'permission-request' && e.refId != null,
+      )) {
+        if (!activeIds.contains(event.refId)) {
+          _resolvedApprovals.add(event.refId!);
+        }
+      }
+    });
+  }
+
+  Future<void> _older() async {
+    final id = _active?.agentSessionId;
+    final client = _client;
+    if (id == null || client == null || _events.isEmpty) return;
+    try {
+      final page = await client.requestMap('agent.historyPage', {
+        'agentSessionId': id,
+        'beforeSeq': _events.first.seq,
+      });
+      if (!mounted || _active?.agentSessionId != id) return;
+      final old = (page['events'] as List)
+          .map((e) => AgentEvent.fromJson(Map<String, dynamic>.from(e)))
+          .toList();
+      setState(() {
+        final seen = _events.map((e) => e.seq).toSet();
+        _events.insertAll(0, old.where((e) => !seen.contains(e.seq)));
+        _hasOlder = page['hasMore'] == true;
+      });
+    } catch (e) {
+      if (mounted) _toast('$e');
+    }
   }
 
   void _onSessionUpdate(Map<String, dynamic> msg) {
@@ -284,8 +375,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (updated.icon != null) registerAgentIcon(updated.agent, updated.icon);
     if (!mounted) return;
     setState(() {
-      final idx = _sessions
-          .indexWhere((s) => s.agentSessionId == updated.agentSessionId);
+      final idx = _sessions.indexWhere(
+        (s) => s.agentSessionId == updated.agentSessionId,
+      );
       if (idx != -1) {
         _sessions[idx] = updated;
       } else {
@@ -297,8 +389,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         // the turn already finished on the phone.
         if (!updated.busy) {
           _busy = false;
-          final settled = closeOpenTools(_events,
-              output: 'Interrupted — host is no longer running this turn.');
+          final settled = closeOpenTools(
+            _events,
+            output: 'Interrupted — host is no longer running this turn.',
+          );
           if (settled.length != _events.length) {
             _events
               ..clear()
@@ -329,8 +423,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (session == null) return;
     final updated = session.copyWith(busy: busy);
     _active = updated;
-    final idx =
-        _sessions.indexWhere((s) => s.agentSessionId == session.agentSessionId);
+    final idx = _sessions.indexWhere(
+      (s) => s.agentSessionId == session.agentSessionId,
+    );
     if (idx != -1) _sessions[idx] = updated;
   }
 
@@ -339,11 +434,18 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final ev = msg['event'];
     if (ev is! Map<String, dynamic>) return;
     final parsed = AgentEvent.fromJson(ev);
+    if (parsed.kind == 'status' &&
+        parsed.refId != null &&
+        (parsed.text ?? '').startsWith('Approval ')) {
+      _pendingApprovals.remove('$sessionId:${parsed.refId}');
+      if (sessionId == _active?.agentSessionId) {
+        _resolvedApprovals.add(parsed.refId!);
+      }
+    }
 
     if (sessionId != null &&
         (parsed.kind == 'result' || parsed.kind == 'error')) {
-      final idx =
-          _sessions.indexWhere((s) => s.agentSessionId == sessionId);
+      final idx = _sessions.indexWhere((s) => s.agentSessionId == sessionId);
       if (idx != -1) {
         _sessions[idx] = _sessions[idx].copyWith(busy: false);
       }
@@ -365,7 +467,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       if (parsed.kind == 'permission-request' &&
           sessionId != null &&
           parsed.refId != null) {
-        setState(() => _pendingApprovals[sessionId] = parsed);
+        setState(
+          () => _pendingApprovals['$sessionId:${parsed.refId}'] = parsed,
+        );
         return;
       }
       if (sessionId != null &&
@@ -379,16 +483,20 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       _pendingThumbs = null;
     }
     setState(() {
-      _events.add(parsed);
+      if (!_events.any((e) => e.seq == parsed.seq)) _events.add(parsed);
       if (parsed.kind == 'result' || parsed.kind == 'error') _setBusy(false);
     });
     _scrollToEnd();
-    if (parsed.kind == 'permission-request') {
-      unawaited(_askPermission(parsed));
-    }
   }
 
-  void _scrollToEnd() {
+  void _scrollToEnd({bool force = false}) {
+    if (!force &&
+        _scroll.hasClients &&
+        _scroll.position.maxScrollExtent - _scroll.offset > 120) {
+      if (mounted) setState(() => _newActivity = true);
+      return;
+    }
+    _newActivity = false;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
       _scroll.animateTo(
@@ -414,11 +522,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       });
       if (!mounted) return;
       if (res is Map && res['ok'] == false) {
-        _toast(res['reason'] == 'request already expired'
-            ? 'That request already expired on the PC.'
-            : 'The PC could not accept that answer.');
+        _toast(
+          res['reason'] == 'request already expired'
+              ? 'That request already expired on the PC.'
+              : 'The PC could not accept that answer.',
+        );
       } else if (mounted) {
-        setState(() => _pendingApprovals.remove(session.agentSessionId));
+        setState(
+          () =>
+              _pendingApprovals.remove('${session.agentSessionId}:$requestId'),
+        );
       }
     } catch (e) {
       if (mounted) {
@@ -444,22 +557,28 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(e.text ?? 'Allow this tool?',
-                style: const TextStyle(
-                    fontSize: 16, fontWeight: FontWeight.w600)),
+            Text(
+              e.text ?? 'Allow this tool?',
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            ),
             const SizedBox(height: 8),
-            Text(e.toolName ?? 'tool',
-                style: const TextStyle(color: Color(0xFFF0C040))),
+            Text(
+              e.toolName ?? 'tool',
+              style: const TextStyle(color: Color(0xFFF0C040)),
+            ),
             if ((e.toolInput ?? '').isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
-                child: Text(e.toolInput!,
-                    maxLines: 8,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontFamily: 'monospace',
-                        fontSize: 12,
-                        color: Colors.white70)),
+                child: Text(
+                  e.toolInput!,
+                  maxLines: 8,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontFamily: 'monospace',
+                    fontSize: 12,
+                    color: Colors.white70,
+                  ),
+                ),
               ),
             const SizedBox(height: 16),
             Row(
@@ -501,14 +620,19 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (cwd == null) return;
     final activeClient = _client ?? client;
     try {
-      final created = await activeClient.request('agent.createSession', {
-        'agent': agent.id,
-        'title': agent.name,
-        'cwd': cwd,
-      }) as Map<String, dynamic>;
+      final created =
+          await activeClient.request('agent.createSession', {
+                'operationId': 'task-${DateTime.now().microsecondsSinceEpoch}',
+                'agent': agent.id,
+                'title': agent.name,
+                'cwd': cwd,
+              })
+              as Map<String, dynamic>;
       final session = AgentSessionInfo.fromJson(created);
       setState(() {
-        _sessions.removeWhere((x) => x.agentSessionId == session.agentSessionId);
+        _sessions.removeWhere(
+          (x) => x.agentSessionId == session.agentSessionId,
+        );
         _sessions.insert(0, session);
         _active = session;
         _events.clear();
@@ -517,28 +641,39 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         _liveModels = [];
         _gitTree = null;
       });
+      _input.clear();
+      ref.read(projectProvider.notifier).select(cwd);
       await _loadComposerPrefs(agent.id, isNewChat: true);
       await _refreshModels(agent.id, force: true);
       await _refreshGitTree();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.toString())));
     }
   }
 
   Future<void> _openSession(AgentSessionInfo s) async {
     final client = _client;
     if (client == null) return;
-    ++_syncGen;
-    final raw =
-        await client.request('agent.history', {'agentSessionId': s.agentSessionId})
-            as List<dynamic>;
+    final gen = ++_syncGen;
+    final page = client.supports('agent.historyPage')
+        ? await client.requestMap('agent.historyPage', {
+            'agentSessionId': s.agentSessionId,
+          })
+        : null;
+    final raw = page != null
+        ? page['events'] as List<dynamic>
+        : await client.requestList('agent.history', {
+            'agentSessionId': s.agentSessionId,
+          });
+    if (gen != _syncGen) return;
+    _hasOlder = page?['hasMore'] == true;
     if (!mounted) return;
-    final loaded = normalizeTranscriptSeqs(raw
-        .map((e) => AgentEvent.fromJson(e as Map<String, dynamic>))
-        .toList());
+    final loaded = normalizeTranscriptSeqs(
+      raw.map((e) => AgentEvent.fromJson(e as Map<String, dynamic>)).toList(),
+    );
     setState(() {
       _active = s;
       _busy = s.busy;
@@ -546,8 +681,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         ..clear()
         ..addAll(loaded);
       if (!s.busy && transcriptHasOpenTools(_events)) {
-        final settled = closeOpenTools(_events,
-            output: 'Interrupted — host restarted.');
+        final settled = closeOpenTools(
+          _events,
+          output: 'Interrupted — host restarted.',
+        );
         _events
           ..clear()
           ..addAll(settled);
@@ -558,13 +695,21 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       _sessions.removeWhere((x) => x.agentSessionId == s.agentSessionId);
       _sessions.insert(0, s);
     });
+    await _syncApprovals(s.agentSessionId);
+    await _restoreDraft(s.agentSessionId);
+    ref.read(projectProvider.notifier).select(s.cwd);
     await _loadComposerPrefs(s.agent);
     await _refreshModels(s.agent, force: true);
     await _refreshGitTree();
     _scrollToEnd();
     // A request that landed while this chat was in the background is answered
     // now, instead of blocking the agent with no way to reach it.
-    unawaited(Future<void>.delayed(const Duration(milliseconds: 250), _flushPendingApproval));
+    unawaited(
+      Future<void>.delayed(
+        const Duration(milliseconds: 250),
+        _flushPendingApproval,
+      ),
+    );
   }
 
   Future<void> _openHostChat(AgentHostChat chat) async {
@@ -576,28 +721,28 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       if (cwd.isEmpty) return;
     }
     try {
-      final created = await client.request(
-        'agent.openHostChat',
-        {
-          'agent': chat.agent,
-          'hostChatId': chat.hostChatId,
-          'cwd': cwd,
-          'title': chat.title,
-        },
-        const Duration(seconds: 25),
-      ) as Map<String, dynamic>;
+      final created =
+          await client.request('agent.openHostChat', {
+                'agent': chat.agent,
+                'hostChatId': chat.hostChatId,
+                'cwd': cwd,
+                'title': chat.title,
+              }, const Duration(seconds: 25))
+              as Map<String, dynamic>;
       final session = AgentSessionInfo.fromJson(created);
       if (!mounted) return;
       setState(() {
-        _sessions.removeWhere((s) => s.agentSessionId == session.agentSessionId);
+        _sessions.removeWhere(
+          (s) => s.agentSessionId == session.agentSessionId,
+        );
         _sessions.insert(0, session);
       });
       await _openSession(session);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.toString())));
     }
   }
 
@@ -623,7 +768,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           ? host.thinkingLevels
           : fb.thinkingLevels,
       models: models,
-      images: true,
+      images: host.images,
     );
   }
 
@@ -643,7 +788,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             AgentModelOption(id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex'),
             AgentModelOption(id: 'cursor-grok-4.6-medium', name: 'Grok 4.6'),
             AgentModelOption(id: 'claude-opus-5-medium', name: 'Claude Opus 5'),
-            AgentModelOption(id: 'claude-sonnet-5-thinking-medium', name: 'Claude Sonnet 5'),
+            AgentModelOption(
+              id: 'claude-sonnet-5-thinking-medium',
+              name: 'Claude Sonnet 5',
+            ),
           ],
           images: true,
         );
@@ -652,7 +800,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           modes: ['agent', 'plan'],
           thinkingLevels: ['minimal', 'low', 'medium', 'high', 'max'],
           models: [
-            AgentModelOption(id: 'opencode/deepseek-v4-flash-free', name: 'DeepSeek V4 Flash'),
+            AgentModelOption(
+              id: 'opencode/deepseek-v4-flash-free',
+              name: 'DeepSeek V4 Flash',
+            ),
             AgentModelOption(id: 'opencode/mimo-v2.5-free', name: 'MiMo 2.5'),
             AgentModelOption(id: 'opencode/big-pickle', name: 'Big Pickle'),
           ],
@@ -676,7 +827,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           models: [
             AgentModelOption(id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash'),
             AgentModelOption(id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro'),
-            AgentModelOption(id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6'),
+            AgentModelOption(
+              id: 'claude-sonnet-4-6',
+              name: 'Claude Sonnet 4.6',
+            ),
             AgentModelOption(id: 'claude-opus-4-6', name: 'Claude Opus 4.6'),
             AgentModelOption(id: 'gpt-oss-120b', name: 'GPT-OSS 120B'),
           ],
@@ -692,15 +846,21 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
   }
 
-  Future<void> _loadComposerPrefs(String agentId, {bool isNewChat = false}) async {
+  Future<void> _loadComposerPrefs(
+    String agentId, {
+    bool isNewChat = false,
+  }) async {
     final p = await SharedPreferences.getInstance();
     final caps = _caps;
-    var mode = isNewChat ? 'agent' : (p.getString('agent-composer-$agentId-mode') ?? 'agent');
+    var mode = isNewChat
+        ? 'agent'
+        : (p.getString('agent-composer-$agentId-mode') ?? 'agent');
     if (!caps.modes.contains(mode)) {
       mode = caps.modes.isNotEmpty ? caps.modes.first : 'agent';
     }
     var thinking = p.getString('agent-composer-$agentId-thinking') ?? 'medium';
-    if (caps.thinkingLevels.isNotEmpty && !caps.thinkingLevels.contains(thinking)) {
+    if (caps.thinkingLevels.isNotEmpty &&
+        !caps.thinkingLevels.contains(thinking)) {
       thinking = caps.thinkingLevels.contains('medium')
           ? 'medium'
           : caps.thinkingLevels[caps.thinkingLevels.length ~/ 2];
@@ -726,10 +886,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final client = _client;
     if (client == null) return;
     try {
-      final raw = await client.requestList(
-        'agent.listModels',
-        {'agent': agentId, if (force) 'refresh': true},
-      );
+      final raw = await client.requestList('agent.listModels', {
+        'agent': agentId,
+        if (force) 'refresh': true,
+      });
       final models = raw
           .whereType<Map>()
           .map((e) => AgentModelOption.fromJson(Map<String, dynamic>.from(e)))
@@ -757,7 +917,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final text = _input.text.trim();
     final session = _active;
     final client = _client;
-    if ((text.isEmpty && _photos.isEmpty) || session == null || client == null) {
+    if ((text.isEmpty && _photos.isEmpty) ||
+        session == null ||
+        client == null) {
       return;
     }
     _sending = true;
@@ -771,7 +933,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       final photos = List<_PendingPhoto>.from(_photos);
       _input.clear();
       final currentTitle = session.title.trim();
-      final isDefaultTitle = currentTitle.isEmpty ||
+      final isDefaultTitle =
+          currentTitle.isEmpty ||
           currentTitle == 'Agent' ||
           currentTitle == 'Host chat' ||
           currentTitle == 'Antigravity' ||
@@ -782,13 +945,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           _agents.any((a) => a.name == currentTitle || a.id == currentTitle);
       if (isDefaultTitle && text.isNotEmpty) {
         final summary = text.split('\n').first.trim();
-        final clipped =
-            summary.length > 50 ? '${summary.substring(0, 47)}…' : summary;
+        final clipped = summary.length > 50
+            ? '${summary.substring(0, 47)}…'
+            : summary;
         if (clipped.isNotEmpty) {
           final updated = session.copyWith(title: clipped);
           _active = updated;
-          final idx = _sessions
-              .indexWhere((s) => s.agentSessionId == session.agentSessionId);
+          final idx = _sessions.indexWhere(
+            (s) => s.agentSessionId == session.agentSessionId,
+          );
           if (idx != -1) _sessions[idx] = updated;
         }
       }
@@ -799,38 +964,34 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       });
       _scrollToEnd();
       try {
-        await client.request(
-          'agent.prompt',
-          {
-            'agentSessionId': session.agentSessionId,
-            'text': text,
-            if (_model != null && _model != 'auto' && _model != 'default')
-              'model': _model,
-            if (_mode != 'agent') 'mode': _mode,
-            if (_thinking.isNotEmpty && _modelSupportsEffort) 'thinking': _thinking,
-            if (photos.isNotEmpty)
-              'images': [
-                for (final p in photos)
-                  {
-                    'name': p.name,
-                    'mime': p.mime,
-                    'data': base64Encode(p.bytes),
-                  },
-              ],
-          },
-          const Duration(seconds: 60),
-        );
+        await client.request('agent.prompt', {
+          'agentSessionId': session.agentSessionId,
+          'text': text,
+          'operationId': 'prompt-${DateTime.now().microsecondsSinceEpoch}',
+          if (_model != null && _model != 'auto' && _model != 'default')
+            'model': _model,
+          if (_mode != 'agent') 'mode': _mode,
+          if (_thinking.isNotEmpty && _modelSupportsEffort)
+            'thinking': _thinking,
+          if (photos.isNotEmpty)
+            'images': [
+              for (final p in photos)
+                {'name': p.name, 'mime': p.mime, 'data': base64Encode(p.bytes)},
+            ],
+        }, const Duration(seconds: 60));
       } catch (e) {
         if (!mounted) return;
         setState(() {
           _setBusy(false);
           _pendingThumbs = null;
-          _events.add(AgentEvent(
-            seq: _events.length + 1,
-            ts: DateTime.now().millisecondsSinceEpoch,
-            kind: 'error',
-            text: e.toString(),
-          ));
+          _events.add(
+            AgentEvent(
+              seq: _events.length + 1,
+              ts: DateTime.now().millisecondsSinceEpoch,
+              kind: 'error',
+              text: e.toString(),
+            ),
+          );
         });
       }
     } finally {
@@ -855,20 +1016,23 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
     if (client != null) {
       try {
-        await client.request(
-            'agent.cancel', {'agentSessionId': session.agentSessionId});
+        await client.request('agent.cancel', {
+          'agentSessionId': session.agentSessionId,
+        });
       } catch (_) {}
     }
   }
 
   void _localStatus(String text) {
     setState(() {
-      _events.add(AgentEvent(
-        seq: _events.length + 1,
-        ts: DateTime.now().millisecondsSinceEpoch,
-        kind: 'status',
-        text: text,
-      ));
+      _events.add(
+        AgentEvent(
+          seq: _events.length + 1,
+          ts: DateTime.now().millisecondsSinceEpoch,
+          kind: 'status',
+          text: text,
+        ),
+      );
     });
     _scrollToEnd();
   }
@@ -920,7 +1084,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       await _refreshModels(_active?.agent ?? '');
       final hit = _matchModel(arg);
       if (hit == null) {
-        _localStatus('No model matching "$arg". Open the model picker to see the list.');
+        _localStatus(
+          'No model matching "$arg". Open the model picker to see the list.',
+        );
         await _pickModel();
         return true;
       }
@@ -946,8 +1112,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       String? hit;
       for (final level in levels) {
         final id = level.replaceAll(RegExp(r'[^a-z0-9]'), '');
-        final name =
-            _thinkingLabel(level).toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+        final name = _thinkingLabel(
+          level,
+        ).toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
         if (id == q || name == q || id.startsWith(q) || name.contains(q)) {
           hit = level;
           break;
@@ -979,8 +1146,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         final updated = _active!.copyWith(title: arg);
         setState(() {
           _active = updated;
-          final idx = _sessions
-              .indexWhere((s) => s.agentSessionId == updated.agentSessionId);
+          final idx = _sessions.indexWhere(
+            (s) => s.agentSessionId == updated.agentSessionId,
+          );
           if (idx != -1) _sessions[idx] = updated;
         });
         final client = _client;
@@ -1029,15 +1197,18 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final cwd = await _pickProject();
     if (cwd == null || cwd.trim().isEmpty) return;
     try {
-      final raw = await client.request('agent.setSessionCwd', {
-        'agentSessionId': s.agentSessionId,
-        'cwd': cwd,
-      }) as Map<String, dynamic>;
+      final raw =
+          await client.request('agent.setSessionCwd', {
+                'agentSessionId': s.agentSessionId,
+                'cwd': cwd,
+              })
+              as Map<String, dynamic>;
       final updated = AgentSessionInfo.fromJson(raw);
       if (!mounted) return;
       setState(() {
-        final idx =
-            _sessions.indexWhere((x) => x.agentSessionId == updated.agentSessionId);
+        final idx = _sessions.indexWhere(
+          (x) => x.agentSessionId == updated.agentSessionId,
+        );
         if (idx != -1) _sessions[idx] = updated;
         if (_active?.agentSessionId == updated.agentSessionId) {
           _active = updated;
@@ -1046,9 +1217,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       await _refreshGitTree();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.toString())),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.toString())));
     }
   }
 
@@ -1056,8 +1227,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final client = _client;
     if (client != null) {
       try {
-        await client
-            .request('agent.close', {'agentSessionId': s.agentSessionId});
+        await client.request('agent.close', {
+          'agentSessionId': s.agentSessionId,
+        });
       } catch (_) {}
     }
     if (!mounted) return;
@@ -1105,8 +1277,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       if (_active?.agentSessionId == s.agentSessionId) {
         _active = updated;
       }
-      final idx =
-          _sessions.indexWhere((x) => x.agentSessionId == s.agentSessionId);
+      final idx = _sessions.indexWhere(
+        (x) => x.agentSessionId == s.agentSessionId,
+      );
       if (idx != -1) {
         _sessions[idx] = updated;
       }
@@ -1126,8 +1299,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final session = _active;
     final client = _client;
     if (session == null || client == null) return;
-    await client.request(
-        'agent.close', {'agentSessionId': session.agentSessionId});
+    await client.request('agent.close', {
+      'agentSessionId': session.agentSessionId,
+    });
     setState(() {
       _sessions.removeWhere((s) => s.agentSessionId == session.agentSessionId);
       _active = null;
@@ -1150,25 +1324,25 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   IconData _modeIcon(String mode) => switch (mode) {
-        'plan' => Icons.checklist_outlined,
-        'ask' => Icons.help_outline,
-        _ => Icons.smart_toy_outlined,
-      };
+    'plan' => Icons.checklist_outlined,
+    'ask' => Icons.help_outline,
+    _ => Icons.smart_toy_outlined,
+  };
 
   String _modeLabel(String mode) => switch (mode) {
-        'plan' => 'Plan',
-        'ask' => 'Ask',
-        _ => 'Agent',
-      };
+    'plan' => 'Plan',
+    'ask' => 'Ask',
+    _ => 'Agent',
+  };
 
   String _thinkingLabel(String level) => switch (level) {
-        'minimal' => 'Minimal',
-        'low' => 'Low',
-        'high' => 'High',
-        'extra-high' => 'Extra high',
-        'max' => 'Max',
-        _ => 'Medium',
-      };
+    'minimal' => 'Minimal',
+    'low' => 'Low',
+    'high' => 'High',
+    'extra-high' => 'Extra high',
+    'max' => 'Max',
+    _ => 'Medium',
+  };
 
   List<AgentModelOption> get _pickerModels =>
       collapseModelFamilies(_caps.models);
@@ -1216,8 +1390,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       final raw = await client.request('fs.gitStatus', {'cwd': cwd});
       if (!mounted) return;
       if (raw is Map) {
-        setState(() =>
-            _gitTree = GitWorkingTree.fromJson(Map<String, dynamic>.from(raw)));
+        setState(
+          () => _gitTree = GitWorkingTree.fromJson(
+            Map<String, dynamic>.from(raw),
+          ),
+        );
       } else {
         setState(() => _gitTree = null);
       }
@@ -1238,8 +1415,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           padding: const EdgeInsets.fromLTRB(8, 8, 8, 24),
           children: [
             const ListTile(
-              title: Text('Mode',
-                  style: TextStyle(fontWeight: FontWeight.w600)),
+              title: Text(
+                'Mode',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
               subtitle: Text('How this agent spends the next turn'),
             ),
             for (final mode in modes)
@@ -1248,8 +1427,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   mode == 'plan'
                       ? Icons.checklist_outlined
                       : mode == 'ask'
-                          ? Icons.help_outline
-                          : Icons.smart_toy_outlined,
+                      ? Icons.help_outline
+                      : Icons.smart_toy_outlined,
                 ),
                 title: Text(_modeLabel(mode)),
                 trailing: mode == _mode
@@ -1280,8 +1459,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           padding: const EdgeInsets.fromLTRB(8, 8, 8, 24),
           children: [
             const ListTile(
-              title: Text('Add to this turn',
-                  style: TextStyle(fontWeight: FontWeight.w600)),
+              title: Text(
+                'Add to this turn',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
             ),
             ListTile(
               leading: const Icon(Icons.add_photo_alternate_outlined),
@@ -1345,8 +1526,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               title: const Text('Thinking'),
               subtitle: _modelSupportsEffort
                   ? Text(_thinkingLabel(_thinking))
-                  : Text('Not supported for $_modelLabel',
-                      style: const TextStyle(color: Colors.white38)),
+                  : Text(
+                      'Not supported for $_modelLabel',
+                      style: const TextStyle(color: Colors.white38),
+                    ),
               enabled: !_busy && _modelSupportsEffort,
               onTap: () {
                 Navigator.pop(ctx);
@@ -1359,8 +1542,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   _mode == 'plan'
                       ? Icons.checklist_outlined
                       : _mode == 'ask'
-                          ? Icons.help_outline
-                          : Icons.smart_toy_outlined,
+                      ? Icons.help_outline
+                      : Icons.smart_toy_outlined,
                 ),
                 title: const Text('Mode'),
                 subtitle: Text(_modeLabel(_mode)),
@@ -1399,8 +1582,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           padding: const EdgeInsets.fromLTRB(8, 8, 8, 24),
           children: [
             const ListTile(
-              title: Text('Agent',
-                  style: TextStyle(fontWeight: FontWeight.w600)),
+              title: Text(
+                'Agent',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
               subtitle: Text('Starts a new chat in this folder'),
             ),
             for (final a in _agents)
@@ -1440,8 +1625,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           padding: const EdgeInsets.fromLTRB(8, 8, 8, 24),
           children: [
             const ListTile(
-              title: Text('Thinking',
-                  style: TextStyle(fontWeight: FontWeight.w600)),
+              title: Text(
+                'Thinking',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
               subtitle: Text('How hard this model thinks on each turn'),
             ),
             for (final level in levels)
@@ -1467,7 +1654,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (!mounted) return;
     final models = _pickerModels;
     if (models.isEmpty) {
-      _localStatus('This agent has no model list yet. Restart the PC host and try again.');
+      _localStatus(
+        'This agent has no model list yet. Restart the PC host and try again.',
+      );
       return;
     }
     final plan = _activeAgent?.capabilities.plan;
@@ -1484,8 +1673,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             final filtered = q.isEmpty
                 ? models
                 : models.where((m) {
-                    final id = m.id.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
-                    final name = m.name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+                    final id = m.id.toLowerCase().replaceAll(
+                      RegExp(r'[^a-z0-9]'),
+                      '',
+                    );
+                    final name = m.name.toLowerCase().replaceAll(
+                      RegExp(r'[^a-z0-9]'),
+                      '',
+                    );
                     return id.contains(q) || name.contains(q);
                   }).toList();
             return SafeArea(
@@ -1496,30 +1691,41 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                     ListTile(
                       title: Row(
                         children: [
-                          const Text('Model',
-                              style: TextStyle(fontWeight: FontWeight.w600)),
+                          const Text(
+                            'Model',
+                            style: TextStyle(fontWeight: FontWeight.w600),
+                          ),
                           if (isOpenCode && plan == 'go') ...[
                             const SizedBox(width: 8),
                             Container(
                               padding: const EdgeInsets.symmetric(
-                                  horizontal: 7, vertical: 2),
+                                horizontal: 7,
+                                vertical: 2,
+                              ),
                               decoration: BoxDecoration(
                                 color: Colors.green.withValues(alpha: 0.18),
                                 borderRadius: BorderRadius.circular(10),
                                 border: Border.all(
-                                    color: Colors.green.withValues(alpha: 0.4)),
+                                  color: Colors.green.withValues(alpha: 0.4),
+                                ),
                               ),
                               child: const Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Icon(Icons.verified,
-                                      size: 11, color: Colors.green),
+                                  Icon(
+                                    Icons.verified,
+                                    size: 11,
+                                    color: Colors.green,
+                                  ),
                                   SizedBox(width: 3),
-                                  Text('Go plan',
-                                      style: TextStyle(
-                                          fontSize: 10.5,
-                                          color: Colors.green,
-                                          fontWeight: FontWeight.w600)),
+                                  Text(
+                                    'Go plan',
+                                    style: TextStyle(
+                                      fontSize: 10.5,
+                                      color: Colors.green,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
                                 ],
                               ),
                             ),
@@ -1527,7 +1733,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                         ],
                       ),
                       subtitle: const Text(
-                          'Same agent — thinking is the chip next to this'),
+                        'Same agent — thinking is the chip next to this',
+                      ),
                     ),
                     // Go plan info banner for OpenCode without Go
                     if (isOpenCode && plan != 'go')
@@ -1535,26 +1742,32 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                         padding: const EdgeInsets.fromLTRB(16, 0, 16, 6),
                         child: Container(
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 8),
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
                           decoration: BoxDecoration(
                             color: Colors.orange.withValues(alpha: 0.1),
                             borderRadius: BorderRadius.circular(8),
                             border: Border.all(
-                                color: Colors.orange.withValues(alpha: 0.35)),
+                              color: Colors.orange.withValues(alpha: 0.35),
+                            ),
                           ),
                           child: Row(
                             children: [
-                              Icon(Icons.info_outline,
-                                  size: 14,
-                                  color: Colors.orange[300]),
+                              Icon(
+                                Icons.info_outline,
+                                size: 14,
+                                color: Colors.orange[300],
+                              ),
                               const SizedBox(width: 8),
                               Expanded(
                                 child: Text(
                                   'Free / BYOK models shown. '
                                   'Subscribe at opencode.ai for the full catalog.',
                                   style: TextStyle(
-                                      fontSize: 11.5,
-                                      color: Colors.orange[300]),
+                                    fontSize: 11.5,
+                                    color: Colors.orange[300],
+                                  ),
                                 ),
                               ),
                             ],
@@ -1579,22 +1792,35 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                         itemBuilder: (_, i) {
                           final m = filtered[i];
                           // Warn if model looks like it needs Go but user doesn't have it
-                          final needsGo = isOpenCode &&
+                          final needsGo =
+                              isOpenCode &&
                               !m.id.contains('-free') &&
                               !m.id.contains('free') &&
                               plan != 'go';
                           return ListTile(
                             title: Text(m.name),
                             subtitle: needsGo
-                                ? Text('${m.id} · may require Go plan',
+                                ? Text(
+                                    '${m.id} · may require Go plan',
                                     style: const TextStyle(
-                                        color: Colors.orange, fontSize: 12))
-                                : Text(m.id,
+                                      color: Colors.orange,
+                                      fontSize: 12,
+                                    ),
+                                  )
+                                : Text(
+                                    m.id,
                                     style: const TextStyle(
-                                        color: Colors.white38, fontSize: 12)),
-                            trailing: modelFamilyId(m.id) ==
+                                      color: Colors.white38,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                            trailing:
+                                modelFamilyId(m.id) ==
                                     modelFamilyId(_model ?? '')
-                                ? const Icon(Icons.check, color: Color(0xFF2A6AFF))
+                                ? const Icon(
+                                    Icons.check,
+                                    color: Color(0xFF2A6AFF),
+                                  )
                                 : null,
                             onTap: () => Navigator.pop(ctx, m.id),
                           );
@@ -1688,9 +1914,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       }
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not add photo: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Could not add photo: $e')));
     }
   }
 
@@ -1704,19 +1930,22 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       return;
     }
     final lower = x.name.toLowerCase();
-    final mime = x.mimeType ??
+    final mime =
+        x.mimeType ??
         (lower.endsWith('.png')
             ? 'image/png'
             : lower.endsWith('.webp')
-                ? 'image/webp'
-                : 'image/jpeg');
+            ? 'image/webp'
+            : 'image/jpeg');
     if (!mounted) return;
     setState(() {
-      _photos.add(_PendingPhoto(
-        name: x.name.isEmpty ? 'photo.jpg' : x.name,
-        mime: mime,
-        bytes: bytes,
-      ));
+      _photos.add(
+        _PendingPhoto(
+          name: x.name.isEmpty ? 'photo.jpg' : x.name,
+          mime: mime,
+          bytes: bytes,
+        ),
+      );
     });
   }
 
@@ -1730,18 +1959,29 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     _userWantsListen = false;
     _listenGen++;
     _speech.stop();
+    _draftTimer?.cancel();
+    _input.removeListener(_draftChanged);
     _input.dispose();
     _scroll.dispose();
     super.dispose();
   }
 
+  void _openPendingTask() {
+    final id = ref.read(pendingTaskProvider);
+    final task = _sessions.where((s) => s.agentSessionId == id).firstOrNull;
+    if (task == null) return;
+    ref.read(pendingTaskProvider.notifier).select(null);
+    unawaited(_openSession(task));
+  }
+
   @override
   Widget build(BuildContext context) {
+    ref.listen<String?>(pendingTaskProvider, (_, id) => _openPendingTask());
     ref.listen<RpcStatus>(connectionStatusProvider, (prev, next) {
       if (next == RpcStatus.connected && prev != RpcStatus.connected) {
         // Foreground resume always resyncs (events were missed). In-app socket
         // blips while chatting keep the live transcript — resync only when idle.
-        unawaited(_onForeground(syncTranscript: !_busy));
+        unawaited(_onForeground(syncTranscript: true));
       }
     });
     return PopScope(
@@ -1766,8 +2006,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   onTap: () => _renameSessionDialog(_active!),
                   borderRadius: BorderRadius.circular(8),
                   child: Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 4,
+                      vertical: 4,
+                    ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -1786,8 +2028,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                           ),
                         ),
                         const SizedBox(width: 4),
-                        const Icon(Icons.edit_outlined,
-                            size: 14, color: Colors.white38),
+                        const Icon(
+                          Icons.edit_outlined,
+                          size: 14,
+                          color: Colors.white38,
+                        ),
                       ],
                     ),
                   ),
@@ -1795,32 +2040,35 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           actions: [
             if (_active != null)
               IconButton(
-                tooltip: 'End chat',
-                icon: const Icon(Icons.delete_outline),
-                onPressed: _closeActive,
+                tooltip: 'Archive task',
+                icon: const Icon(Icons.archive_outlined),
+                onPressed: () => _archive(_active!),
               ),
           ],
         ),
         body: _loading
             ? const Center(child: CircularProgressIndicator())
             : _error != null
-                ? looksLikeConnectionError(_error)
-                    ? NotConnectedView(
-                        message: _error!,
-                        onReconnected: () {
-                          setState(() {
-                            _loading = true;
-                            _error = null;
-                          });
-                          _load();
-                        },
-                      )
-                    : Center(
-                        child: Text(_error!,
-                            style: const TextStyle(color: Colors.white70)))
-                : _active == null
-                    ? _picker()
-                    : _chatWithTerminal(),
+            ? looksLikeConnectionError(_error)
+                  ? NotConnectedView(
+                      message: _error!,
+                      onReconnected: () {
+                        setState(() {
+                          _loading = true;
+                          _error = null;
+                        });
+                        _load();
+                      },
+                    )
+                  : Center(
+                      child: Text(
+                        _error!,
+                        style: const TextStyle(color: Colors.white70),
+                      ),
+                    )
+            : _active == null
+            ? _picker()
+            : _chatWithTerminal(),
       ),
     );
   }
@@ -1831,8 +2079,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final auto = a.capabilities.approvalMode == 'auto';
     return Row(
       children: [
-        const Text('Approvals',
-            style: TextStyle(fontSize: 12, color: Color(0xFF8A8A9A))),
+        const Text(
+          'Approvals',
+          style: TextStyle(fontSize: 12, color: Color(0xFF8A8A9A)),
+        ),
         const SizedBox(width: 10),
         _ApprovalChip(
           label: 'Ask me',
@@ -1864,10 +2114,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       }
       setState(() {
         _agents = _agents
-            .map((x) => x.id == a.id
-                ? x.copyWith(
-                    capabilities: x.capabilities.copyWith(approvalMode: mode))
-                : x)
+            .map(
+              (x) => x.id == a.id
+                  ? x.copyWith(
+                      capabilities: x.capabilities.copyWith(approvalMode: mode),
+                    )
+                  : x,
+            )
             .toList();
       });
     } catch (_) {
@@ -1877,198 +2130,257 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   void _toast(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  Widget _picker() {
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-      children: [
-        const Text('NEW CHAT',
-            style: TextStyle(
-                fontSize: 11, letterSpacing: 0.8, color: Color(0xFF666677))),
-        const SizedBox(height: 8),
-        for (final a in _agents)
-          Builder(
-            builder: (context) {
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  ListTile(
-                    leading: AgentMark(
-                      agentId: a.id,
-                      icon: a.icon,
-                      color: agentMarkColor(a.id, available: a.available),
-                    ),
-                    title: Text(a.name),
-                    subtitle: Text(a.available
-                        ? 'Runs on the PC — chat here'
-                        : 'CLI not installed on the PC'),
-                    enabled: a.available,
-                    trailing: a.available
-                        ? FilledButton(
-                            onPressed: () => _newChat(a),
-                            child: const Text('Select'),
-                          )
-                        : null,
-                    onTap: a.available ? () => _newChat(a) : null,
-                  ),
-                  if (a.available && a.capabilities.approvalMode != null)
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                      child: _approvalToggle(a),
-                    ),
-                ],
-              );
-            },
-          ),
-        const SizedBox(height: 16),
-        if (kAgentHostChatsInAgentTab) ...[
-          _menuTabs(),
-          const SizedBox(height: 8),
-        ],
-        if (!kAgentHostChatsInAgentTab || _menuTab == 0) ...[
-          if (_sessions.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 24, horizontal: 16),
-              child: Center(
-                child: Text(
-                  'No recent chats yet.\nStart a new chat above.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Color(0xFF666677), fontSize: 13),
-                ),
-              ),
-            )
-          else
-            for (final s in _sessions)
-              Builder(builder: (context) {
-                final busy = ref.watch(terminalBusyProvider)[s.agentSessionId] ?? false;
-                final needsApproval =
-                    _pendingApprovals.containsKey(s.agentSessionId);
-                return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: TerminalGlowBorder(
-                    active: busy,
-                    borderRadius: BorderRadius.circular(12),
-                    strokeWidth: 2.0,
-                    glowColor: Colors.white,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF141420),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: needsApproval
-                              ? const Color(0xFFF0C040)
-                              : const Color(0xFF1E1E30),
-                        ),
-                      ),
-                      child: ListTile(
-                        leading: needsApproval
-                            ? const Icon(Icons.shield_outlined,
-                                color: Color(0xFFF0C040), size: 24)
-                            : AgentActivityIcon(
-                                agentId: s.agent,
-                                icon: s.icon,
-                                active: s.busy ||
-                                    (_active?.agentSessionId ==
-                                            s.agentSessionId &&
-                                        _busy),
-                              ),
-                        title: Text(s.title),
-                        subtitle: Text(
-                          needsApproval
-                              ? 'Waiting for your approval'
-                              : chatListSubtitle(agent: s.agent, cwd: s.cwd),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        trailing: PopupMenuButton<String>(
-                          icon: const Icon(Icons.more_vert,
-                              size: 18, color: Colors.white38),
-                          onSelected: (val) {
-                            if (val == 'rename') {
-                              _renameSessionDialog(s);
-                            } else if (val == 'folder') {
-                              _changeSessionCwd(s);
-                            } else if (val == 'delete') {
-                              _deleteSession(s);
-                            }
-                          },
-                          itemBuilder: (_) => [
-                            const PopupMenuItem(
-                              value: 'rename',
-                              child: Row(
-                                children: [
-                                  Icon(Icons.edit_outlined, size: 16),
-                                  SizedBox(width: 8),
-                                  Text('Rename'),
-                                ],
-                              ),
-                            ),
-                            const PopupMenuItem(
-                              value: 'folder',
-                              child: Row(
-                                children: [
-                                  Icon(Icons.folder_open, size: 16),
-                                  SizedBox(width: 8),
-                                  Text('Change folder'),
-                                ],
-                              ),
-                            ),
-                            const PopupMenuItem(
-                              value: 'delete',
-                              child: Row(
-                                children: [
-                                  Icon(Icons.delete_outline,
-                                      size: 16, color: Color(0xFFEE5555)),
-                                  SizedBox(width: 8),
-                                  Text('Delete',
-                                      style: TextStyle(color: Color(0xFFEE5555))),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                        onTap: () => _openSession(s),
-                        onLongPress: () => _renameSessionDialog(s),
-                      ),
-                    ),
-                  ),
-                );
-              }),
-        ] else ...[
-          if (_hostChats.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 24, horizontal: 16),
-              child: Center(
-                child: Text(
-                  'No PC conversations found.\nChats started on your PC with Antigravity, OpenCode, Claude, or Cursor will appear here.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Color(0xFF666677), fontSize: 13),
-                ),
-              ),
-            )
-          else
-            for (final c in _hostChats)
+  Future<void> _archive(AgentSessionInfo session) async {
+    try {
+      await _client?.request('agent.archive', {
+        'agentSessionId': session.agentSessionId,
+        'archived': !session.archived,
+      });
+      if (_active?.agentSessionId == session.agentSessionId) _leaveChat();
+      await _refreshSnapshot();
+    } catch (e) {
+      _toast('$e');
+    }
+  }
+
+  Future<void> _newTaskFlow() async {
+    var cwd = ref.read(projectProvider)?.path;
+    cwd ??= await _pickProject();
+    if (cwd == null || !mounted) return;
+    ref.read(projectProvider.notifier).select(cwd);
+    final agent = await showModalBottomSheet<AgentInfo>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            const ListTile(title: Text('Choose agent')),
+            for (final a in _agents.where((a) => a.id != 'mock'))
               ListTile(
-                leading: AgentActivityIcon(
-                  agentId: c.agent,
-                  icon: c.icon,
+                leading: AgentMark(
+                  agentId: a.id,
+                  icon: a.icon,
+                  color: agentMarkColor(a.id, available: a.available),
                 ),
-                title: Text(c.title),
+                title: Text(a.name),
                 subtitle: Text(
-                  chatListSubtitle(
-                    agent: c.agent,
-                    source: c.source,
-                    cwd: c.cwd,
-                    resumable: c.resumable,
-                  ),
+                  a.available
+                      ? 'Available on PC'
+                      : 'CLI not installed on the PC',
+                ),
+                enabled: a.available,
+                onTap: a.available ? () => Navigator.pop(ctx, a) : null,
+              ),
+          ],
+        ),
+      ),
+    );
+    if (agent != null) await _newChat(agent, cwd: cwd);
+  }
+
+  int _priority(AgentSessionInfo s) => s.taskState == 'waiting'
+      ? 0
+      : s.taskState == 'failed'
+      ? 1
+      : s.busy
+      ? 2
+      : 3;
+  Widget _picker() {
+    final project = ref.watch(projectProvider);
+    final query = _taskQuery.toLowerCase();
+    final tasks =
+        _sessions
+            .where(
+              (s) =>
+                  s.archived == _showArchived &&
+                  (_agentFilter == null || s.agent == _agentFilter) &&
+                  ('${s.title} ${s.cwd}'.toLowerCase().contains(query)),
+            )
+            .toList()
+          ..sort((a, b) {
+            final priority = _priority(a).compareTo(_priority(b));
+            return priority != 0
+                ? priority
+                : b.updatedAt.compareTo(a.updatedAt);
+          });
+    return Column(
+      children: [
+        ListTile(
+          leading: const Icon(Icons.folder_outlined),
+          title: Text(project?.name ?? 'Choose a project'),
+          subtitle: project == null
+              ? null
+              : Text(
+                  project.path,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                onTap: () => _openHostChat(c),
+          onTap: () async {
+            final cwd = await _pickProject();
+            if (cwd != null) ref.read(projectProvider.notifier).select(cwd);
+          },
+          trailing: FilledButton.icon(
+            onPressed: _newTaskFlow,
+            icon: const Icon(Icons.add),
+            label: const Text('New task'),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  decoration: const InputDecoration(
+                    prefixIcon: Icon(Icons.search),
+                    hintText: 'Search tasks and projects',
+                  ),
+                  onChanged: (text) => setState(() => _taskQuery = text),
+                ),
               ),
-        ],
+              PopupMenuButton<String>(
+                tooltip: 'Filter tasks',
+                onSelected: (value) => setState(() {
+                  if (value == 'archive') {
+                    _showArchived = !_showArchived;
+                  } else {
+                    _agentFilter = value == 'all' ? null : value;
+                  }
+                }),
+                itemBuilder: (_) => [
+                  const PopupMenuItem(value: 'all', child: Text('All agents')),
+                  for (final a in _agents.where((a) => a.id != 'mock'))
+                    PopupMenuItem(value: a.id, child: Text(a.name)),
+                  PopupMenuItem(
+                    value: 'archive',
+                    child: Text(
+                      _showArchived
+                          ? 'Show active tasks'
+                          : 'Show archived tasks',
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: RefreshIndicator(
+            onRefresh: () => _refreshSnapshot(syncTranscript: false),
+            child: tasks.isEmpty
+                ? ListView(
+                    children: [
+                      const SizedBox(height: 80),
+                      Center(
+                        child: Text(
+                          _showArchived
+                              ? 'No archived tasks'
+                              : 'Start a task in your PC project.',
+                        ),
+                      ),
+                    ],
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: tasks.length,
+                    itemBuilder: (context, index) {
+                      final s = tasks[index];
+                      final previous = index > 0
+                          ? _priority(tasks[index - 1])
+                          : -1;
+                      final priority = _priority(s);
+                      final status = s.taskState == 'waiting'
+                          ? 'Approval needed'
+                          : s.busy
+                          ? 'Working'
+                          : s.taskState;
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (priority != previous)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                              child: Text(
+                                priority < 2
+                                    ? 'NEEDS ATTENTION'
+                                    : priority == 2
+                                    ? 'WORKING'
+                                    : 'RECENT',
+                                style: const TextStyle(
+                                  color: Color(0xFFA7B0C0),
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                          Card(
+                            child: ListTile(
+                              leading: AgentMark(
+                                agentId: s.agent,
+                                icon: s.icon,
+                                color: agentMarkColor(s.agent, available: true),
+                              ),
+                              title: Text(
+                                s.title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              subtitle: Text(
+                                '$status · ${s.cwd.split('/').last}\n${s.preview ?? s.agent}',
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              onTap: () => _openSession(s),
+                              trailing: PopupMenuButton<String>(
+                                onSelected: (action) {
+                                  switch (action) {
+                                    case 'archive':
+                                      _archive(s);
+                                      break;
+                                    case 'rename':
+                                      _renameSessionDialog(s);
+                                      break;
+                                    case 'delete':
+                                      _deleteSession(s);
+                                      break;
+                                    case 'folder':
+                                      _changeSessionCwd(s);
+                                      break;
+                                  }
+                                },
+                                itemBuilder: (_) => [
+                                  PopupMenuItem(
+                                    value: 'archive',
+                                    child: Text(
+                                      s.archived ? 'Unarchive' : 'Archive',
+                                    ),
+                                  ),
+                                  const PopupMenuItem(
+                                    value: 'rename',
+                                    child: Text('Rename'),
+                                  ),
+                                  const PopupMenuItem(
+                                    value: 'folder',
+                                    child: Text('Change project'),
+                                  ),
+                                  const PopupMenuItem(
+                                    value: 'delete',
+                                    child: Text('Delete task'),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+          ),
+        ),
       ],
     );
   }
@@ -2085,7 +2397,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         children: [
           Expanded(
             child: _tabButton(
-              label: _sessions.isNotEmpty ? 'Recent (${_sessions.length})' : 'Recent',
+              label: _sessions.isNotEmpty
+                  ? 'Recent (${_sessions.length})'
+                  : 'Recent',
               icon: Icons.history,
               selected: _menuTab == 0,
               onTap: () => setState(() => _menuTab = 0),
@@ -2143,15 +2457,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     );
   }
 
-  Color _chatBackgroundColor(String? agentId) {
-    switch (agentId) {
-      case 'cursor': return const Color(0xFF0E0E12); // Sleek charcoal dark
-      case 'antigravity': return const Color(0xFF0D0717); // Slightly lighter deep purple
-      case 'claude': return const Color(0xFF140B08); // Slightly lighter deep brown
-      case 'opencode': return const Color(0xFF060F0D); // Slightly lighter deep teal
-      default: return Colors.transparent; // Fallback to Scaffold background
-    }
-  }
+  Color _chatBackgroundColor(String? agentId) => const Color(0xFF0B0D12);
 
   Widget _chatWithTerminal() {
     return Column(
@@ -2170,7 +2476,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               children: [
                 _chatTabButton(0, Icons.chat_bubble_outline, 'Chat'),
                 const SizedBox(width: 2),
-                _chatTabButton(1, Icons.terminal, 'Terminal'),
+                _chatTabButton(1, Icons.difference_outlined, 'Changes'),
+                const SizedBox(width: 2),
+                _chatTabButton(2, Icons.terminal, 'Terminal'),
               ],
             ),
           ),
@@ -2180,11 +2488,21 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             index: _chatTab,
             children: [
               _chat(),
-              EmbeddedTerminal(
-                key: ValueKey('${_active?.agentSessionId}_${_active?.cwd}'),
-                initialCwd: _active?.cwd,
-                sessionId: _active?.agentSessionId,
-              ),
+              if (_chatTab == 1)
+                ChangesScreen(cwd: _active!.cwd)
+              else
+                const SizedBox.shrink(),
+              if (_terminalVisited.contains(_active?.agentSessionId))
+                TickerMode(
+                  enabled: _chatTab == 2,
+                  child: EmbeddedTerminal(
+                    key: ValueKey('${_active?.agentSessionId}_${_active?.cwd}'),
+                    initialCwd: _active?.cwd,
+                    sessionId: _active?.agentSessionId,
+                  ),
+                )
+              else
+                const SizedBox.shrink(),
             ],
           ),
         ),
@@ -2194,7 +2512,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   Widget _chatTabButton(int index, IconData icon, String label) {
     final selected = _chatTab == index;
-    final isTerminalTab = index == 1;
+    final isTerminalTab = index == 2;
     final sessionId = _active?.agentSessionId ?? '';
     final termBusy = isTerminalTab
         ? (ref.watch(terminalBusyProvider)[sessionId] ?? false)
@@ -2229,7 +2547,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
     return Expanded(
       child: InkWell(
-        onTap: () => setState(() => _chatTab = index),
+        onTap: () => setState(() {
+          _chatTab = index;
+          if (index == 2 && _active != null) {
+            _terminalVisited.add(_active!.agentSessionId);
+          }
+        }),
         borderRadius: BorderRadius.circular(8),
         child: isTerminalTab
             ? TerminalGlowBorder(
@@ -2248,6 +2571,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final display = groupAgentDisplay(_events);
     return Column(
       children: [
+        if (_hasOlder)
+          TextButton(
+            onPressed: _older,
+            child: const Text('Load earlier messages'),
+          ),
+        if (_newActivity)
+          TextButton(
+            onPressed: () => _scrollToEnd(force: true),
+            child: const Text('New activity ↓'),
+          ),
         Expanded(
           child: Container(
             color: _chatBackgroundColor(_active?.agent),
@@ -2335,53 +2668,51 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
   }
 
-  Color _appBackgroundColor(String? agentId) {
-    switch (agentId) {
-      case 'cursor': return const Color(0xFF000000); // Pure black
-      case 'antigravity': return const Color(0xFF0A0512);
-      case 'claude': return const Color(0xFF0F0806);
-      case 'opencode': return const Color(0xFF040A09);
-      default: return const Color(0xFF0A0A0F);
-    }
-  }
-
-  Color _panelBackgroundColor(String? agentId) {
-    switch (agentId) {
-      case 'cursor': return const Color(0xFF1A1A1A); // Dark gray
-      case 'antigravity': return const Color(0xFF120B20);
-      case 'claude': return const Color(0xFF1A100B);
-      case 'opencode': return const Color(0xFF0A1412);
-      default: return const Color(0xFF151522);
-    }
-  }
+  Color _appBackgroundColor(String? agentId) => const Color(0xFF0B0D12);
+  Color _panelBackgroundColor(String? agentId) => const Color(0xFF141821);
 
   Color _borderColor(String? agentId) {
     switch (agentId) {
-      case 'cursor': return const Color(0xFF27272E); // Subtle dark border
-      case 'antigravity': return const Color(0xFF281845); // Dark purple border
-      case 'claude': return const Color(0xFF3A2015); // Dark terracotta border
-      case 'opencode': return const Color(0xFF15332E); // Dark teal border
-      default: return const Color(0xFF22223A); // Default purplish gray
+      case 'cursor':
+        return const Color(0xFF27272E); // Subtle dark border
+      case 'antigravity':
+        return const Color(0xFF281845); // Dark purple border
+      case 'claude':
+        return const Color(0xFF3A2015); // Dark terracotta border
+      case 'opencode':
+        return const Color(0xFF15332E); // Dark teal border
+      default:
+        return const Color(0xFF22223A); // Default purplish gray
     }
   }
 
   Color _inputBorderColor(String? agentId) {
     switch (agentId) {
-      case 'cursor': return const Color(0xFF383842); // Lighter dark border
-      case 'antigravity': return const Color(0xFF352055); // Lighter purple border
-      case 'claude': return const Color(0xFF4A2B1C); // Lighter terracotta border
-      case 'opencode': return const Color(0xFF1C453E); // Lighter teal border
-      default: return const Color(0xFF2A2A40); // Default lighter purplish gray
+      case 'cursor':
+        return const Color(0xFF383842); // Lighter dark border
+      case 'antigravity':
+        return const Color(0xFF352055); // Lighter purple border
+      case 'claude':
+        return const Color(0xFF4A2B1C); // Lighter terracotta border
+      case 'opencode':
+        return const Color(0xFF1C453E); // Lighter teal border
+      default:
+        return const Color(0xFF2A2A40); // Default lighter purplish gray
     }
   }
 
   Color _chipBackgroundColor(String? agentId) {
     switch (agentId) {
-      case 'cursor': return const Color(0xFF222228); // Dark neutral gray
-      case 'antigravity': return const Color(0xFF1F1235); // Dark purple
-      case 'claude': return const Color(0xFF2A150D); // Dark terracotta
-      case 'opencode': return const Color(0xFF102824); // Dark teal
-      default: return const Color(0xFF1E1E2E); // Default purplish gray
+      case 'cursor':
+        return const Color(0xFF222228); // Dark neutral gray
+      case 'antigravity':
+        return const Color(0xFF1F1235); // Dark purple
+      case 'claude':
+        return const Color(0xFF2A150D); // Dark terracotta
+      case 'opencode':
+        return const Color(0xFF102824); // Dark teal
+      default:
+        return const Color(0xFF1E1E2E); // Default purplish gray
     }
   }
 
@@ -2406,8 +2737,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                         for (final b in thumbs)
                           ClipRRect(
                             borderRadius: BorderRadius.circular(10),
-                            child: Image.memory(b,
-                                width: 88, height: 88, fit: BoxFit.cover),
+                            child: Image.memory(
+                              b,
+                              width: 88,
+                              height: 88,
+                              fit: BoxFit.cover,
+                            ),
                           ),
                       ],
                     ),
@@ -2415,22 +2750,31 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                 else if (e.images.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 6),
-                    child: Text(e.images.join(', '),
-                        style: const TextStyle(
-                            color: Colors.white38, 
-                            fontSize: 11)),
+                    child: Text(
+                      e.images.join(', '),
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 11,
+                      ),
+                    ),
                   ),
                 if ((e.text ?? '').isNotEmpty)
                   Container(
                     margin: const EdgeInsets.symmetric(vertical: 4),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
                     decoration: BoxDecoration(
                       color: _userBubbleColor(_active?.agent),
                       borderRadius: BorderRadius.circular(14),
                     ),
-                    child: Text(e.text ?? '',
-                        style: TextStyle(color: _userBubbleTextColor(_active?.agent))),
+                    child: Text(
+                      e.text ?? '',
+                      style: TextStyle(
+                        color: _userBubbleTextColor(_active?.agent),
+                      ),
+                    ),
                   ),
               ],
             ),
@@ -2443,7 +2787,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           if (e.kind == 'result' && _events.isNotEmpty && e == _events.last) {
             return const Padding(
               padding: EdgeInsets.symmetric(vertical: 4, horizontal: 8),
-              child: Text('Done', style: TextStyle(color: Colors.white38, fontSize: 12, fontStyle: FontStyle.italic)),
+              child: Text(
+                'Done',
+                style: TextStyle(
+                  color: Colors.white38,
+                  fontSize: 12,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
             );
           }
           return const SizedBox.shrink();
@@ -2472,21 +2823,21 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                         .copyWith(
                           p: const TextStyle(color: Colors.white, fontSize: 14),
                           a: const TextStyle(
-                              color: Color(0xFF5CA3FF),
-                              fontSize: 14,
-                              decoration: TextDecoration.underline),
+                            color: Color(0xFF5CA3FF),
+                            fontSize: 14,
+                            decoration: TextDecoration.underline,
+                          ),
                           code: const TextStyle(
-                              color: Colors.white70,
-                              fontFamily: 'monospace',
-                              fontSize: 12),
+                            color: Colors.white70,
+                            fontFamily: 'monospace',
+                            fontSize: 12,
+                          ),
                         ),
                   ),
                   const SizedBox(height: 2),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      _CopyButton(text: e.text ?? ''),
-                    ],
+                    children: [_CopyButton(text: e.text ?? '')],
                   ),
                 ],
               ),
@@ -2498,23 +2849,30 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
           child: SelectionArea(
-            child: Text(e.text ?? 'Thinking…',
-                style: const TextStyle(
-                    color: Colors.white38, fontSize: 12, fontStyle: FontStyle.italic)),
+            child: Text(
+              e.text ?? 'Thinking…',
+              style: const TextStyle(
+                color: Colors.white38,
+                fontSize: 12,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
           ),
         );
       case 'tool-start':
         if (_isQuestionTool(e.toolName)) {
-           return _questionBubble(e, running: true);
+          return _questionBubble(e, running: true);
         }
         return _toolCard(e, running: true);
       case 'tool-end':
         if (_isQuestionTool(e.toolName)) {
-           return _questionBubble(e, running: false);
+          return _questionBubble(e, running: false);
         }
         return _toolCard(e, running: false);
       case 'permission-request':
-        final isPending = _active != null && (e.refId == null || !_resolvedApprovals.contains(e.refId!));
+        final isPending =
+            _active != null &&
+            (e.refId == null || !_resolvedApprovals.contains(e.refId!));
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
           child: SelectionArea(
@@ -2523,22 +2881,39 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               decoration: BoxDecoration(
                 color: _panelBackgroundColor(_active?.agent),
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFFF0C040).withOpacity(0.5)),
+                border: Border.all(
+                  color: const Color(0xFFF0C040).withValues(alpha: 0.5),
+                ),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(e.text ?? 'Allow this tool?',
-                      style: const TextStyle(color: Color(0xFFF0C040), fontSize: 13, fontWeight: FontWeight.w600)),
+                  Text(
+                    e.text ?? 'Allow this tool?',
+                    style: const TextStyle(
+                      color: Color(0xFFF0C040),
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                   const SizedBox(height: 4),
-                  Text(e.toolName ?? 'tool', style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                  Text(
+                    e.toolName ?? 'tool',
+                    style: const TextStyle(fontSize: 12, color: Colors.white70),
+                  ),
                   if ((e.toolInput ?? '').isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 8, bottom: 8),
-                      child: Text(e.toolInput!,
-                          maxLines: 4,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: Colors.white54)),
+                      child: Text(
+                        e.toolInput!,
+                        maxLines: 4,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 11,
+                          color: Colors.white54,
+                        ),
+                      ),
                     ),
                   if (isPending)
                     Padding(
@@ -2550,9 +2925,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                               style: OutlinedButton.styleFrom(
                                 foregroundColor: Colors.white,
                                 side: const BorderSide(color: Colors.white24),
-                                padding: const EdgeInsets.symmetric(vertical: 8),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 8,
+                                ),
                               ),
-                              onPressed: () => _submitPermission(e.refId, false),
+                              onPressed: () =>
+                                  _submitPermission(e.refId, false),
                               child: const Text('Deny'),
                             ),
                           ),
@@ -2562,7 +2940,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                               style: FilledButton.styleFrom(
                                 backgroundColor: const Color(0xFFF0C040),
                                 foregroundColor: Colors.black,
-                                padding: const EdgeInsets.symmetric(vertical: 8),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 8,
+                                ),
                               ),
                               onPressed: () => _submitPermission(e.refId, true),
                               child: const Text('Allow'),
@@ -2574,7 +2954,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   else
                     const Padding(
                       padding: EdgeInsets.only(top: 8),
-                      child: Text('Responded', style: TextStyle(fontSize: 11, color: Colors.white38, fontStyle: FontStyle.italic)),
+                      child: Text(
+                        'Responded',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.white38,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
                     ),
                 ],
               ),
@@ -2584,7 +2971,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       case 'error':
         final errorText = (e.text ?? '').trim();
         if (errorText.isEmpty ||
-            errorText.toLowerCase().contains('is not a valid artifact path; artifacts must be in')) {
+            errorText.toLowerCase().contains(
+              'is not a valid artifact path; artifacts must be in',
+            )) {
           return const SizedBox.shrink();
         }
         return Padding(
@@ -2594,17 +2983,20 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               data: errorText,
               inlineSyntaxes: [IpAutolinkSyntax()],
               builders: {'a': LinkActionBuilder(client: _client)},
-              styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
-                p: const TextStyle(color: Color(0xFFEE5555), fontSize: 13),
-                a: const TextStyle(
-                    color: Color(0xFF93C5FD),
-                    fontSize: 13,
-                    decoration: TextDecoration.underline),
-                code: const TextStyle(
-                    color: Color(0xFFEE5555),
-                    fontFamily: 'monospace',
-                    fontSize: 12),
-              ),
+              styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context))
+                  .copyWith(
+                    p: const TextStyle(color: Color(0xFFEE5555), fontSize: 13),
+                    a: const TextStyle(
+                      color: Color(0xFF93C5FD),
+                      fontSize: 13,
+                      decoration: TextDecoration.underline,
+                    ),
+                    code: const TextStyle(
+                      color: Color(0xFFEE5555),
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                    ),
+                  ),
             ),
           ),
         );
@@ -2660,11 +3052,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               : Icon(
                   running
                       ? Icons.hourglass_top
-                      : (planInfo != null ? Icons.assignment_turned_in_outlined : Icons.check_circle_outline),
+                      : (planInfo != null
+                            ? Icons.assignment_turned_in_outlined
+                            : Icons.check_circle_outline),
                   size: 18,
                   color: running
                       ? const Color(0xFFF0C040)
-                      : (planInfo != null ? const Color(0xFFC084FC) : const Color(0xFF4ADE80)),
+                      : (planInfo != null
+                            ? const Color(0xFFC084FC)
+                            : const Color(0xFF4ADE80)),
                 ),
           title: Text(
             toolGroupTitle(tools),
@@ -2678,7 +3074,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 11,
-                    color: planInfo != null ? const Color(0xFFC084FC).withOpacity(0.85) : Colors.white54,
+                    color: planInfo != null
+                        ? const Color(0xFFC084FC).withValues(alpha: 0.85)
+                        : Colors.white54,
                   ),
                 ),
           trailing: running
@@ -2688,43 +3086,58 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   onPressed: _cancel,
                 )
               : (planInfo != null && _client != null)
-                  ? Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        InkWell(
-                          onTap: () => _openToolFile(planInfo),
+              ? Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    InkWell(
+                      onTap: () => _openToolFile(planInfo),
+                      borderRadius: BorderRadius.circular(6),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(
+                            0xFF9F54FF,
+                          ).withValues(alpha: 0.18),
                           borderRadius: BorderRadius.circular(6),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF9F54FF).withOpacity(0.18),
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(
-                                color: const Color(0xFF9F54FF).withOpacity(0.5),
-                              ),
-                            ),
-                            child: const Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(Icons.assignment_outlined, size: 12, color: Color(0xFFC084FC)),
-                                SizedBox(width: 4),
-                                Text(
-                                  'View plan',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w600,
-                                    color: Color(0xFFC084FC),
-                                  ),
-                                ),
-                              ],
-                            ),
+                          border: Border.all(
+                            color: const Color(
+                              0xFF9F54FF,
+                            ).withValues(alpha: 0.5),
                           ),
                         ),
-                        const SizedBox(width: 4),
-                        const Icon(Icons.expand_more, size: 20, color: Colors.white54),
-                      ],
-                    )
-                  : null,
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.assignment_outlined,
+                              size: 12,
+                              color: Color(0xFFC084FC),
+                            ),
+                            SizedBox(width: 4),
+                            Text(
+                              'View plan',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFFC084FC),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    const Icon(
+                      Icons.expand_more,
+                      size: 20,
+                      color: Colors.white54,
+                    ),
+                  ],
+                )
+              : null,
           children: [
             for (final e in tools)
               _toolCard(e, running: e.kind == 'tool-start', nested: true),
@@ -2739,33 +3152,47 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final output = (e.toolOutput ?? '').trim();
     final fileInfo = extractToolFileInfo(e);
     final isPlan = fileInfo?.isPlan == true;
-    final isFile = fileInfo != null && !isPlan && (fileInfo.filePath != null || fileInfo.rawContent != null);
+    final isFile =
+        fileInfo != null &&
+        !isPlan &&
+        (fileInfo.filePath != null || fileInfo.rawContent != null);
     final canOpen = !running && fileInfo != null && _client != null;
 
     final displayName = fileInfo != null
         ? (isPlan
-            ? (fileInfo.title.isNotEmpty && fileInfo.title != 'Plan' ? fileInfo.title : 'Implementation Plan')
-            : fileInfo.title)
+              ? (fileInfo.title.isNotEmpty && fileInfo.title != 'Plan'
+                    ? fileInfo.title
+                    : 'Implementation Plan')
+              : fileInfo.title)
         : (e.toolName == 'task' || e.toolName == 'run_command'
-            ? 'Command'
-            : (e.toolName ?? 'tool'));
+              ? 'Command'
+              : (e.toolName ?? 'tool'));
 
     String? displaySubtitle;
     if (fileInfo != null && isPlan) {
-      if (fileInfo.subtitle != null && fileInfo.subtitle!.isNotEmpty && fileInfo.subtitle != 'Agent Plan') {
+      if (fileInfo.subtitle != null &&
+          fileInfo.subtitle!.isNotEmpty &&
+          fileInfo.subtitle != 'Agent Plan') {
         displaySubtitle = fileInfo.subtitle;
-      } else if (detail.isNotEmpty && detail != (e.toolName ?? '') && !detail.startsWith('{')) {
+      } else if (detail.isNotEmpty &&
+          detail != (e.toolName ?? '') &&
+          !detail.startsWith('{')) {
         displaySubtitle = detail;
       } else if (fileInfo.rawContent != null) {
-        final firstLine = fileInfo.rawContent!.split('\n').firstWhere((l) => l.trim().isNotEmpty, orElse: () => '');
-        displaySubtitle = firstLine.replaceFirst(RegExp(r'^[#\s*-]+'), '').trim();
+        final firstLine = fileInfo.rawContent!
+            .split('\n')
+            .firstWhere((l) => l.trim().isNotEmpty, orElse: () => '');
+        displaySubtitle = firstLine
+            .replaceFirst(RegExp(r'^[#\s*-]+'), '')
+            .trim();
       }
     } else {
       if (detail.startsWith('{')) {
         try {
           final decoded = jsonDecode(detail);
           if (decoded is Map) {
-            final cmd = decoded['CommandLine'] ??
+            final cmd =
+                decoded['CommandLine'] ??
                 decoded['commandLine'] ??
                 decoded['command'] ??
                 decoded['cmd'] ??
@@ -2776,12 +3203,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           }
         } catch (_) {}
       }
-      if (displaySubtitle == null && detail.isNotEmpty && detail != (e.toolName ?? '')) {
+      if (displaySubtitle == null &&
+          detail.isNotEmpty &&
+          detail != (e.toolName ?? '')) {
         displaySubtitle = detail;
       }
     }
 
-    final showDetail = displaySubtitle != null && displaySubtitle.trim().isNotEmpty;
+    final showDetail =
+        displaySubtitle != null && displaySubtitle.trim().isNotEmpty;
 
     return SelectionArea(
       child: Material(
@@ -2794,12 +3224,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             decoration: BoxDecoration(
               color: nested
-                  ? (isPlan ? const Color(0xFF1E1333) : _appBackgroundColor(_active?.agent))
+                  ? (isPlan
+                        ? const Color(0xFF1E1333)
+                        : _appBackgroundColor(_active?.agent))
                   : _panelBackgroundColor(_active?.agent),
               borderRadius: BorderRadius.circular(8),
               border: Border.all(
                 color: isPlan
-                    ? const Color(0xFF9F54FF).withOpacity(0.4)
+                    ? const Color(0xFF9F54FF).withValues(alpha: 0.4)
                     : _borderColor(_active?.agent),
               ),
             ),
@@ -2812,14 +3244,18 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                       running
                           ? Icons.play_arrow
                           : (isPlan
-                              ? Icons.assignment_outlined
-                              : (isFile ? Icons.description_outlined : Icons.check)),
+                                ? Icons.assignment_outlined
+                                : (isFile
+                                      ? Icons.description_outlined
+                                      : Icons.check)),
                       size: 14,
                       color: running
                           ? const Color(0xFFF0C040)
                           : (isPlan
-                              ? const Color(0xFFC084FC)
-                              : (isFile ? const Color(0xFF93C5FD) : const Color(0xFF4ADE80))),
+                                ? const Color(0xFFC084FC)
+                                : (isFile
+                                      ? const Color(0xFF93C5FD)
+                                      : const Color(0xFF4ADE80))),
                     ),
                     const SizedBox(width: 6),
                     Expanded(
@@ -2828,7 +3264,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                         style: TextStyle(
                           fontWeight: FontWeight.w600,
                           fontSize: 12,
-                          color: isPlan ? const Color(0xFFE9D5FF) : Colors.white,
+                          color: isPlan
+                              ? const Color(0xFFE9D5FF)
+                              : Colors.white,
                         ),
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -2836,21 +3274,36 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                     if (canOpen) ...[
                       const SizedBox(width: 6),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 7,
+                          vertical: 3,
+                        ),
                         decoration: BoxDecoration(
-                          color: (isPlan ? const Color(0xFF9F54FF) : const Color(0xFF38BDF8)).withOpacity(0.18),
+                          color:
+                              (isPlan
+                                      ? const Color(0xFF9F54FF)
+                                      : const Color(0xFF38BDF8))
+                                  .withValues(alpha: 0.18),
                           borderRadius: BorderRadius.circular(6),
                           border: Border.all(
-                            color: (isPlan ? const Color(0xFF9F54FF) : const Color(0xFF38BDF8)).withOpacity(0.4),
+                            color:
+                                (isPlan
+                                        ? const Color(0xFF9F54FF)
+                                        : const Color(0xFF38BDF8))
+                                    .withValues(alpha: 0.4),
                           ),
                         ),
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Icon(
-                              isPlan ? Icons.assignment_outlined : Icons.description_outlined,
+                              isPlan
+                                  ? Icons.assignment_outlined
+                                  : Icons.description_outlined,
                               size: 11,
-                              color: isPlan ? const Color(0xFFC084FC) : const Color(0xFF93C5FD),
+                              color: isPlan
+                                  ? const Color(0xFFC084FC)
+                                  : const Color(0xFF93C5FD),
                             ),
                             const SizedBox(width: 3),
                             Text(
@@ -2858,7 +3311,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                               style: TextStyle(
                                 fontSize: 10.5,
                                 fontWeight: FontWeight.w600,
-                                color: isPlan ? const Color(0xFFC084FC) : const Color(0xFF93C5FD),
+                                color: isPlan
+                                    ? const Color(0xFFC084FC)
+                                    : const Color(0xFF93C5FD),
                               ),
                             ),
                           ],
@@ -2876,7 +3331,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: 11,
-                        color: isPlan ? const Color(0xFFD8B4FE).withOpacity(0.8) : Colors.white54,
+                        color: isPlan
+                            ? const Color(0xFFD8B4FE).withValues(alpha: 0.8)
+                            : Colors.white54,
                       ),
                     ),
                   ),
@@ -2888,11 +3345,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                       maxLines: _looksLikeDiff(output) ? 12 : 4,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                          fontFamily: _looksLikeDiff(output) ? 'monospace' : null,
-                          fontSize: 11,
-                          color: _looksLikeDiff(output)
-                              ? const Color(0xFF93C5FD)
-                              : const Color(0xFF6EE7B7)),
+                        fontFamily: _looksLikeDiff(output) ? 'monospace' : null,
+                        fontSize: 11,
+                        color: _looksLikeDiff(output)
+                            ? const Color(0xFF93C5FD)
+                            : const Color(0xFF6EE7B7),
+                      ),
                     ),
                   ),
               ],
@@ -2926,12 +3384,17 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           final qList = json['questions'] as List;
           for (final q in qList) {
             if (q is Map) {
-              final text = q['question']?.toString() ??
+              final text =
+                  q['question']?.toString() ??
                   q['prompt']?.toString() ??
                   q['title']?.toString() ??
                   'Question';
               final opts = <String>[];
-              final rawOpts = q['options'] ?? q['choices'] ?? q['suggested_answers'] ?? q['items'];
+              final rawOpts =
+                  q['options'] ??
+                  q['choices'] ??
+                  q['suggested_answers'] ??
+                  q['items'];
               if (rawOpts is List) {
                 for (final opt in rawOpts) {
                   if (opt != null) opts.add(opt.toString());
@@ -2941,13 +3404,18 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             }
           }
         } else {
-          final text = json['question']?.toString() ??
+          final text =
+              json['question']?.toString() ??
               json['prompt']?.toString() ??
               json['message']?.toString() ??
               json['query']?.toString() ??
               'Question';
           final opts = <String>[];
-          final rawOpts = json['options'] ?? json['choices'] ?? json['suggested_answers'] ?? json['items'];
+          final rawOpts =
+              json['options'] ??
+              json['choices'] ??
+              json['suggested_answers'] ??
+              json['items'];
           if (rawOpts is List) {
             for (final opt in rawOpts) {
               if (opt != null) opts.add(opt.toString());
@@ -2959,7 +3427,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     } catch (_) {}
 
     if (parsedQuestions.isEmpty) {
-      parsedQuestions.add({'question': 'Agent question', 'options': <String>[]});
+      parsedQuestions.add({
+        'question': 'Agent question',
+        'options': <String>[],
+      });
     }
 
     return Padding(
@@ -2970,16 +3441,18 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           color: _panelBackgroundColor(_active?.agent),
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
-            color: running ? const Color(0xFFF0C040).withOpacity(0.6) : _borderColor(_active?.agent),
+            color: running
+                ? const Color(0xFFF0C040).withValues(alpha: 0.6)
+                : _borderColor(_active?.agent),
             width: running ? 1.5 : 1,
           ),
           boxShadow: running
               ? [
                   BoxShadow(
-                    color: const Color(0xFFF0C040).withOpacity(0.08),
+                    color: const Color(0xFFF0C040).withValues(alpha: 0.08),
                     blurRadius: 8,
                     offset: const Offset(0, 2),
-                  )
+                  ),
                 ]
               : null,
         ),
@@ -2991,7 +3464,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                 Icon(
                   running ? Icons.help_outline : Icons.check_circle_outline,
                   size: 16,
-                  color: running ? const Color(0xFFF0C040) : const Color(0xFF4ADE80),
+                  color: running
+                      ? const Color(0xFFF0C040)
+                      : const Color(0xFF4ADE80),
                 ),
                 const SizedBox(width: 8),
                 Expanded(
@@ -3000,7 +3475,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                     style: TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.w600,
-                      color: running ? const Color(0xFFF0C040) : const Color(0xFF4ADE80),
+                      color: running
+                          ? const Color(0xFFF0C040)
+                          : const Color(0xFF4ADE80),
                     ),
                   ),
                 ),
@@ -3011,7 +3488,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               if (i > 0) const SizedBox(height: 12),
               Text(
                 parsedQuestions[i]['question'] as String,
-                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500, color: Colors.white),
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.white,
+                ),
               ),
               if ((parsedQuestions[i]['options'] as List<String>).isNotEmpty)
                 Padding(
@@ -3019,28 +3500,36 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   child: Wrap(
                     spacing: 8,
                     runSpacing: 8,
-                    children: (parsedQuestions[i]['options'] as List<String>).map((opt) {
-                      return ActionChip(
-                        label: Text(
-                          opt,
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: running && !_busy ? Colors.white : Colors.white70,
-                          ),
-                        ),
-                        backgroundColor: _appBackgroundColor(_active?.agent),
-                        side: BorderSide(
-                          color: running ? const Color(0xFF2A6AFF) : _borderColor(_active?.agent),
-                        ),
-                        elevation: running ? 1 : 0,
-                        onPressed: running && !_busy
-                            ? () {
-                                _input.text = opt;
-                                _send();
-                              }
-                            : null,
-                      );
-                    }).toList(),
+                    children: (parsedQuestions[i]['options'] as List<String>)
+                        .map((opt) {
+                          return ActionChip(
+                            label: Text(
+                              opt,
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: running && !_busy
+                                    ? Colors.white
+                                    : Colors.white70,
+                              ),
+                            ),
+                            backgroundColor: _appBackgroundColor(
+                              _active?.agent,
+                            ),
+                            side: BorderSide(
+                              color: running
+                                  ? const Color(0xFF2A6AFF)
+                                  : _borderColor(_active?.agent),
+                            ),
+                            elevation: running ? 1 : 0,
+                            onPressed: running && !_busy
+                                ? () {
+                                    _input.text = opt;
+                                    _send();
+                                  }
+                                : null,
+                          );
+                        })
+                        .toList(),
                   ),
                 ),
             ],
@@ -3054,12 +3543,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       s.contains('diff --git') || s.contains('\n@@ ') || s.startsWith('@@ ');
 
   Widget _align(Alignment a, Widget child) => Align(
-        alignment: a,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 340),
-          child: child,
-        ),
-      );
+    alignment: a,
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 340),
+      child: child,
+    ),
+  );
 
   void _showMicPermissionSnack({required bool openSettings}) {
     if (!mounted) return;
@@ -3069,10 +3558,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           'Microphone permission is required for voice input.',
         ),
         action: openSettings
-            ? SnackBarAction(
-                label: 'Settings',
-                onPressed: openAppSettings,
-              )
+            ? SnackBarAction(label: 'Settings', onPressed: openAppSettings)
             : null,
         duration: const Duration(seconds: 5),
       ),
@@ -3254,8 +3740,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               TextPosition(offset: _input.text.length),
             );
             if (val.finalResult) {
-              _preListeningText =
-                  commitSpeechPrefix(_preListeningText, val.recognizedWords);
+              _preListeningText = commitSpeechPrefix(
+                _preListeningText,
+                val.recognizedWords,
+              );
             }
           });
         },
@@ -3331,8 +3819,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                               children: [
                                 ClipRRect(
                                   borderRadius: BorderRadius.circular(8),
-                                  child: Image.memory(p.bytes,
-                                      width: 64, height: 64, fit: BoxFit.cover),
+                                  child: Image.memory(
+                                    p.bytes,
+                                    width: 64,
+                                    height: 64,
+                                    fit: BoxFit.cover,
+                                  ),
                                 ),
                                 Positioned(
                                   top: -6,
@@ -3340,7 +3832,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                                   child: IconButton(
                                     visualDensity: VisualDensity.compact,
                                     style: IconButton.styleFrom(
-                                      backgroundColor: _appBackgroundColor(_active?.agent),
+                                      backgroundColor: _appBackgroundColor(
+                                        _active?.agent,
+                                      ),
                                       minimumSize: const Size(22, 22),
                                       tapTargetSize:
                                           MaterialTapTargetSize.shrinkWrap,
@@ -3367,14 +3861,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                       hintText: _needsSignIn
                           ? 'login or CURSOR_API_KEY=…'
                           : _photos.isEmpty
-                              ? 'Message the agent…'
-                              : 'Add a note about the photo…',
+                          ? 'Message the agent…'
+                          : 'Add a note about the photo…',
                       isDense: true,
                       filled: true,
                       fillColor: Colors.transparent,
                       border: InputBorder.none,
                       contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 8),
+                        horizontal: 8,
+                        vertical: 8,
+                      ),
                     ),
                   ),
                   Row(
@@ -3387,13 +3883,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                       const SizedBox(width: 2),
                       _modeChip(),
                       const SizedBox(width: 6),
-                      Flexible(
-                        child: _modelChip(),
-                      ),
+                      Flexible(child: _modelChip()),
                       const SizedBox(width: 4),
                       const Spacer(),
                       IconButton(
-                        tooltip: _isListening ? 'Stop listening' : 'Voice to text',
+                        tooltip: _isListening
+                            ? 'Stop listening'
+                            : 'Voice to text',
                         onPressed: _toggleListen,
                         icon: Icon(
                           _isListening ? Icons.stop_circle : Icons.mic,
@@ -3487,8 +3983,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.memory_outlined,
-                    size: 14, color: Color(0xFF8A8A9A)),
+                const Icon(
+                  Icons.memory_outlined,
+                  size: 14,
+                  color: Color(0xFF8A8A9A),
+                ),
                 const SizedBox(width: 4),
                 Flexible(
                   child: Text(
@@ -3513,8 +4012,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                 ],
                 if (canPick) ...[
                   const SizedBox(width: 2),
-                  const Icon(Icons.arrow_drop_down,
-                      size: 14, color: Colors.white38),
+                  const Icon(
+                    Icons.arrow_drop_down,
+                    size: 14,
+                    color: Colors.white38,
+                  ),
                 ],
               ],
             ),
@@ -3545,7 +4047,9 @@ class _ApprovalChip extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
         decoration: BoxDecoration(
-          color: selected ? const Color(0xFF2F6BFF).withValues(alpha: 0.22) : null,
+          color: selected
+              ? const Color(0xFF2F6BFF).withValues(alpha: 0.22)
+              : null,
           border: Border.all(
             color: selected ? const Color(0xFF2F6BFF) : const Color(0xFF33334A),
           ),

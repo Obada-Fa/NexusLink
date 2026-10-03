@@ -38,7 +38,10 @@ export class RpcClient {
   private idCounter = 0;
   private closed = false;
 
-  constructor(wsUrl: string) {
+  token: string | null = null;
+  private generation = 0;
+  private connecting: Promise<void> | null = null;
+  constructor(wsUrl: string, private authenticate?: (client: RpcClient) => Promise<void>, private statusChanged?: (status: 'connecting' | 'connected' | 'disconnected') => void) {
     this.wsUrl = wsUrl;
   }
 
@@ -47,49 +50,42 @@ export class RpcClient {
     return `${Date.now()}-${this.idCounter}`;
   }
 
-  async connect(): Promise<void> {
-    this.closed = false;
-    return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(this.wsUrl);
-      this.ws.binaryType = 'arraybuffer';
-
-      const timer = setTimeout(() => {
-        this.ws?.close();
-        reject(new Error('Connection timeout'));
-      }, 10000);
-
-      this.ws.onopen = () => {
+  connect(): Promise<void> {
+    if(this.connecting) return this.connecting;
+    const run=this.open(); this.connecting=run;
+    return run.finally(()=>{if(this.connecting===run)this.connecting=null;});
+  }
+  private open(): Promise<void> {
+    this.closed=false;
+    const generation=++this.generation;
+    if(this.reconnectTimer)clearTimeout(this.reconnectTimer);
+    this.stopHeartbeat();this.failPending('Connection replaced');this.ws?.close();
+    this.statusChanged?.('connecting');
+    return new Promise((resolve,reject)=>{
+      const ws=new WebSocket(this.wsUrl);this.ws=ws;ws.binaryType='arraybuffer';
+      const timer=setTimeout(()=>{ws.close();reject(new Error('Connection timeout'));},10000);
+      ws.onopen=async()=>{
         clearTimeout(timer);
-        this.reconnectAttempts = 0;
-        this.startHeartbeat();
-        resolve();
+        try {
+          await this.authenticate?.(this);
+          if(this.closed || generation!==this.generation)throw new Error('Connection superseded');
+          this.reconnectAttempts=0;this.startHeartbeat();this.statusChanged?.('connected');resolve();
+        } catch(error){reject(error);ws.close();}
       };
-
-      this.ws.onmessage = (event: MessageEvent) => {
-        this.handleMessage(event);
+      ws.onmessage=event=>{if(generation===this.generation)this.handleMessage(event);};
+      ws.onclose=()=>{
+        clearTimeout(timer);reject(new Error('Connection closed'));
+        if(generation!==this.generation)return;
+        this.stopHeartbeat();this.ws=null;this.failPending('Connection closed');this.statusChanged?.('disconnected');
+        if(!this.closed)this.reconnect();
       };
-
-      this.ws.onclose = () => {
-        clearTimeout(timer);
-        this.stopHeartbeat();
-        this.ws = null;
-        this.failPending('Connection closed');
-        if (!this.closed) {
-          this.reconnect();
-        }
-      };
-
-      this.ws.onerror = () => {
-        clearTimeout(timer);
-        if (!this.closed) {
-          reject(new Error('WebSocket error'));
-        }
-      };
+      ws.onerror=()=>{clearTimeout(timer);reject(new Error('WebSocket error'));};
     });
   }
 
   disconnect(): void {
     this.closed = true;
+    ++this.generation;
     this.stopHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -171,7 +167,7 @@ export class RpcClient {
         clearTimeout(pending.timer);
         this.pending.delete(resp.id);
         if (resp.error) {
-          pending.reject(new Error(resp.error.message ?? 'RPC error'));
+          pending.reject(new Error(typeof resp.error === 'string' ? resp.error : resp.error.message ?? 'RPC error'));
         } else {
           pending.resolve(resp.result);
         }
@@ -240,7 +236,7 @@ export class RpcClient {
     this.heartbeatTimer = setInterval(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
       this.request('session.heartbeat', {}).catch(() => {
-        /* drop is handled by onclose */
+        this.ws?.close();
       });
     }, 20000);
   }

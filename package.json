@@ -13,7 +13,12 @@
     "build:windows": "bun run --cwd apps/mobile-client build",
     "test": "bun test",
     "lan": "bun run --cwd apps/mobile-client build && cd apps/desktop && bun run src/server/index.ts",
-    "windows": "bun run --cwd apps/mobile-client build && bun run --cwd apps/windows-host start"
+    "windows": "bun run --cwd apps/mobile-client build && bun run --cwd apps/windows-host start",
+    "host": "NEXUSLINK_TAILSCALE_ONLY=1 bun apps/desktop/src/server/index.ts",
+    "host:pair": "bun apps/desktop/src/server/workspace/device-cli.ts pair",
+    "host:devices": "bun apps/desktop/src/server/workspace/device-cli.ts list",
+    "host:revoke": "bun apps/desktop/src/server/workspace/device-cli.ts revoke",
+    "host:lan": "bun apps/desktop/src/server/index.ts"
   },
   "devDependencies": {
     "turbo": "latest"

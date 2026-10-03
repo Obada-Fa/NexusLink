@@ -13,6 +13,7 @@ import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
 import '../state/last_cwd.dart';
 import '../util/host_path.dart';
+import '../widgets/controller_owned_dialog.dart';
 
 export '../util/host_path.dart' show parentHostPath, parentUnixPath;
 
@@ -179,16 +180,15 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
     }
 
     try {
-      final raw = await client.request(
-        'fs.list',
-        {'path': path},
-      ) as List<dynamic>;
-      final dirs = raw
-          .whereType<Map>()
-          .map((e) => FileEntry.fromJson(Map<String, dynamic>.from(e)))
-          .where((e) => e.isDirectory)
-          .toList()
-        ..sort((a, b) => comparePathNames(a.name, b.name));
+      final raw =
+          await client.request('fs.list', {'path': path}) as List<dynamic>;
+      final dirs =
+          raw
+              .whereType<Map>()
+              .map((e) => FileEntry.fromJson(Map<String, dynamic>.from(e)))
+              .where((e) => e.isDirectory)
+              .toList()
+            ..sort((a, b) => comparePathNames(a.name, b.name));
       if (!mounted) return;
       setState(() {
         _dirs = dirs;
@@ -237,44 +237,46 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
     final controller = TextEditingController(text: _cwd == '/' ? _home : _cwd);
     final path = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1C1C2A),
-        title: const Text('Go to folder'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: InputDecoration(
-            hintText: 'D:/projects/foo or ~/code',
-            helperText: 'Any folder on the PC. ~ is home. / is This PC.',
-            suffixIcon: IconButton(
-              icon: const Icon(Icons.content_paste, size: 20),
-              tooltip: 'Paste from clipboard',
-              onPressed: () async {
-                final data = await Clipboard.getData(Clipboard.kTextPlain);
-                if (data?.text != null && data!.text!.trim().isNotEmpty) {
-                  controller.text = data.text!.trim();
-                  controller.selection = TextSelection.fromPosition(
-                    TextPosition(offset: controller.text.length),
-                  );
-                }
-              },
+      builder: (ctx) => ControllerOwnedDialog(
+        controller: controller,
+        child: AlertDialog(
+          backgroundColor: const Color(0xFF1C1C2A),
+          title: const Text('Go to folder'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: InputDecoration(
+              hintText: 'D:/projects/foo or ~/code',
+              helperText: 'Any folder on the PC. ~ is home. / is This PC.',
+              suffixIcon: IconButton(
+                icon: const Icon(Icons.content_paste, size: 20),
+                tooltip: 'Paste from clipboard',
+                onPressed: () async {
+                  final data = await Clipboard.getData(Clipboard.kTextPlain);
+                  if (data?.text != null && data!.text!.trim().isNotEmpty) {
+                    controller.text = data.text!.trim();
+                    controller.selection = TextSelection.fromPosition(
+                      TextPosition(offset: controller.text.length),
+                    );
+                  }
+                },
+              ),
             ),
+            onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
           ),
-          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+              child: const Text('Go'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
-            child: const Text('Go'),
-          ),
-        ],
       ),
     );
-    controller.dispose();
     if (path != null && path.isNotEmpty && mounted) {
       await _listDir(path);
     }
@@ -295,31 +297,33 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
     final controller = TextEditingController();
     final name = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1C1C2A),
-        title: const Text('New folder'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            hintText: 'Folder name',
-            labelText: 'Name',
+      builder: (ctx) => ControllerOwnedDialog(
+        controller: controller,
+        child: AlertDialog(
+          backgroundColor: const Color(0xFF1C1C2A),
+          title: const Text('New folder'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: const InputDecoration(
+              hintText: 'Folder name',
+              labelText: 'Name',
+            ),
+            onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
           ),
-          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+              child: const Text('Create'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
-            child: const Text('Create'),
-          ),
-        ],
       ),
     );
-    controller.dispose();
     if (name == null || name.isEmpty || !mounted) return;
 
     final cleaned = name.replaceAll(RegExp(r'[/\\:]'), '_').trim();
@@ -364,44 +368,46 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
     final controller = TextEditingController(text: _cwd == '/' ? _home : _cwd);
     final path = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1C1C2A),
-        title: const Text('Folder path'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: InputDecoration(
-            hintText: 'D:/projects/foo or ~/code',
-            helperText: 'Any folder on the PC. ~ is home. / is This PC.',
-            suffixIcon: IconButton(
-              icon: const Icon(Icons.content_paste, size: 20),
-              tooltip: 'Paste from clipboard',
-              onPressed: () async {
-                final data = await Clipboard.getData(Clipboard.kTextPlain);
-                if (data?.text != null && data!.text!.trim().isNotEmpty) {
-                  controller.text = data.text!.trim();
-                  controller.selection = TextSelection.fromPosition(
-                    TextPosition(offset: controller.text.length),
-                  );
-                }
-              },
+      builder: (ctx) => ControllerOwnedDialog(
+        controller: controller,
+        child: AlertDialog(
+          backgroundColor: const Color(0xFF1C1C2A),
+          title: const Text('Folder path'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: InputDecoration(
+              hintText: 'D:/projects/foo or ~/code',
+              helperText: 'Any folder on the PC. ~ is home. / is This PC.',
+              suffixIcon: IconButton(
+                icon: const Icon(Icons.content_paste, size: 20),
+                tooltip: 'Paste from clipboard',
+                onPressed: () async {
+                  final data = await Clipboard.getData(Clipboard.kTextPlain);
+                  if (data?.text != null && data!.text!.trim().isNotEmpty) {
+                    controller.text = data.text!.trim();
+                    controller.selection = TextSelection.fromPosition(
+                      TextPosition(offset: controller.text.length),
+                    );
+                  }
+                },
+              ),
             ),
+            onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
           ),
-          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+              child: const Text('Use folder'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
-            child: const Text('Use folder'),
-          ),
-        ],
       ),
     );
-    controller.dispose();
     if (path != null && path.isNotEmpty && mounted) {
       _use(path);
     }
@@ -446,7 +452,9 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
                   child: Text(
                     _browse ? 'Browse folders' : 'Working directory',
                     style: const TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.w600),
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
                 if (_browse)
@@ -478,7 +486,10 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
                       onTap: _editBrowsePath,
                       onLongPress: _copyCurrentPath,
                       child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 6,
+                        ),
                         child: Row(
                           children: [
                             Expanded(
@@ -494,7 +505,11 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
                               ),
                             ),
                             const SizedBox(width: 4),
-                            const Icon(Icons.edit_outlined, size: 14, color: Colors.white38),
+                            const Icon(
+                              Icons.edit_outlined,
+                              size: 14,
+                              color: Colors.white38,
+                            ),
                           ],
                         ),
                       ),
@@ -503,7 +518,10 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
                   if (!isThisPcPath(_cwd))
                     IconButton(
                       tooltip: 'New folder',
-                      icon: const Icon(Icons.create_new_folder_outlined, size: 18),
+                      icon: const Icon(
+                        Icons.create_new_folder_outlined,
+                        size: 18,
+                      ),
                       visualDensity: VisualDensity.compact,
                       onPressed: _createNewFolder,
                     ),
@@ -542,16 +560,25 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
               decoration: BoxDecoration(
                 color: const Color(0xFF2A1616),
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.redAccent.withValues(alpha: 0.3)),
+                border: Border.all(
+                  color: Colors.redAccent.withValues(alpha: 0.3),
+                ),
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.error_outline, color: Colors.redAccent, size: 20),
+                  const Icon(
+                    Icons.error_outline,
+                    color: Colors.redAccent,
+                    size: 20,
+                  ),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
                       _error!,
-                      style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+                      style: const TextStyle(
+                        color: Colors.redAccent,
+                        fontSize: 13,
+                      ),
                     ),
                   ),
                   TextButton(
@@ -586,7 +613,10 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
             child: Text(
               'RECENT',
               style: TextStyle(
-                  fontSize: 11, letterSpacing: 0.8, color: Color(0xFF666677)),
+                fontSize: 11,
+                letterSpacing: 0.8,
+                color: Color(0xFF666677),
+              ),
             ),
           ),
           for (final path in _recentPaths)
@@ -607,7 +637,10 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
             child: Text(
               'SUGGESTIONS',
               style: TextStyle(
-                  fontSize: 11, letterSpacing: 0.8, color: Color(0xFF666677)),
+                fontSize: 11,
+                letterSpacing: 0.8,
+                color: Color(0xFF666677),
+              ),
             ),
           ),
           for (final p in _projects)
@@ -639,9 +672,11 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(_error!,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.redAccent)),
+              Text(
+                _error!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.redAccent),
+              ),
               const SizedBox(height: 12),
               FilledButton.tonal(
                 onPressed: () => _listDir(_cwd),
@@ -687,9 +722,17 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
       itemBuilder: (_, i) {
         if (showNewFolderHeader && i == 0) {
           return ListTile(
-            leading: const Icon(Icons.create_new_folder_outlined, color: Color(0xFF6B8CFF)),
-            title: const Text('New folder…',
-                style: TextStyle(color: Color(0xFF6B8CFF), fontWeight: FontWeight.w500)),
+            leading: const Icon(
+              Icons.create_new_folder_outlined,
+              color: Color(0xFF6B8CFF),
+            ),
+            title: const Text(
+              'New folder…',
+              style: TextStyle(
+                color: Color(0xFF6B8CFF),
+                fontWeight: FontWeight.w500,
+              ),
+            ),
             onTap: _createNewFolder,
           );
         }

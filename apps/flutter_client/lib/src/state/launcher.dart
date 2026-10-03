@@ -12,8 +12,9 @@ import 'connection.dart';
 /// Installed apps — fetched on connect, cached across navigation and reconnects,
 /// and updated seamlessly on apps-update pushes when new apps are added to the PC.
 final appsProvider =
-    NotifierProvider<AppsNotifier, AsyncValue<List<AppInfo>>>(
-        AppsNotifier.new);
+    NotifierProvider.autoDispose<AppsNotifier, AsyncValue<List<AppInfo>>>(
+      AppsNotifier.new,
+    );
 
 class AppsNotifier extends Notifier<AsyncValue<List<AppInfo>>> {
   static List<AppInfo>? _cache;
@@ -22,6 +23,7 @@ class AppsNotifier extends Notifier<AsyncValue<List<AppInfo>>> {
 
   @override
   AsyncValue<List<AppInfo>> build() {
+    _disposed = false;
     final client = ref.watch(activeClientProvider);
     final status = ref.watch(connectionStatusProvider);
     ref.onDispose(() {
@@ -62,9 +64,13 @@ class AppsNotifier extends Notifier<AsyncValue<List<AppInfo>>> {
     if (client == null || status != RpcStatus.connected) return;
     try {
       final raw = await client.requestList(
-          'apps.list', const {}, const Duration(seconds: 30));
-      final list =
-          raw.map((e) => AppInfo.fromJson(e as Map<String, dynamic>)).toList();
+        'apps.list',
+        const {},
+        const Duration(seconds: 30),
+      );
+      final list = raw
+          .map((e) => AppInfo.fromJson(e as Map<String, dynamic>))
+          .toList();
       _cache = list;
       if (!_disposed) state = AsyncValue.data(list);
     } catch (e, st) {
@@ -83,8 +89,10 @@ class AppsNotifier extends Notifier<AsyncValue<List<AppInfo>>> {
 /// polled with the windows and refreshed instantly on app-session-update
 /// pushes (app launched/exited/closed).
 final appSessionsProvider =
-    NotifierProvider<AppSessionsNotifier, AsyncValue<List<AppSessionInfo>>>(
-        AppSessionsNotifier.new);
+    NotifierProvider.autoDispose<
+      AppSessionsNotifier,
+      AsyncValue<List<AppSessionInfo>>
+    >(AppSessionsNotifier.new);
 
 class AppSessionsNotifier extends Notifier<AsyncValue<List<AppSessionInfo>>> {
   Timer? _timer;
@@ -93,6 +101,7 @@ class AppSessionsNotifier extends Notifier<AsyncValue<List<AppSessionInfo>>> {
 
   @override
   AsyncValue<List<AppSessionInfo>> build() {
+    _disposed = false;
     final client = ref.watch(activeClientProvider);
     final status = ref.watch(connectionStatusProvider);
     ref.onDispose(() {
@@ -105,7 +114,9 @@ class AppSessionsNotifier extends Notifier<AsyncValue<List<AppSessionInfo>>> {
 
     if (status == RpcStatus.connected) {
       _timer?.cancel();
-      _timer = Timer.periodic(const Duration(seconds: 5), (_) => refresh());
+      if (!client.supports('session.subscribe')) {
+        _timer = Timer.periodic(const Duration(seconds: 5), (_) => refresh());
+      }
       _unsub?.call();
       _unsub = client.subscribe('app-session-update', (_) => refresh());
       Future.microtask(refresh);
@@ -133,27 +144,43 @@ class AppSessionsNotifier extends Notifier<AsyncValue<List<AppSessionInfo>>> {
 
 /// Running windows — refreshed every 5s while the launcher is on screen.
 final windowsProvider =
-    NotifierProvider<WindowsNotifier, AsyncValue<List<WindowInfo>>>(
-        WindowsNotifier.new);
+    NotifierProvider.autoDispose<WindowsNotifier, AsyncValue<List<WindowInfo>>>(
+      WindowsNotifier.new,
+    );
 
 class WindowsNotifier extends Notifier<AsyncValue<List<WindowInfo>>> {
   Timer? _timer;
   bool _disposed = false;
+  void Function()? _unsub;
 
   @override
   AsyncValue<List<WindowInfo>> build() {
+    _disposed = false;
     final client = ref.watch(activeClientProvider);
     final status = ref.watch(connectionStatusProvider);
     ref.onDispose(() {
       _disposed = true;
       _timer?.cancel();
+      _unsub?.call();
     });
 
     if (client == null) return const AsyncValue.data([]);
 
     if (status == RpcStatus.connected) {
       _timer?.cancel();
-      _timer = Timer.periodic(const Duration(seconds: 5), (_) => refresh());
+      if (!client.supports('session.subscribe')) {
+        _timer = Timer.periodic(const Duration(seconds: 5), (_) => refresh());
+      }
+      _unsub?.call();
+      _unsub = client.subscribe('windows-update', (msg) {
+        if (!_disposed && msg['windows'] is List) {
+          state = AsyncValue.data(
+            (msg['windows'] as List)
+                .map((e) => WindowInfo.fromJson(Map<String, dynamic>.from(e)))
+                .toList(),
+          );
+        }
+      });
       Future.microtask(refresh);
     }
 
@@ -166,8 +193,9 @@ class WindowsNotifier extends Notifier<AsyncValue<List<WindowInfo>>> {
     if (client == null || status != RpcStatus.connected) return;
     try {
       final raw = await client.requestList('window.list');
-      final list =
-          raw.map((e) => WindowInfo.fromJson(e as Map<String, dynamic>)).toList();
+      final list = raw
+          .map((e) => WindowInfo.fromJson(e as Map<String, dynamic>))
+          .toList();
       if (!_disposed) state = AsyncValue.data(list);
     } catch (e, st) {
       if (!_disposed && state is! AsyncData) state = AsyncValue.error(e, st);

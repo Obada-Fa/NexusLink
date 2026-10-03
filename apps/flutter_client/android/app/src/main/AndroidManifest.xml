@@ -18,11 +18,17 @@
     <!-- LAN RPC is ws:// (not wss://); Android 9+ blocks that unless we
          opt into cleartext. Dart sockets ignore this, but WebView (IDE)
          and some HTTP stacks do not. -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
     <application
         android:label="nexuslink"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">
+        <service android:name=".LiveActivityService" android:exported="false" android:foregroundServiceType="connectedDevice"/>
         <activity
             android:name=".MainActivity"
             android:exported="true"

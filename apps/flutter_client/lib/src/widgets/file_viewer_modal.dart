@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../workspace/editor_screen.dart';
+import '../workspace/project.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import '../rpc/rpc_client.dart';
@@ -21,8 +24,13 @@ String cleanFilePath(String raw) {
 
 bool isPathLike(String value) {
   final v = cleanFilePath(value);
-  if (v.startsWith('/') || v.startsWith('~/') || v.startsWith('./')) return true;
-  if (RegExp(r'\.(md|markdown|txt|json|dart|ts|tsx|js|jsx|py|rs|go|yaml|yml|toml|sh|html|css|c|cpp|h|java|kt|swift|sql)$', caseSensitive: false).hasMatch(v)) {
+  if (v.startsWith('/') || v.startsWith('~/') || v.startsWith('./')) {
+    return true;
+  }
+  if (RegExp(
+    r'\.(md|markdown|txt|json|dart|ts|tsx|js|jsx|py|rs|go|yaml|yml|toml|sh|html|css|c|cpp|h|java|kt|swift|sql)$',
+    caseSensitive: false,
+  ).hasMatch(v)) {
     return true;
   }
   return false;
@@ -37,10 +45,28 @@ Future<void> showFileViewerModal({
   String? subtitle,
   bool isPlan = false,
 }) async {
-  final clean = filePath != null && filePath.trim().isNotEmpty ? cleanFilePath(filePath) : '';
+  final clean = filePath != null && filePath.trim().isNotEmpty
+      ? cleanFilePath(filePath)
+      : '';
+  if (clean.isNotEmpty && client.supports('fs.readText')) {
+    var path = clean.replaceFirst(RegExp(r':\d+(?::\d+)?$'), '');
+    final project = ProviderScope.containerOf(context).read(projectProvider);
+    if (!path.startsWith('/') && !path.startsWith('~/') && project != null) {
+      path = '${project.path}/$path';
+    }
+    final match = RegExp(r'(?:#L|:)(\d+)').firstMatch(filePath!);
+    await openEditor(
+      context,
+      path,
+      line: match == null ? null : int.tryParse(match.group(1)!),
+    );
+    return;
+  }
   final displayName = title?.isNotEmpty == true
       ? title!
-      : (clean.isNotEmpty ? clean.split('/').last : (isPlan ? 'Plan' : 'Document'));
+      : (clean.isNotEmpty
+            ? clean.split('/').last
+            : (isPlan ? 'Plan' : 'Document'));
 
   await showModalBottomSheet<void>(
     context: context,
@@ -114,7 +140,9 @@ class _FileViewerContentState extends State<_FileViewerContent> {
         _error = null;
       });
       try {
-        final res = await widget.client.request('fs.read', {'path': widget.filePath});
+        final res = await widget.client.request('fs.read', {
+          'path': widget.filePath,
+        });
         if (!mounted) return;
         setState(() {
           _content = res?.toString() ?? '';
@@ -176,19 +204,23 @@ class _FileViewerContentState extends State<_FileViewerContent> {
     final displaySubtitle = widget.subtitle?.isNotEmpty == true
         ? widget.subtitle!
         : (widget.filePath.isNotEmpty
-            ? widget.filePath
-            : (widget.isPlan ? 'Agent Implementation Plan' : ''));
+              ? widget.filePath
+              : (widget.isPlan ? 'Agent Implementation Plan' : ''));
 
     final content = _content ?? '';
-    final isMarkdown = widget.isPlan ||
+    final isMarkdown =
+        widget.isPlan ||
         widget.filePath.endsWith('.md') ||
         widget.filePath.endsWith('.markdown') ||
-        (widget.filePath.isEmpty && (content.startsWith('#') || content.contains('```')));
+        (widget.filePath.isEmpty &&
+            (content.startsWith('#') || content.contains('```')));
 
     final lineCount = content.isEmpty ? 0 : content.split('\n').length;
     final accentColor = widget.isPlan
         ? const Color(0xFFC084FC)
-        : (isMarkdown ? const Color(0xFF93C5FD) : languageAccentColor(widget.filePath));
+        : (isMarkdown
+              ? const Color(0xFF93C5FD)
+              : languageAccentColor(widget.filePath));
     final langName = isMarkdown
         ? (widget.isPlan ? 'Plan' : 'Markdown')
         : languageDisplayName(widget.filePath);
@@ -221,12 +253,16 @@ class _FileViewerContentState extends State<_FileViewerContent> {
                     decoration: BoxDecoration(
                       color: accentColor.withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: accentColor.withValues(alpha: 0.3)),
+                      border: Border.all(
+                        color: accentColor.withValues(alpha: 0.3),
+                      ),
                     ),
                     child: Icon(
                       widget.isPlan
                           ? Icons.assignment_outlined
-                          : (isMarkdown ? Icons.description_outlined : Icons.code_rounded),
+                          : (isMarkdown
+                                ? Icons.description_outlined
+                                : Icons.code_rounded),
                       size: 18,
                       color: accentColor,
                     ),
@@ -252,11 +288,16 @@ class _FileViewerContentState extends State<_FileViewerContent> {
                             ),
                             const SizedBox(width: 8),
                             Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 1.5,
+                              ),
                               decoration: BoxDecoration(
                                 color: accentColor.withValues(alpha: 0.15),
                                 borderRadius: BorderRadius.circular(4),
-                                border: Border.all(color: accentColor.withValues(alpha: 0.3)),
+                                border: Border.all(
+                                  color: accentColor.withValues(alpha: 0.3),
+                                ),
                               ),
                               child: Text(
                                 langName,
@@ -271,7 +312,10 @@ class _FileViewerContentState extends State<_FileViewerContent> {
                             if (lineCount > 0 && !isMarkdown) ...[
                               const SizedBox(width: 4),
                               Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 5,
+                                  vertical: 1.5,
+                                ),
                                 decoration: BoxDecoration(
                                   color: Colors.white10,
                                   borderRadius: BorderRadius.circular(4),
@@ -307,9 +351,13 @@ class _FileViewerContentState extends State<_FileViewerContent> {
                   ),
                   if (!isMarkdown && _content != null && _content!.isNotEmpty)
                     IconButton(
-                      tooltip: _wordWrap ? 'Switch to scroll mode' : 'Switch to wrap mode',
+                      tooltip: _wordWrap
+                          ? 'Switch to scroll mode'
+                          : 'Switch to wrap mode',
                       icon: Icon(
-                        _wordWrap ? Icons.wrap_text : Icons.view_headline_rounded,
+                        _wordWrap
+                            ? Icons.wrap_text
+                            : Icons.view_headline_rounded,
                         size: 19,
                         color: _wordWrap ? accentColor : Colors.white60,
                       ),
@@ -327,7 +375,11 @@ class _FileViewerContentState extends State<_FileViewerContent> {
                     ),
                   IconButton(
                     tooltip: 'Close',
-                    icon: const Icon(Icons.close, size: 20, color: Colors.white70),
+                    icon: const Icon(
+                      Icons.close,
+                      size: 20,
+                      color: Colors.white70,
+                    ),
                     onPressed: () => Navigator.pop(context),
                   ),
                 ],
@@ -337,9 +389,7 @@ class _FileViewerContentState extends State<_FileViewerContent> {
         ),
 
         // Body content
-        Expanded(
-          child: _buildBody(isMarkdown: isMarkdown),
-        ),
+        Expanded(child: _buildBody(isMarkdown: isMarkdown)),
       ],
     );
   }
@@ -352,7 +402,10 @@ class _FileViewerContentState extends State<_FileViewerContent> {
           children: [
             CircularProgressIndicator(),
             SizedBox(height: 12),
-            Text('Loading file…', style: TextStyle(color: Colors.white54, fontSize: 13)),
+            Text(
+              'Loading file…',
+              style: TextStyle(color: Colors.white54, fontSize: 13),
+            ),
           ],
         ),
       );
@@ -365,11 +418,18 @@ class _FileViewerContentState extends State<_FileViewerContent> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.error_outline, size: 36, color: Color(0xFFEE5555)),
+              const Icon(
+                Icons.error_outline,
+                size: 36,
+                color: Color(0xFFEE5555),
+              ),
               const SizedBox(height: 12),
               const Text(
                 'Could not load file',
-                style: TextStyle(fontWeight: FontWeight.w600, color: Colors.white),
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white,
+                ),
               ),
               const SizedBox(height: 6),
               Text(
@@ -399,14 +459,24 @@ class _FileViewerContentState extends State<_FileViewerContent> {
           data: content,
           selectable: true,
           inlineSyntaxes: [IpAutolinkSyntax()],
-          builders: {
-            'pre': CodeBlockBuilder(),
-          },
+          builders: {'pre': CodeBlockBuilder()},
           styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
             p: const TextStyle(color: Colors.white, fontSize: 14, height: 1.5),
-            h1: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
-            h2: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.bold),
-            h3: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600),
+            h1: const TextStyle(
+              color: Colors.white,
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+            ),
+            h2: const TextStyle(
+              color: Colors.white,
+              fontSize: 17,
+              fontWeight: FontWeight.bold,
+            ),
+            h3: const TextStyle(
+              color: Colors.white,
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+            ),
             code: const TextStyle(
               color: Color(0xFF6EE7B7),
               fontFamily: 'monospace',
@@ -420,7 +490,9 @@ class _FileViewerContentState extends State<_FileViewerContent> {
             blockquoteDecoration: BoxDecoration(
               color: const Color(0xFF1E1E2E),
               borderRadius: BorderRadius.circular(6),
-              border: const Border(left: BorderSide(color: Color(0xFF38BDF8), width: 4)),
+              border: const Border(
+                left: BorderSide(color: Color(0xFF38BDF8), width: 4),
+              ),
             ),
           ),
         ),

@@ -1,4 +1,6 @@
-export type RpcMethod =
+import type { WorkspaceRpc } from './workspace';
+export * from './workspace';
+export type RpcMethod = keyof WorkspaceRpc
   | 'fs.list'
   | 'fs.read'
   | 'fs.write'
@@ -80,10 +82,12 @@ export interface RpcResponse<T = unknown> {
   id: string | number
   result?: T
   error?: string
+  code?: string
+  details?: unknown
 }
 
 export type Params<M extends RpcMethod> =
-  M extends 'fs.list'
+  M extends keyof WorkspaceRpc ? WorkspaceRpc[M]['params'] : M extends 'fs.list'
     ? { path: string; showHidden?: boolean }
     : M extends 'fs.read'
     ? { path: string }
@@ -106,7 +110,7 @@ export type Params<M extends RpcMethod> =
     : M extends 'process.spawn'
     ? { command: string; args?: string[] }
     : M extends 'terminal.create'
-    ? { cols: number; rows: number; shell?: string }
+    ? { cols: number; rows: number; shell?: string; cwd?: string; taskId?: string; detached?: boolean; operationId?: string }
     : M extends 'terminal.input'
     ? { terminalId: string; data: string }
     : M extends 'terminal.resize'
@@ -233,7 +237,7 @@ export type Params<M extends RpcMethod> =
     : never
 
 export type Result<M extends RpcMethod> =
-  M extends 'fs.list'
+  M extends keyof WorkspaceRpc ? WorkspaceRpc[M]['result'] : M extends 'fs.list'
     ? FileEntry[]
     : M extends 'fs.read'
     ? string
@@ -426,13 +430,17 @@ export interface SystemInfo {
 }
 
 export interface PerfSnapshot {
+  timestamp?: number
+  ramUsedBytes?: number
+  ramTotalBytes?: number
+  diskFreeBytes?: number | null
   cpuPercent: number
   ramPercent: number
   ramUsedGb: number
-  netInKBs: number
-  netOutKBs: number
-  diskReadMBs: number
-  diskWriteMBs: number
+  netInKBs: number | null
+  netOutKBs: number | null
+  diskReadMBs: number | null
+  diskWriteMBs: number | null
 }
 
 export interface ScreenMetadata {
@@ -540,6 +548,11 @@ export interface AgentInfo {
 }
 
 export interface AgentSessionInfo {
+  taskState?: 'idle'|'running'|'waiting'|'completed'|'failed'|'canceled'|'interrupted'
+  turnId?: string
+  updatedAt?: number
+  preview?: string
+  archived?: boolean
   agentSessionId: string
   agent: string
   cwd: string
@@ -565,6 +578,7 @@ export interface AgentHostChat {
 
 /** Normalized event emitted by any agent adapter (superset of stream-json). */
 export interface AgentEvent {
+  turnId?: string
   seq: number
   ts: number
   kind:
@@ -593,7 +607,9 @@ export type WsMessage =
   | { type: 'rpc-response'; response: RpcResponse }
   | { type: 'stream-frame'; streamId: string; data: string; timestamp: number }
   | { type: 'stream-region'; streamId: string; region: CaptureRegion }
-  | { type: 'terminal-output'; terminalId: string; data: string }
+  | { type: 'terminal-output'; terminalId: string; data: string; seq?:number }
+  | { type: 'terminal-gap'; terminalId:string;oldestSeq:number }
+  | { type: 'terminal-exit';terminalId:string;exitCode:number|null;error?:string }
   | { type: 'perf-update'; data: PerfSnapshot }
   | { type: 'webrtc-signal'; webrtcId: string; data: WebRtcSignal }
   | { type: 'app-session-update'; session: AppSessionInfo }

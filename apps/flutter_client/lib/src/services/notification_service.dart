@@ -22,37 +22,38 @@ class NotificationService {
       String? provider = prefs.getString('nexuslink_push_provider') ?? 'ntfy';
       String? endpoint = prefs.getString('nexuslink_push_endpoint');
 
-      if (token == null || token.isEmpty) {
-        token = prefs.getString('nexuslink_device_push_id');
-        if (token == null || token.isEmpty) {
-          final rand = DateTime.now().millisecondsSinceEpoch.toString();
-          token = 'nexuslink_device_$rand';
-          await prefs.setString('nexuslink_device_push_id', token);
-        }
+      if (token == null ||
+          token.isEmpty ||
+          endpoint == null ||
+          endpoint.isEmpty) {
+        return;
       }
 
       final deviceName = Platform.isAndroid
           ? 'Android Device'
           : Platform.isIOS
-              ? 'iOS Device'
-              : 'Desktop/Web Device';
+          ? 'iOS Device'
+          : 'Desktop/Web Device';
 
       await client.request('push.registerToken', {
         'token': token,
         'provider': provider,
-        if (endpoint != null && endpoint.isNotEmpty) 'endpoint': endpoint,
+        if (endpoint.isNotEmpty) 'endpoint': endpoint,
         'name': deviceName,
       });
     } catch (e) {
-      debugPrint('[NotificationService] failed to register push token with host: $e');
+      debugPrint(
+        '[NotificationService] failed to register push token with host: $e',
+      );
     }
   }
 
   Future<void> init() async {
     if (_initialized) return;
 
-    const androidSettings =
-        AndroidInitializationSettings('@mipmap/ic_launcher');
+    const androidSettings = AndroidInitializationSettings(
+      '@mipmap/ic_launcher',
+    );
     const darwinSettings = DarwinInitializationSettings(
       requestAlertPermission: true,
       requestBadgePermission: true,
@@ -70,11 +71,8 @@ class NotificationService {
     );
 
     try {
-      await _plugin.initialize(
-        settings: initSettings,
-      );
+      await _plugin.initialize(settings: initSettings);
       _initialized = true;
-      await requestPermissions();
     } catch (e) {
       debugPrint('NotificationService init error: $e');
     }
@@ -84,20 +82,26 @@ class NotificationService {
     if (kIsWeb) return;
     try {
       if (Platform.isAndroid) {
-        final androidImpl = _plugin.resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>();
+        final androidImpl = _plugin
+            .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin
+            >();
         await androidImpl?.requestNotificationsPermission();
       } else if (Platform.isIOS) {
-        final iosImpl = _plugin.resolvePlatformSpecificImplementation<
-            IOSFlutterLocalNotificationsPlugin>();
+        final iosImpl = _plugin
+            .resolvePlatformSpecificImplementation<
+              IOSFlutterLocalNotificationsPlugin
+            >();
         await iosImpl?.requestPermissions(
           alert: true,
           badge: true,
           sound: true,
         );
       } else if (Platform.isMacOS) {
-        final macImpl = _plugin.resolvePlatformSpecificImplementation<
-            MacOSFlutterLocalNotificationsPlugin>();
+        final macImpl = _plugin
+            .resolvePlatformSpecificImplementation<
+              MacOSFlutterLocalNotificationsPlugin
+            >();
         await macImpl?.requestPermissions(
           alert: true,
           badge: true,
@@ -114,6 +118,8 @@ class NotificationService {
     AgentEvent event, {
     String? sessionTitle,
   }) {
+    // Android live activity owns all task notifications and deduplication.
+    if (Platform.isAndroid) return;
     if (sessionId != null) {
       final key = '${sessionId}_${event.seq}_${event.kind}';
       if (_processedEvents.contains(key)) return;
@@ -136,9 +142,14 @@ class NotificationService {
       );
     } else if (event.kind == 'error') {
       final raw = (event.text ?? '').trim();
-      final summary = (raw.isEmpty ||
-              raw.toLowerCase().startsWith('declaring permissions: cortex tool') ||
-              raw.toLowerCase().contains('is not a valid artifact path; artifacts must be in'))
+      final summary =
+          (raw.isEmpty ||
+              raw.toLowerCase().startsWith(
+                'declaring permissions: cortex tool',
+              ) ||
+              raw.toLowerCase().contains(
+                'is not a valid artifact path; artifacts must be in',
+              ))
           ? 'The agent has finished working.'
           : raw;
       showAgentFinishedNotification(
@@ -177,7 +188,8 @@ class NotificationService {
     final title = sessionTitle != null && sessionTitle.isNotEmpty
         ? 'Permission Required ($sessionTitle)'
         : 'Agent Permission Required';
-    final body = 'Agent wants to run $toolName${input != null && input.isNotEmpty ? ': $input' : ''}';
+    final body =
+        'Agent wants to run $toolName${input != null && input.isNotEmpty ? ': $input' : ''}';
 
     await _show(
       id: 1002,

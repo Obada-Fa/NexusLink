@@ -50,6 +50,7 @@ function ConnectForm() {
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
   const [advanced, setAdvanced] = useState(false);
+  const [pairingCode, setPairingCode] = useState('');
 
   useEffect(() => {
     setUrl(deriveHostWsUrl());
@@ -59,13 +60,13 @@ function ConnectForm() {
     async (target: string) => {
       setError('');
       try {
-        await connect(target);
+        await connect(target, pairingCode || undefined);
         localStorage.setItem(STORAGE_KEY, target);
-      } catch {
-        setError(`Could not reach ${describeHost()}. Is the host server running?`);
+      } catch (error) {
+        setError(error instanceof Error ? error.message : String(error));
       }
     },
-    [connect],
+    [connect, pairingCode],
   );
 
   const handleSubmit = useCallback(
@@ -83,6 +84,8 @@ function ConnectForm() {
       <h1 style={styles.title}>NexusLink</h1>
       <p style={styles.subtitle}>Your PC, in your pocket</p>
       {error && <p style={styles.error}>{error}</p>}
+      <label>Pairing code (first connection only)</label>
+      <input style={styles.input} inputMode="numeric" maxLength={8} value={pairingCode} onChange={e=>setPairingCode(e.target.value.replace(/\D/g,''))} placeholder="Eight-digit code from bun run host:pair" />
       <button
         type="button"
         onClick={() => doConnect(deriveHostWsUrl())}

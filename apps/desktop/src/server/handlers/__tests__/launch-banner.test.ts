@@ -77,7 +77,7 @@ describe('collectHostUrls', () => {
   };
 
   test('classifies LAN vs Tailscale and puts Tailscale first', () => {
-    const urls = collectHostUrls(45678, 'http', nets as ReturnType<typeof import('os').networkInterfaces>);
+    const urls = collectHostUrls(45678, 'http', nets as unknown as ReturnType<typeof import('os').networkInterfaces>);
     expect(urls.map((u) => u.kind)).toEqual(['tailscale', 'lan']);
     expect(urls[0]!.url).toBe('http://100.91.4.12:45678');
     expect(urls[1]!.url).toBe('http://192.168.2.30:45678');
@@ -90,7 +90,7 @@ describe('collectHostUrls', () => {
     const urls = collectHostUrls(
       45678,
       'http',
-      onlyLan as ReturnType<typeof import('os').networkInterfaces>,
+      onlyLan as unknown as ReturnType<typeof import('os').networkInterfaces>,
       ['100.64.1.9'],
     );
     expect(urls.find((u) => u.kind === 'tailscale')?.url).toBe('http://100.64.1.9:45678');
@@ -104,7 +104,7 @@ describe('collectHostUrls', () => {
     const urls = collectHostUrls(
       80,
       'http',
-      weird as ReturnType<typeof import('os').networkInterfaces>,
+      weird as unknown as ReturnType<typeof import('os').networkInterfaces>,
       ['100.91.4.12'],
     );
     expect(urls).toHaveLength(1);
@@ -113,7 +113,7 @@ describe('collectHostUrls', () => {
   });
 
   test('skips loopback and IPv6', () => {
-    const urls = collectHostUrls(45678, 'http', nets as ReturnType<typeof import('os').networkInterfaces>);
+    const urls = collectHostUrls(45678, 'http', nets as unknown as ReturnType<typeof import('os').networkInterfaces>);
     expect(urls.every((u) => u.address !== '127.0.0.1')).toBe(true);
     expect(urls.every((u) => !u.address.includes(':'))).toBe(true);
   });

@@ -24,7 +24,7 @@ let activeSessionsCheck: (() => boolean) | null = null;
 let cachedGoogleToken: { token: string; expiresAt: number } | null = null;
 
 function getStorePath(): string {
-  const dir = join(homedir(), '.cache', 'nexuslink');
+  const dir = process.env.NEXUSLINK_DATA_DIR || join(homedir(), '.cache', 'nexuslink');
   if (!existsSync(dir)) {
     try {
       mkdirSync(dir, { recursive: true });
@@ -349,6 +349,7 @@ export async function sendAgentPushNotification(opts: {
   sessionTitle?: string;
   kind?: string;
 }): Promise<{ sent: number; failed: number }> {
+  if (process.env.NEXUSLINK_DISABLE_PUSH === '1') return {sent:0,failed:0};
   const tokens = listPushTokens();
   if (tokens.length === 0) return { sent: 0, failed: 0 };
 

@@ -12,6 +12,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:math';
+import '../workspace/platform_bridge.dart';
 
 import '../auth/pairing.dart';
 
@@ -41,7 +43,8 @@ enum RpcStatus { disconnected, connecting, connected }
 
 class RpcException implements Exception {
   final String message;
-  RpcException(this.message);
+  final String? code;
+  RpcException(this.message, [this.code]);
   @override
   String toString() => message;
 }
@@ -89,14 +92,24 @@ String friendlyLaunchError(Object error) {
   return raw.replaceFirst(RegExp(r'^RpcException:\s*'), '');
 }
 
-/// Backoff for a dropped WebSocket: 1s, 2s, 4s, 8s, then cap at 15s.
+/// Backoff for a dropped WebSocket: 1s, 2s, 4s, 8s, then cap at 30s.
 int reconnectDelayMs(int attempts) {
   final exp = 1000 * (1 << attempts.clamp(0, 10));
-  return exp.clamp(1000, 15000);
+  return exp.clamp(1000, 30000);
 }
 
 class RpcClient {
-  RpcClient(this.wsUrl);
+  RpcClient(this.wsUrl, {this.pairingCode});
+  String? pairingCode;
+  String? token;
+  String? hostId;
+  Map<String, dynamic> capabilities = {};
+  String phase = 'disconnected';
+  int _generation = 0;
+  Future<void>? _connecting;
+  final Map<String, int> _demands = {};
+  bool supports(String feature) =>
+      (capabilities['features'] as List?)?.contains(feature) == true;
 
   final String wsUrl;
 
@@ -106,6 +119,8 @@ class RpcClient {
   int _reconnectAttempts = 0;
   Timer? _reconnectTimer;
   Timer? _heartbeat;
+  Timer? _dialTimer;
+  Completer<WebSocket>? _dialPending;
 
   final _pending = <String, Completer<dynamic>>{};
   final _topicSubs = <String, List<void Function(Map<String, dynamic>)>>{};
@@ -124,53 +139,204 @@ class RpcClient {
     if (!_status.isClosed) _status.add(s);
   }
 
-  Future<void> connect() async {
+  Future<void> connect() {
+    final pending = _connecting;
+    if (pending != null) return pending;
+    final run = _connect();
+    _connecting = run;
+    return run.whenComplete(() {
+      if (identical(_connecting, run)) _connecting = null;
+    });
+  }
+
+  Future<void> _connect() async {
     _closed = false;
+    final generation = ++_generation;
     _reconnectTimer?.cancel();
     _stopHeartbeat();
+    _failPending('Connection replaced');
+    final previous = _ws;
+    _ws = null;
+    await previous?.close();
+    phase = 'connecting';
     _setStatus(RpcStatus.connecting);
     try {
-      final ws = await WebSocket.connect(wsUrl)
-          .timeout(const Duration(seconds: 8));
-      // Ping frames keep NAT mappings and phone radios from dropping an idle
-      // socket. Without this the session dies after ~30–60s of no traffic.
+      final ws = await _dial();
+      if (_closed || generation != _generation) {
+        await ws.close();
+        throw RpcException('Connection superseded', 'CONNECTION_REPLACED');
+      }
       ws.pingInterval = const Duration(seconds: 20);
       _ws = ws;
       ws.listen(
-        _onMessage,
-        onDone: _onClosed,
-        onError: (_) => _onClosed(),
+        (message) {
+          if (generation == _generation) _onMessage(message);
+        },
+        onDone: () {
+          if (generation == _generation) _onClosed();
+        },
+        onError: (_) {
+          if (generation == _generation) _onClosed();
+        },
         cancelOnError: true,
       );
-      // The host rejects every RPC until the ECDH/TOTP handshake succeeds, so
-      // authenticate before reporting connected. Running it here (not in the
-      // UI layer) means reconnects re-authenticate too.
-      await performPairingHandshake(_requestRaw);
+      phase = 'authenticating';
+      dynamic hello;
+      try {
+        hello = await _requestRaw('session.hello', {});
+      } on RpcException catch (e) {
+        if (!e.message.contains('unknown method') &&
+            !e.message.contains('not authenticated')) {
+          rethrow;
+        }
+      }
+      if (hello is Map && hello['protocolVersion'] == 2) {
+        // An unauthenticated host ID is not proof of server identity. Bind the
+        // credential to this saved address until a verified host key exists.
+        final credential = await PlatformBridge.credential(wsUrl);
+        Map<String, dynamic> auth;
+        if (pairingCode?.isNotEmpty == true) {
+          auth = expectMap(
+            await _requestRaw('session.enroll', {
+              'code': pairingCode,
+              'name': 'Android NexusLink',
+            }),
+            'session.enroll',
+          );
+          await PlatformBridge.saveCredential(
+            wsUrl,
+            auth['credential'] as String,
+          );
+          pairingCode = null;
+        } else {
+          if (credential == null) {
+            throw RpcException(
+              'Enter the pairing code from bun run host:pair on your PC.',
+              'UNAUTHENTICATED',
+            );
+          }
+          auth = expectMap(
+            await _requestRaw('session.resume', {'credential': credential}),
+            'session.resume',
+          );
+        }
+        token = auth['token'] as String;
+        hostId = auth['hostId'] as String;
+        phase = 'synchronizing';
+        capabilities = expectMap(
+          await _requestRaw('session.getCapabilities', {}),
+          'session.getCapabilities',
+        );
+        await _requestRaw('session.subscribe', {
+          'topics': ['agents'],
+        });
+      } else {
+        token = await performPairingHandshake(_requestRaw);
+        capabilities = {};
+        hostId = wsUrl;
+      }
+      if (_closed || generation != _generation || !identical(_ws, ws)) {
+        throw RpcException(
+          'Connection closed during authentication',
+          'CONNECTION_REPLACED',
+        );
+      }
       _reconnectAttempts = 0;
-      _startHeartbeat();
+      phase = 'connected';
       _setStatus(RpcStatus.connected);
+      _startHeartbeat();
+      await _updateDemands();
     } catch (e) {
-      _ws?.close();
+      if (generation != _generation || _closed) rethrow;
+      ++_generation;
+      final ws = _ws;
       _ws = null;
+      await ws?.close();
       _stopHeartbeat();
+      phase = e is RpcException && e.code == 'UNAUTHENTICATED'
+          ? 'authentication required'
+          : 'reconnecting';
       _setStatus(RpcStatus.disconnected);
-      if (!_closed) _scheduleReconnect();
+      if (phase != 'authentication required') _scheduleReconnect();
       rethrow;
     }
   }
 
+  Future<WebSocket> _dial() {
+    final pending = Completer<WebSocket>();
+    _dialPending = pending;
+    _dialTimer = Timer(const Duration(seconds: 8), () {
+      if (!pending.isCompleted) {
+        pending.completeError(RpcException('Connection timed out'));
+      }
+    });
+    WebSocket.connect(wsUrl).then(
+      (socket) {
+        if (pending.isCompleted) {
+          socket.close();
+          return;
+        }
+        pending.complete(socket);
+      },
+      onError: (Object error) {
+        if (!pending.isCompleted) pending.completeError(error);
+      },
+    );
+    return pending.future.whenComplete(() {
+      if (identical(_dialPending, pending)) {
+        _dialTimer?.cancel();
+        _dialPending = null;
+      }
+    });
+  }
+
   void _onClosed() {
+    if (_closed) return;
+    ++_generation;
     _stopHeartbeat();
+    final previous = _ws;
     _ws = null;
+    unawaited(previous?.close());
     _failPending('connection closed');
+    phase = 'reconnecting';
     _setStatus(RpcStatus.disconnected);
-    if (!_closed) _scheduleReconnect();
+    _scheduleReconnect();
+  }
+
+  void demand(String owner, int intervalMs) {
+    if ((_demands[owner] ?? 0) == intervalMs) return;
+    if (intervalMs <= 0) {
+      _demands.remove(owner);
+    } else {
+      _demands[owner] = intervalMs;
+    }
+    unawaited(_updateDemands());
+  }
+
+  Future<void> _updateDemands() async {
+    if (status != RpcStatus.connected || !supports('session.subscribe')) return;
+    final metrics = _demands.entries
+        .where((e) => e.key != 'windows')
+        .map((e) => e.value);
+    try {
+      await request('session.subscribe', {
+        'topics': [
+          'agents',
+          if (metrics.isNotEmpty) 'metrics',
+          if (_demands.containsKey('windows')) 'windows',
+        ],
+        'metricsInterval': metrics.isEmpty ? 5000 : metrics.reduce(min),
+      });
+    } catch (_) {}
   }
 
   void _scheduleReconnect() {
     if (_closed) return;
     _reconnectTimer?.cancel();
-    final delayMs = reconnectDelayMs(_reconnectAttempts);
+    final delayMs =
+        (reconnectDelayMs(_reconnectAttempts) *
+                (0.8 + Random().nextDouble() * 0.2))
+            .round();
     _reconnectAttempts++;
     _reconnectTimer = Timer(Duration(milliseconds: delayMs), () {
       if (_closed) return;
@@ -181,7 +347,14 @@ class RpcClient {
   void _startHeartbeat() {
     _stopHeartbeat();
     _heartbeat = Timer.periodic(const Duration(seconds: 20), (_) {
-      notify('session.heartbeat', const {});
+      request(
+        'session.heartbeat',
+        const {},
+        const Duration(seconds: 5),
+      ).catchError((_) {
+        _ws?.close();
+        return null;
+      });
     });
   }
 
@@ -192,6 +365,14 @@ class RpcClient {
 
   void disconnect() {
     _closed = true;
+    ++_generation;
+    phase = 'disconnected by user';
+    _dialTimer?.cancel();
+    final dial = _dialPending;
+    if (dial != null && !dial.isCompleted) {
+      dial.completeError(RpcException('Disconnected'));
+    }
+    _dialPending = null;
     _reconnectTimer?.cancel();
     _stopHeartbeat();
     _failPending('disconnected');
@@ -253,15 +434,20 @@ class RpcClient {
     final completer = Completer<dynamic>();
     _pending[id] = completer;
 
-    ws.add(jsonEncode({
-      'type': 'rpc-request',
-      'request': {'id': id, 'method': method, 'params': params},
-    }));
+    ws.add(
+      jsonEncode({
+        'type': 'rpc-request',
+        'request': {'id': id, 'method': method, 'params': params},
+      }),
+    );
 
-    return completer.future.timeout(timeout, onTimeout: () {
-      _pending.remove(id);
-      throw RpcException('request timeout: $method');
-    });
+    return completer.future.timeout(
+      timeout,
+      onTimeout: () {
+        _pending.remove(id);
+        throw RpcException('request timeout: $method');
+      },
+    );
   }
 
   /// Fire-and-forget request for the latency-sensitive input path: no
@@ -269,16 +455,24 @@ class RpcClient {
   void notify(String method, Map<String, dynamic> params) {
     final ws = _ws;
     if (ws == null || _currentStatus != RpcStatus.connected) return;
-    ws.add(jsonEncode({
-      'type': 'rpc-request',
-      'request': {'id': 'ff-${++_idCounter}', 'method': method, 'params': params},
-    }));
+    ws.add(
+      jsonEncode({
+        'type': 'rpc-request',
+        'request': {
+          'id': 'ff-${++_idCounter}',
+          'method': method,
+          'params': params,
+        },
+      }),
+    );
   }
 
   /// Subscribe to a JSON topic (e.g. 'stream-region', 'terminal-output').
   /// Returns an unsubscribe callback.
   void Function() subscribe(
-      String topic, void Function(Map<String, dynamic>) callback) {
+    String topic,
+    void Function(Map<String, dynamic>) callback,
+  ) {
     final subs = _topicSubs.putIfAbsent(topic, () => []);
     subs.add(callback);
     return () => subs.remove(callback);
@@ -286,8 +480,10 @@ class RpcClient {
 
   void _onMessage(dynamic data) {
     if (data is List<int>) {
-      final frame =
-          MirrorFrame.parse(data is Uint8List ? data : Uint8List.fromList(data));
+      if (!_frames.hasListener) return;
+      final frame = MirrorFrame.parse(
+        data is Uint8List ? data : Uint8List.fromList(data),
+      );
       if (frame != null && !_frames.isClosed) _frames.add(frame);
       return;
     }
@@ -307,7 +503,9 @@ class RpcClient {
       if (completer == null) return; // fire-and-forget ack
       final error = resp['error'];
       if (error != null) {
-        completer.completeError(RpcException('$error'));
+        completer.completeError(
+          RpcException('$error', resp['code'] as String?),
+        );
       } else {
         completer.complete(resp['result']);
       }

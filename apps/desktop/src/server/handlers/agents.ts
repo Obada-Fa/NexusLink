@@ -1,3 +1,4 @@
+import { persistAgent, loadedAgentRows } from '../workspace/agent-store';
 // Agent gateway: run AI coding agents (Claude Code, Cursor CLI, OpenCode,
 // Antigravity) on the host and expose them to the phone as chat sessions with a
 // normalized event stream — the phone renders a native chat UI, never a terminal.
@@ -46,7 +47,7 @@ type BroadcastFn = (msg: WsMessage) => void;
 let broadcast: BroadcastFn = () => {};
 
 export function setAgentBroadcast(fn: BroadcastFn): void {
-  broadcast = fn;
+  broadcast = fn ?? (() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -852,6 +853,16 @@ interface AgentAdapter {
 }
 
 const agentSessions = new Map<string, AgentSession>();
+const pendingApprovalEvents = new Map<string, Map<string, AgentEvent>>();
+export function pendingAgentApprovals(id: string): AgentEvent[] {
+  return [...(pendingApprovalEvents.get(id)?.values() ?? [])];
+}
+function settleApproval(session: AgentSession, requestId: string, outcome: string) {
+  pendingApprovalEvents.get(session.info.agentSessionId)?.delete(requestId);
+  session.info.taskState=pendingAgentApprovals(session.info.agentSessionId).length ? 'waiting' : session.info.busy ? 'running' : 'idle';
+  emit(session,{kind:'status',refId:requestId,text:`Approval ${outcome}.`});
+}
+
 
 /**
  * Per-agent approval policy.
@@ -870,7 +881,7 @@ const APPROVAL_MODES: readonly AgentApprovalMode[] = ['ask', 'auto'];
 const approvalModes = new Map<string, AgentApprovalMode>();
 
 function getApprovalStorePath(): string {
-  const dir = join(homedir(), '.cache', 'nexuslink');
+  const dir = process.env.NEXUSLINK_DATA_DIR || join(homedir(), '.cache', 'nexuslink');
   if (!existsSync(dir)) {
     try {
       mkdirSync(dir, { recursive: true });
@@ -906,7 +917,7 @@ function saveApprovalModes(): void {
 loadApprovalModes();
 
 export function getAgentApprovalMode(agentId: string): AgentApprovalMode {
-  return approvalModes.get(agentId) ?? (agentId === 'antigravity' ? 'auto' : 'ask');
+  return approvalModes.get(agentId) ?? 'ask';
 }
 
 export function setAgentApprovalMode(agentId: string, mode: string): { ok: boolean; mode?: AgentApprovalMode } {
@@ -941,10 +952,7 @@ function trackPermissionTimeout(session: AgentSession, requestId: string): void 
     const resolve = session.pendingPermissions.get(requestId);
     if (!resolve) return;
     session.pendingPermissions.delete(requestId);
-    emit(session, {
-      kind: 'status',
-      text: 'No answer on the phone — denied automatically after 5 minutes.',
-    });
+    settleApproval(session, requestId, 'expired');
     resolve(false);
   }, PERMISSION_TIMEOUT_MS);
   timer.unref?.();
@@ -969,7 +977,7 @@ function clearAllPermissionTimeouts(agentSessionId: string): void {
 }
 
 function getSessionsStorePath(): string {
-  const dir = join(homedir(), '.cache', 'nexuslink');
+  const dir = process.env.NEXUSLINK_DATA_DIR || join(homedir(), '.cache', 'nexuslink');
   if (!existsSync(dir)) {
     try {
       mkdirSync(dir, { recursive: true });
@@ -978,17 +986,21 @@ function getSessionsStorePath(): string {
   return join(dir, 'agent_sessions.json');
 }
 
+const savedSequences = new Map<string, number>();
+const savedSummaries = new Map<string, string>();
 function saveAgentSessionsToDisk(): void {
-  try {
-    const list = [...agentSessions.values()]
-      .sort((a, b) => b.info.createdAt - a.info.createdAt)
-      .slice(0, 60)
-      .map((s) => ({
-        info: s.info,
-        history: s.history.slice(-100),
-      }));
-    writeFileSync(getSessionsStorePath(), JSON.stringify(list, null, 2), 'utf-8');
-  } catch (_) {}
+  for (const session of agentSessions.values()) {
+    const id=session.info.agentSessionId;
+    const events=session.history.filter(event=>event.seq>(savedSequences.get(id) ?? 0));
+    const summary=JSON.stringify(session.info);
+    if(!events.length && savedSummaries.get(id)===summary) continue;
+    savedSummaries.set(id,summary);
+    if(events.length)savedSequences.set(id,events.at(-1)!.seq);
+    void persistAgent({info:{...session.info},events}).catch(error=>{
+      savedSummaries.delete(id);savedSequences.delete(id);
+      console.error('[agents] Persistence failed:',error.message);
+    });
+  }
 }
 
 let agentSessionsLoaded = false;
@@ -996,10 +1008,7 @@ function loadAgentSessionsFromDisk(): void {
   if (agentSessionsLoaded) return;
   agentSessionsLoaded = true;
   try {
-    const p = getSessionsStorePath();
-    if (!existsSync(p)) return;
-    const raw = readFileSync(p, 'utf-8');
-    const list = JSON.parse(raw);
+    const list = loadedAgentRows();
     if (!Array.isArray(list)) return;
     for (const item of list) {
       if (!item?.info?.agentSessionId || agentSessions.has(item.info.agentSessionId)) continue;
@@ -1010,7 +1019,7 @@ function loadAgentSessionsFromDisk(): void {
         ? closeDanglingToolStarts(sanitizeAgentHistory(item.history))
         : [];
       const session: AgentSession = {
-        info: { ...info, busy: false, status: 'running' },
+        info: { ...info, busy: false, status: 'running', taskState: info.busy ? 'interrupted' : (info.taskState || 'idle') },
         history,
         adapter: null as unknown as AgentAdapter,
         seq: history.length > 0 ? (history[history.length - 1].seq ?? 0) : 0,
@@ -1025,11 +1034,29 @@ function loadAgentSessionsFromDisk(): void {
 
 function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): void {
   if (isRedundantToolStart(session.history, event)) return;
-  const full: AgentEvent = { ...event, seq: ++session.seq, ts: Date.now() };
+  const full: AgentEvent = { ...event, seq: ++session.seq, ts: Date.now(), turnId: session.info.turnId };
+  session.info.updatedAt=full.ts;
+  if(full.kind==='user') { session.info.taskState='running'; session.info.preview=full.text?.slice(0,160); }
+  if(full.kind==='permission-request' && full.refId) {
+    session.info.taskState='waiting';
+    const pending=pendingApprovalEvents.get(session.info.agentSessionId) ?? new Map<string,AgentEvent>();
+    pending.set(full.refId,full);pendingApprovalEvents.set(session.info.agentSessionId,pending);
+  }
+  if(full.kind==='result') session.info.taskState='completed';
+  if(full.kind==='error') session.info.taskState='failed';
+  if(full.kind==='status' && full.text==='cancelled') session.info.taskState='canceled';
   session.history.push(full);
   if (session.history.length > HISTORY_CAP) session.history.splice(0, 100);
-  broadcast({ type: 'agent-event', agentSessionId: session.info.agentSessionId, event: full });
-  saveAgentSessionsToDisk();
+  savedSequences.set(session.info.agentSessionId, full.seq);
+  const savedInfo={...session.info};
+  void persistAgent({info:savedInfo,events:[full]}).then(()=>{
+    broadcast({ type:'agent-event', agentSessionId:savedInfo.agentSessionId,event:full });
+    if(['result','error','permission-request','user','status'].includes(full.kind)) broadcast({type:'agent-session-update',session:savedInfo});
+  }).catch(error=>{
+    session.info.taskState='failed';
+    broadcast({type:'agent-event',agentSessionId:session.info.agentSessionId,event:{kind:'error',seq:++session.seq,ts:Date.now(),text:'Task history could not be saved. Check host storage.'}});
+    console.error('[agents] Persistence failed:',error.message);
+  });
 
   // If no active websocket clients are connected (e.g. mobile app is closed/screen off),
   // send a native push notification to registered devices.
@@ -1135,6 +1162,8 @@ export function createAgentSession(
     createdAt: Date.now(),
     busy: false,
     status: 'running',
+    taskState: 'idle',
+    updatedAt: Date.now(),
     hostChatId: opts?.hostChatId,
   };
   const session: AgentSession = {
@@ -1293,8 +1322,10 @@ export function promptAgent(
   loadAgentSessionsFromDisk();
   const session = agentSessions.get(agentSessionId);
   if (!session || session.info.status !== 'running') return { ok: false };
+  if(session.info.busy) throw new Error('This task is already working. Stop it before sending another prompt.');
+  session.info.turnId=crypto.randomUUID();
   const materialized = materializeAgentImages(session.info.agentSessionId, opts.images);
-  const key = parseEnvApiKey(text, ['CURSOR_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY']);
+  const key = parseEnvApiKey(text, ['CURSOR_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENAI_API_KEY']);
   const display = (key ? `${key.name}=••••` : text.trim())
     || (materialized.files.length ? 'Attached photo(s)' : '');
   if (!display) return { ok: false };
@@ -1362,6 +1393,9 @@ export function cancelAgent(agentSessionId: string): { ok: boolean } {
     session.seq = Math.max(session.seq, settled[settled.length - 1]?.seq ?? 0);
     saveAgentSessionsToDisk();
   }
+  for(const event of pendingAgentApprovals(agentSessionId)) settleApproval(session,event.refId!,'canceled');
+  clearAllPermissionTimeouts(agentSessionId);
+  session.pendingPermissions.clear();
   emit(session, { kind: 'status', text: 'cancelled' });
   setBusy(session, false);
   return { ok: true };
@@ -1374,6 +1408,7 @@ export function closeAgentSession(agentSessionId: string): { ok: boolean } {
   session.adapter?.close?.();
   session.info.status = 'exited';
   agentSessions.delete(agentSessionId);
+  void persistAgent({delete:agentSessionId}).catch(error=>console.error(error.message));
   saveAgentSessionsToDisk();
   broadcast({ type: 'agent-session-deleted', agentSessionId });
   return { ok: true };
@@ -1387,15 +1422,18 @@ export function resolveAgentPermission(
 ): { ok: boolean; reason?: string } {
   const session = agentSessions.get(agentSessionId);
   if (!session) return { ok: false, reason: 'unknown session' };
+  if (!pendingApprovalEvents.get(agentSessionId)?.has(requestId)) return {ok:false,reason:'request already expired'};
   const pending = session.pendingPermissions.get(requestId);
   if (pending) {
     clearPermissionTimeout(agentSessionId, requestId);
     session.pendingPermissions.delete(requestId);
+    settleApproval(session, requestId, allow ? 'allowed' : 'denied');
     pending(allow);
     return { ok: true };
   }
   if (session.adapter.permission) {
     clearPermissionTimeout(agentSessionId, requestId);
+    settleApproval(session, requestId, allow ? 'allowed' : 'denied');
     session.adapter.permission(requestId, allow);
     return { ok: true };
   }
@@ -1475,7 +1513,7 @@ export function finishCliTurn(opts: {
   exitCode: number | null;
   stderr: string;
 }): AgentDelta | null {
-  if (opts.sawResult || opts.exitCode === 0) return null;
+  if (opts.exitCode === 0) return null;
   const err = opts.stderr.trim();
   if (err) return { kind: 'error', text: err };
   return {
@@ -2137,7 +2175,7 @@ function spawnJsonCli(
   extraEnv?: Record<string, string>,
   onStderr?: (chunk: string) => void,
   opts?: { stdin?: 'pipe' | 'ignore' },
-): { proc: Proc; stderr: Promise<string> } {
+): { proc: Proc; stderr: Promise<string>; drained: Promise<void> } {
   const proc = Bun.spawn(spawnArgv(argv), {
     cwd,
     stdin: opts?.stdin ?? 'ignore',
@@ -2145,11 +2183,12 @@ function spawnJsonCli(
     stderr: 'pipe',
     env: hostEnv(extraEnv),
   } as unknown as SpawnOpts);
-  void pumpJsonLines(proc, onEvent).catch(() => {});
+  const drained = pumpJsonLines(proc, onEvent);
+  void drained.catch(() => {});
   const stderr = onStderr
     ? pumpTextStream(proc.stderr, onStderr)
     : collectText(proc.stderr);
-  return { proc, stderr };
+  return { proc, stderr, drained };
 }
 
 async function pumpTextStream(
@@ -2406,7 +2445,7 @@ class ClaudeAdapter implements AgentAdapter {
       const stderr = await stderrP.catch(() => '');
       if (!this.session.info.busy) return;
       setBusy(this.session, false);
-      const isSuccess = (code === 0 && this.streamedText) || this.sawResult;
+      const isSuccess = code === 0 && (this.streamedText || this.sawResult);
       const fail = finishCliTurn({
         sawResult: isSuccess,
         exitCode: code,
@@ -2475,9 +2514,10 @@ class ClaudeAdapter implements AgentAdapter {
     } else if (type === 'result') {
       this.sawResult = true;
       setBusy(s, false);
+      const failed = msg.is_error === true || (typeof msg.subtype === 'string' && msg.subtype.startsWith('error'));
       emit(s, withoutDuplicateResult({
-        kind: 'result',
-        text: typeof msg.result === 'string' ? msg.result : '',
+        kind: failed ? 'error' : 'result',
+        text: typeof msg.result === 'string' ? msg.result : failed ? JSON.stringify(msg.errors ?? 'Provider turn failed') : '',
       }, this.streamedText));
     } else if (type === 'system' && msg.subtype === 'init') {
       emit(s, { kind: 'status', text: 'ready' });
@@ -2577,6 +2617,7 @@ class CursorAdapter implements AgentAdapter {
   private streamGen = 0;
   private chatId: string | null = null;
   private sawResult = false;
+  private pendingResult: AgentDelta | undefined;
   private streamedText = false;
   private lastText = '';
   private apiKey = process.env.CURSOR_API_KEY || '';
@@ -2620,6 +2661,7 @@ class CursorAdapter implements AgentAdapter {
   private runPrompt(text: string, opts?: AdapterPromptOpts): void {
     this.cancel();
     this.sawResult = false;
+    this.pendingResult = undefined;
     this.streamedText = false;
     this.lastText = '';
     this.idle.clear();
@@ -2636,7 +2678,7 @@ class CursorAdapter implements AgentAdapter {
       catalog: listAgentModels('cursor'),
     });
     const gen = this.streamGen;
-    const { proc, stderr } = spawnJsonCli(
+    const { proc, stderr, drained } = spawnJsonCli(
       argv,
       this.session.info.cwd,
       (msg) => {
@@ -2648,19 +2690,19 @@ class CursorAdapter implements AgentAdapter {
     this.proc = proc;
     proc.exited.then(async (code) => {
       if (this.streamGen !== gen) return;
+      await drained.catch(() => {});
+      if (this.streamGen !== gen) return;
       const errText = await stderr.catch(() => '');
       if (!this.session.info.busy) return;
       setBusy(this.session, false);
-      const isSuccess = code === 0 || this.streamedText || this.sawResult;
+      const isSuccess = code === 0;
       const fail = finishCliTurn({
         sawResult: isSuccess,
         exitCode: code,
         stderr: isSuccess ? '' : errText,
       });
       if (!fail) {
-        if (!this.sawResult) {
-          emit(this.session, { kind: 'result', text: '' });
-        }
+        emit(this.session, this.pendingResult ?? { kind: 'result', text: '' });
         return;
       }
       if (isCliAuthError(fail.text ?? '')) {
@@ -2786,9 +2828,15 @@ class CursorAdapter implements AgentAdapter {
         && (ev.kind === 'tool-start' || ev.kind === 'text' || ev.kind === 'text-delta')
       ) {
         this.sawResult = false;
+    this.pendingResult = undefined;
         setBusy(this.session, true);
       }
-      if (ev.kind === 'result' || ev.kind === 'error') {
+      if (ev.kind === 'result') {
+        this.pendingResult = withoutDuplicateResult(ev, this.streamedText);
+        this.sawResult = true;
+        continue;
+      }
+      if (ev.kind === 'error') {
         this.sawResult = true;
         setBusy(this.session, false);
       }
@@ -2798,11 +2846,7 @@ class CursorAdapter implements AgentAdapter {
   }
 
   private finishIdle(): void {
-    if (!this.session.info.busy || this.sawResult) return;
-    if (!this.streamedText) return;
-    this.sawResult = true;
-    setBusy(this.session, false);
-    emit(this.session, { kind: 'result', text: '' });
+    // Output silence is not evidence of completion; wait for the process exit.
   }
 
   cancel(): void {
@@ -2836,6 +2880,7 @@ class OpenCodeAdapter implements AgentAdapter {
   private streamGen = 0;
   private ocSession: string | null = null;
   private sawResult = false;
+  private pendingResult: AgentDelta | undefined;
   private streamedText = false;
 
   constructor(private session: AgentSession) {}
@@ -2847,6 +2892,7 @@ class OpenCodeAdapter implements AgentAdapter {
   prompt(text: string, opts?: AdapterPromptOpts): void {
     this.cancel();
     this.sawResult = false;
+    this.pendingResult = undefined;
     this.streamedText = false;
     const bin = resolveBin('opencode') ?? 'opencode';
     const argv = buildOpencodeArgv({
@@ -2860,7 +2906,7 @@ class OpenCodeAdapter implements AgentAdapter {
       imagePaths: opts?.imagePaths,
     });
     const gen = this.streamGen;
-    const { proc, stderr } = spawnJsonCli(
+    const { proc, stderr, drained } = spawnJsonCli(
       argv,
       this.session.info.cwd,
       (msg) => {
@@ -2871,19 +2917,19 @@ class OpenCodeAdapter implements AgentAdapter {
     this.proc = proc;
     proc.exited.then(async (code) => {
       if (this.streamGen !== gen) return;
+      await drained.catch(() => {});
+      if (this.streamGen !== gen) return;
       const errText = await stderr.catch(() => '');
       if (!this.session.info.busy) return;
       setBusy(this.session, false);
-      const isSuccess = code === 0 || this.streamedText || this.sawResult;
+      const isSuccess = code === 0;
       const fail = finishCliTurn({
         sawResult: isSuccess,
         exitCode: code,
         stderr: isSuccess ? '' : errText,
       });
       if (!fail) {
-        if (!this.sawResult) {
-          emit(this.session, { kind: 'result', text: '' });
-        }
+        emit(this.session, this.pendingResult ?? { kind: 'result', text: '' });
         return;
       }
       emit(this.session, fail);
@@ -2905,7 +2951,12 @@ class OpenCodeAdapter implements AgentAdapter {
       if (ev.kind === 'text' || ev.kind === 'text-delta') {
         this.streamedText = true;
       }
-      if (ev.kind === 'result' || ev.kind === 'error') {
+      if (ev.kind === 'result') {
+        this.pendingResult = withoutDuplicateResult(ev, this.streamedText);
+        this.sawResult = true;
+        continue;
+      }
+      if (ev.kind === 'error') {
         this.sawResult = true;
         setBusy(this.session, false);
       }
@@ -2937,6 +2988,7 @@ class AntigravityAdapter implements AgentAdapter {
   private streamGen = 0;
   private conversationId: string | null = null;
   private sawResult = false;
+  private pendingResult: AgentDelta | undefined;
   private streamedText = false;
   private newProjectAttempted = false;
   private authUrlEmitted = false;
@@ -2977,6 +3029,7 @@ class AntigravityAdapter implements AgentAdapter {
     }
     this.cancel();
     this.sawResult = false;
+    this.pendingResult = undefined;
     this.streamedText = false;
     this.authUrlEmitted = false;
     this.authHintEmitted = false;
@@ -3000,7 +3053,7 @@ class AntigravityAdapter implements AgentAdapter {
     });
     let stderrCombined = '';
     const gen = this.streamGen;
-    const { proc, stderr } = spawnJsonCli(
+    const { proc, stderr, drained } = spawnJsonCli(
       argv,
       this.session.info.cwd,
       (msg) => {
@@ -3017,6 +3070,8 @@ class AntigravityAdapter implements AgentAdapter {
     );
     this.proc = proc;
     proc.exited.then(async (code) => {
+      if (this.streamGen !== gen) return;
+      await drained.catch(() => {});
       if (this.streamGen !== gen) return;
       const errText = await stderr.catch(() => '');
       if (this.conversationId) {
@@ -3046,9 +3101,7 @@ class AntigravityAdapter implements AgentAdapter {
         stderr: isSuccess ? '' : errText,
       });
       if (!fail) {
-        if (!this.sawResult) {
-          emit(this.session, { kind: 'result', text: '' });
-        }
+        emit(this.session, this.pendingResult ?? { kind: 'result', text: '' });
         return;
       }
       const cleaned = sanitizeCliError(fail.text ?? '', 'Antigravity');
@@ -3088,7 +3141,12 @@ class AntigravityAdapter implements AgentAdapter {
     const events = parseAgyStreamEvent(msg);
     for (const ev of events) {
       if (ev.kind === 'text' || ev.kind === 'text-delta') this.streamedText = true;
-      if (ev.kind === 'result' || ev.kind === 'error') {
+      if (ev.kind === 'result') {
+        this.pendingResult = withoutDuplicateResult(ev, this.streamedText);
+        this.sawResult = true;
+        continue;
+      }
+      if (ev.kind === 'error') {
         this.sawResult = true;
         setBusy(this.session, false);
       }
@@ -3386,6 +3444,7 @@ class CodexAdapter implements AgentAdapter {
   private streamGen = 0;
   private threadId: string | null = null;
   private sawResult = false;
+  private pendingResult: AgentDelta | undefined;
   private streamedText = false;
   private apiKey = process.env.OPENAI_API_KEY || '';
 
@@ -3412,6 +3471,7 @@ class CodexAdapter implements AgentAdapter {
     }
     this.cancel();
     this.sawResult = false;
+    this.pendingResult = undefined;
     this.streamedText = false;
     const bin = resolveBin('codex') ?? 'codex';
     const argv = buildCodexArgv({
@@ -3425,7 +3485,7 @@ class CodexAdapter implements AgentAdapter {
       imagePaths: opts?.imagePaths,
     });
     const gen = this.streamGen;
-    const { proc, stderr } = spawnJsonCli(
+    const { proc, stderr, drained } = spawnJsonCli(
       argv,
       this.session.info.cwd,
       (msg) => {
@@ -3437,13 +3497,15 @@ class CodexAdapter implements AgentAdapter {
     this.proc = proc;
     proc.exited.then(async (code) => {
       if (this.streamGen !== gen) return;
+      await drained.catch(() => {});
+      if (this.streamGen !== gen) return;
       const errText = await stderr.catch(() => '');
       if (!this.session.info.busy) return;
       setBusy(this.session, false);
-      const isSuccess = code === 0 || this.streamedText || this.sawResult;
+      const isSuccess = code === 0;
       const fail = finishCliTurn({ sawResult: isSuccess, exitCode: code, stderr: isSuccess ? '' : errText });
       if (!fail) {
-        if (!this.sawResult) emit(this.session, { kind: 'result', text: '' });
+        emit(this.session, this.pendingResult ?? { kind: 'result', text: '' });
         return;
       }
       emit(this.session, withoutDuplicateResult({ kind: 'error', text: sanitizeCliError(fail.text ?? '', 'Codex') }, this.streamedText));
@@ -3463,7 +3525,12 @@ class CodexAdapter implements AgentAdapter {
     const events = parseCodexStreamEvent(msg);
     for (const ev of events) {
       if (ev.kind === 'text' || ev.kind === 'text-delta') this.streamedText = true;
-      if (ev.kind === 'result' || ev.kind === 'error') {
+      if (ev.kind === 'result') {
+        this.pendingResult = withoutDuplicateResult(ev, this.streamedText);
+        this.sawResult = true;
+        continue;
+      }
+      if (ev.kind === 'error') {
         this.sawResult = true;
         setBusy(this.session, false);
       }
@@ -3480,4 +3547,11 @@ class CodexAdapter implements AgentAdapter {
   close(): void {
     this.cancel();
   }
+}
+
+export function archiveAgentSession(id:string,archived:boolean) {
+  const s=agentSessions.get(id);if(!s)throw new Error('Task not found');
+  s.info.archived=archived;
+  void persistAgent({info:s.info,events:[]}).then(()=>broadcast({type:'agent-session-update',session:{...s.info}}));
+  return {...s.info};
 }

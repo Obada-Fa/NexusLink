@@ -1,3 +1,4 @@
+import { readFile, statfs } from 'node:fs/promises';
 import { cpus, freemem, homedir, hostname, totalmem, uptime, userInfo, type CpuInfo } from 'node:os';
 import type { SystemInfo, PerfSnapshot } from '@nexuslink/rpc-types';
 
@@ -42,12 +43,23 @@ export async function getSystemInfo(): Promise<SystemInfo> {
   };
 }
 
+let cached: PerfSnapshot | null = null;
+let sampling: Promise<PerfSnapshot> | null = null;
 export async function getPerfSnapshot(): Promise<PerfSnapshot> {
+  if (cached && Date.now() - (cached.timestamp || 0) < 1500) return cached;
+  if (sampling) return sampling;
+  sampling = sample();
+  try { cached = await sampling; return cached; } finally { sampling = null; }
+}
+async function sample(): Promise<PerfSnapshot> {
   const total = totalmem();
-  const free = freemem();
+  let free = freemem();
+  if (process.platform === 'linux') {
+    try { const text = await readFile('/proc/meminfo', 'utf8'); const hit = text.match(/^MemAvailable:\s+(\d+) kB/m); if (hit) free = Number(hit[1]) * 1024; } catch {}
+  }
   const used = Math.max(0, total - free);
   const ramUsedGb = Math.round((used / 1024 / 1024 / 1024) * 100) / 100;
-  const ramPercent = total > 0 ? Math.round((used / total) * 100) / 100 : 0;
+  const ramPercent = total > 0 ? Math.round((used / total) * 10000) / 100 : 0;
 
   const current = cpuTimes(cpus());
   let cpuPercent = 0;
@@ -62,9 +74,13 @@ export async function getPerfSnapshot(): Promise<PerfSnapshot> {
     cpuPercent,
     ramPercent,
     ramUsedGb,
-    netInKBs: 0,
-    netOutKBs: 0,
-    diskReadMBs: 0,
-    diskWriteMBs: 0,
+    netInKBs: null,
+    netOutKBs: null,
+    diskReadMBs: null,
+    diskWriteMBs: null,
+    timestamp: Date.now(),
+    ramUsedBytes: used,
+    ramTotalBytes: total,
+    diskFreeBytes: await statfs(homedir()).then(s => s.bavail * s.bsize).catch(() => null),
   };
 }

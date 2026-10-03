@@ -2,62 +2,21 @@ import { describe, it, expect } from "bun:test";
 import type { RpcMethod, Params, Result, WsMessage } from "../index";
 import { createId, assertRpcEnvelope, type RpcEnvelope } from "../utils";
 
-function allMethods(): RpcMethod[] {
-  return [
-    "fs.list",
-    "fs.read",
-    "fs.write",
-    "fs.delete",
-    "fs.move",
-    "process.list",
-    "process.kill",
-    "process.spawn",
-    "terminal.create",
-    "terminal.input",
-    "terminal.resize",
-    "terminal.kill",
-    "screen.startCapture",
-    "screen.stopCapture",
-    "screen.getMetadata",
-    "input.mouseMove",
-    "input.mouseClick",
-    "input.mouseScroll",
-    "input.keyEvent",
-    "session.pair",
-    "session.authenticate",
-    "session.heartbeat",
-    "session.disconnect",
-    "system.getInfo",
-    "system.getPerf",
-  ];
-}
+import { WORKSPACE_METHODS } from '../workspace';
+import { SUPPORTED_METHODS, validateRequest } from '../../../../apps/desktop/src/server/workspace/protocol';
 
-describe("RpcMethod exhaustiveness", () => {
-  it("has exactly 25 methods", () => {
-    expect(allMethods()).toHaveLength(25);
+describe('protocol registry', () => {
+  it('advertises implemented workspace methods without duplicates', () => {
+    for(const method of WORKSPACE_METHODS) expect(SUPPORTED_METHODS).toContain(method);
+    expect(new Set(SUPPORTED_METHODS).size).toBe(SUPPORTED_METHODS.length);
+    expect(SUPPORTED_METHODS).not.toContain('process.kill');
+    expect(SUPPORTED_METHODS).not.toContain('fs.delete');
   });
-
-  it("every known method is in the RpcMethod union", () => {
-    const methods: RpcMethod[] = allMethods();
-    expect(methods.length).toBe(25);
-  });
-
-  it("Params maps every method to a non-never type", () => {
-    const methods = allMethods();
-    for (const m of methods) {
-      const _p: Params<typeof m> = undefined as unknown as Params<typeof m>;
-      expect(typeof _p === "undefined").toBeDefined();
-    }
-    expect(true).toBe(true);
-  });
-
-  it("Result maps every method to a non-never type", () => {
-    const methods = allMethods();
-    for (const m of methods) {
-      const _r: Result<typeof m> = undefined as unknown as Result<typeof m>;
-      expect(typeof _r === "undefined").toBeDefined();
-    }
-    expect(true).toBe(true);
+  it('rejects malformed parameters before dispatch', () => {
+    expect(()=>validateRequest('terminal.create',{cols:-1,rows:24})).toThrow();
+    expect(()=>validateRequest('terminal.input',{terminalId:12,data:'x'})).toThrow();
+    expect(()=>validateRequest('agent.permission',{allow:'yes'})).toThrow();
+    expect(()=>validateRequest('terminal.resize',{cols:80,rows:24})).not.toThrow();
   });
 });
 

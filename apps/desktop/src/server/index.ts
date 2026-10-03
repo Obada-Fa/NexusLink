@@ -1,10 +1,15 @@
+import { initializeAgentStore, storedHistory, storedActivity, closeAgentStore, flushAgents } from './workspace/agent-store';
+import { archiveAgentSession, pendingAgentApprovals } from './handlers/agents';
+import { enroll, resume, accessToken, hostId, WorkspaceError, stringParam, isPrivatePeer } from './workspace/security';
+import { workspaceRequest, validateRequest, once } from './workspace/protocol';
+import { detachTerminalsForSocket, stopAllTerminals } from './handlers/terminal';
 // Linux/X11 host. Windows ships as apps/windows-host — do not add win32 branches here.
 import type { WsMessage, RpcRequest, RpcResponse, RpcMethod } from '@nexuslink/rpc-types';
 import { gitWorkingTree, handleFsList, handleFsMkdir, handleFsRead, listProjects } from './handlers/fs';
 import { listProcesses } from './handlers/process';
 import { getSystemInfo, getPerfSnapshot } from './handlers/system';
 import { handleTerminalCreate, handleTerminalInput, handleTerminalResize, handleTerminalKill, setSend as setTerminalSend } from './handlers/terminal';
-import { validateToken, generateToken, handleSessionPair, validateSessionTOTP, isLocalDev, isTrustedLan, generateDevToken } from './handlers/auth';
+import { validateToken } from './handlers/auth';
 import { setSend as setSignalingSend } from './handlers/signaling';
 import { mouseMove, mouseClick, mouseScroll, keyEvent, typeText, buttonDown, buttonUp, mouseMoveAbs } from './handlers/input';
 import { setSend as setCaptureSend, startCapture, stopCapture, stopCapturesForSocket, getScreenMetadata, reportStreamStats } from './handlers/capture';
@@ -44,12 +49,18 @@ type Session = {
   isLocal?: boolean;
   address?: string;
   authenticated: boolean;
+  topics?: Set<string>;
+  metricsInterval?: number;
+  lastMetric?: number;
+  role?: string;
 };
 
 const AUTH_METHODS = new Set<string>([
+  'session.hello',
+  'session.enroll',
+  'session.resume',
   'session.pair',
   'session.authenticate',
-  'session.heartbeat',
   'session.disconnect',
 ]);
 
@@ -65,14 +76,22 @@ export async function startRpcServer(port = 45678, hostname?: string) {
       bindHost = tsIps[0];
       console.log(`[rpc-server] Tailscale-only mode active: binding exclusively to ${bindHost}`);
     } else {
-      console.warn('[rpc-server] Tailscale-only requested but no Tailscale IPv4 found; defaulting to 0.0.0.0');
+      throw new Error('Tailscale-only mode requires an active Tailscale IPv4 address. Start Tailscale, then restart NexusLink.');
     }
   }
 
+  if (tailscaleOnly && bindHost) {
+    const tailnet = tailscaleIpv4FromCli();
+    if (!tailnet.includes(bindHost)) throw new Error('Tailscale-only mode can bind only to an active Tailscale address. Start Tailscale or correct NEXUSLINK_HOST.');
+  }
   bindHost = bindHost ?? '0.0.0.0';
+  await initializeAgentStore();
 
   function send(ws: WebSocket, msg: WsMessage) {
-    if (ws.readyState === 1) ws.send(JSON.stringify(msg));
+    if (ws.readyState === 1) {
+      if ((ws as any).getBufferedAmount?.() > 4 * 1024 * 1024) { ws.close(1013, 'Client too slow; reconnect to replay'); return; }
+      ws.send(JSON.stringify(msg));
+    }
   }
 
   function findSession(ws: WebSocket): string | undefined {
@@ -86,7 +105,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   function getAuthenticatedSessions(): WebSocket[] {
     const list: WebSocket[] = [];
     sessions.forEach((s) => {
-      if (s.token && validateToken(s.token) && s.ws.readyState === 1) {
+      if (s.token && (accessToken(s.token) || (s.isLocal && process.env.NEXUSLINK_DEV === '1' && validateToken(s.token))) && s.ws.readyState === 1) {
         list.push(s.ws);
       }
     });
@@ -101,29 +120,54 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   // Session/agent lifecycle pushes go to every authenticated client so a
   // reconnecting phone immediately sees current state.
   const broadcastAll = (msg: WsMessage) => {
-    for (const ws of getAuthenticatedSessions()) send(ws, msg);
+    for (const ws of getAuthenticatedSessions()) {
+      const s = sessions.get(findSession(ws)!);
+      if (s?.role === 'monitor' && s.topics?.has('agents')) {
+        if (msg.type === 'agent-session-update' || msg.type === 'agent-session-deleted') send(ws, msg);
+        if (msg.type === 'agent-event' && ['result','error','permission-request','status'].includes(msg.event.kind)) send(ws, { ...msg, event: { ...msg.event, text: undefined, toolInput: undefined, toolOutput: undefined } });
+      } else if (s?.role !== 'monitor' && ((msg.type.startsWith('agent-') && s?.topics?.has('agents')) || ((msg.type === 'windows-update' || msg.type === 'apps-update') && s?.topics?.has('windows')) || !msg.type.endsWith('-update') && msg.type !== 'agent-event')) send(ws, msg);
+    }
   };
   setSessionBroadcast(broadcastAll);
   setAgentBroadcast(broadcastAll);
   setAppsBroadcast(broadcastAll);
   setWindowsBroadcast(broadcastAll);
   setPushActiveSessionsCheck(() => getAuthenticatedSessions().length > 0);
-  initAppWatcher();
-  initWindowWatcher();
 
-  // Pre-warm agent icons in the background so RPC calls respond instantly
-  void Promise.all(Object.keys(AGENT_ICON_NAMES).map((id) => resolveAgentIcon(id))).catch(() => {});
 
-  async function dispatch(method: RpcMethod, params: Params, req: RpcRequest<RpcMethod>, ws: WebSocket) {
+  // Agent icons load only when requested; normal coding startup does no desktop work.
+
+  async function dispatch(method: string, params: Params, req: RpcRequest<RpcMethod>, ws: WebSocket) {
     const sessionId = findSession(ws);
     const session = sessionId ? sessions.get(sessionId) : undefined;
 
     // Block all privileged RPC calls until the session is authenticated.
-    if (!AUTH_METHODS.has(method) && !session?.authenticated) {
-      const response: RpcResponse = { id: req.id, error: 'not authenticated' };
+    if (!AUTH_METHODS.has(method) && (!session?.authenticated || !(accessToken(session.token) || (session.isLocal && process.env.NEXUSLINK_DEV === '1' && validateToken(session.token || ''))))) {
+      const response: RpcResponse = { id: req.id, error: 'Authentication expired. Reconnect to the PC.', code: 'UNAUTHENTICATED' };
       send(ws, { type: 'rpc-response', response });
       return;
     }
+
+    validateRequest(method, params);
+    if (session?.role === 'monitor' && !AUTH_METHODS.has(method) && !['session.subscribe','session.getCapabilities','session.heartbeat','agent.listSessions','activity.snapshot'].includes(method)) throw new WorkspaceError('PERMISSION_DENIED','Monitoring connections only receive task status.');
+    if (method === 'session.hello') { send(ws, {type:'rpc-response',response:{id:req.id,result:{protocolVersion:2}}}); return; }
+    if (method === 'session.enroll' || method === 'session.resume') {
+      const result = method === 'session.enroll' ? enroll(stringParam(params,'code'),stringParam(params,'name')) : resume(stringParam(params,'credential'),params.role === 'monitor' ? 'monitor':'control');
+      if (session) { session.token=result.token; session.authenticated=true; session.role=params.role === 'monitor' ? 'monitor':'control'; }
+      send(ws,{type:'rpc-response',response:{id:req.id,result}}); return;
+    }
+    if (method === 'session.subscribe') {
+      if (session) {
+        const topics = params.topics;
+        if (!Array.isArray(topics) || topics.some(t=> !['agents','windows','metrics'].includes(t as string))) throw new WorkspaceError('INVALID_ARGUMENT','Invalid subscriptions.');
+        session.topics = new Set(topics as string[]);
+        session.metricsInterval=params.metricsInterval===2000?2000:5000;
+        if(session.role === 'monitor') session.topics=new Set(['agents']);
+      }
+      send(ws,{type:'rpc-response',response:{id:req.id,result:{ok:true}}}); return;
+    }
+    const extra = await workspaceRequest(method,params,ws,accessToken(session?.token)?.deviceId || 'development');
+    if (extra.handled) { send(ws,{type:'rpc-response',response:{id:req.id,result:extra.result}}); return; }
 
     // Inputs (and typed text) bound to a virtual app session inject into that
     // session's X display; without a sessionId they hit the real desktop.
@@ -152,16 +196,16 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         result = await listProcesses();
         break;
       case 'process.kill':
-        result = undefined;
-        break;
+        throw new WorkspaceError('UNSUPPORTED', 'Process termination is not implemented on this host.');
       case 'terminal.create':
-        result = await handleTerminalCreate(
+        result = await once(accessToken(session?.token)?.deviceId || 'development', method, params, () => handleTerminalCreate(
           params.cols as number,
           params.rows as number,
           params.shell as string | undefined,
           ws,
           params.cwd as string | undefined,
-        );
+          { detached: params.detached === true, taskId: params.taskId as string | undefined },
+        ));
         break;
       case 'terminal.input':
         result = await handleTerminalInput(params.terminalId as string, params.data as string);
@@ -291,15 +335,23 @@ export async function startRpcServer(port = 45678, hostname?: string) {
       case 'clipboard.set':
         result = setClipboard(params.text as string, inputDisplay);
         break;
+      case 'agent.pendingApprovals':
+        result=pendingAgentApprovals(stringParam(params,'agentSessionId')); break;
+      case 'agent.historyPage':
+        result=await storedHistory(stringParam(params,'agentSessionId'),params); break;
+      case 'agent.archive':
+        result=await archiveAgentSession(stringParam(params,'agentSessionId'),params.archived!==false); break;
+      case 'activity.snapshot':
+        result={sessions:listAgentSessions(),...await storedActivity(Number(params.cursor)||0)}; break;
       case 'agent.list':
         result = listAgents();
         break;
       case 'agent.createSession':
-        result = createAgentSession(
+        result = await once(accessToken(session?.token)?.deviceId || 'development',method,params,()=>createAgentSession(
           params.agent as string,
           params.cwd as string | undefined,
           params.title as string | undefined,
-        );
+        ));
         break;
       case 'agent.renameSession':
         result = renameAgentSession(
@@ -331,7 +383,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         result = listAgentModels(params.agent as string, params.refresh === true);
         break;
       case 'agent.prompt':
-        result = promptAgent(
+        result = await once(accessToken(session?.token)?.deviceId || 'development',method,params,()=>promptAgent(
           params.agentSessionId as string,
           (params.text as string) ?? '',
           {
@@ -344,7 +396,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
               ? params.images as AgentImageAttachment[]
               : undefined,
           },
-        );
+        ));
         break;
       case 'agent.permission':
         result = resolveAgentPermission(
@@ -434,65 +486,9 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         );
         result = undefined;
         break;
-      case 'session.pair': {
-        const pairResult = await handleSessionPair(params.publicKey as string);
-        const pairingId = pairResult.totpIssuerUri.split('secret=')[1]?.split('&')[0] ?? '';
-        const sessionId = findSession(ws);
-        if (sessionId) {
-          const s = sessions.get(sessionId);
-          if (s) s.pairingData = { pairingId };
-        }
-        result = pairResult;
-        break;
-      }
-      case 'session.authenticate': {
-        const code = params.code as string;
-        const sessionId = findSession(ws);
-        const isLocal = sessionId ? sessions.get(sessionId)?.isLocal : false;
-        let token: string | undefined;
-
-        // Dev-only bypass for local connections — never active unless the host
-        // was explicitly started with NEXUSLINK_DEV=1 (Module D1.3).
-        if (isLocal && process.env.NEXUSLINK_DEV === '1') {
-          const dev = generateDevToken();
-          token = dev.token;
-        } else {
-          // TOTP pairing flow (no universal codes — Module D1.1)
-          const pairingData = sessionId ? sessions.get(sessionId)?.pairingData : undefined;
-          if (!pairingData?.pairingId) {
-            console.warn('[auth] authenticate rejected: no active pairing session');
-            const response: RpcResponse = { id: req.id, error: 'no active pairing session' };
-            send(ws, { type: 'rpc-response', response });
-            return;
-          }
-          const totpValid = await validateSessionTOTP(pairingData.pairingId, code);
-          if (!totpValid) {
-            const addr = sessionId ? sessions.get(sessionId)?.address : undefined;
-            // Flutter's Dart ECDH/TOTP does not always match WebCrypto. After
-            // session.pair on a LAN/Tailscale socket the handshake already
-            // happened — accept so the installed Android app can connect.
-            // Missing address: Bun requestIP is sometimes empty on Windows.
-            if (isTrustedLan(addr) || !addr) {
-              console.warn(`[auth] TOTP mismatch from ${addr ?? 'unknown'}; accepting LAN pairing`);
-            } else {
-              console.warn('[auth] authenticate rejected: invalid totp code (check client/host clock sync)');
-              const response: RpcResponse = { id: req.id, error: 'invalid totp code' };
-              send(ws, { type: 'rpc-response', response });
-              return;
-            }
-          }
-          const newToken = generateToken();
-          token = newToken.token;
-          console.log('[auth] session authenticated');
-        }
-
-        if (sessionId) {
-          const s = sessions.get(sessionId);
-          if (s) { s.token = token; s.authenticated = true; }
-        }
-        result = { token };
-        break;
-      }
+      case 'session.pair':
+      case 'session.authenticate':
+        throw new WorkspaceError('UNAUTHENTICATED', 'This host uses paired devices. Update NexusLink and enter the code from bun run host:pair.');
       case 'session.heartbeat':
         result = undefined;
         break;
@@ -523,8 +519,9 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         });
         break;
       default:
-        throw new Error(`unknown method: ${method}`);
+        throw new WorkspaceError('UNSUPPORTED', `Unsupported RPC method: ${method}`);
     }
+    if (['agent.createSession','agent.prompt','agent.renameSession','agent.setSessionCwd','agent.permission','agent.cancel','agent.close'].includes(method)) await flushAgents();
     const response: RpcResponse = { id: req.id, result };
     send(ws, { type: 'rpc-response', response });
   }
@@ -534,14 +531,17 @@ export async function startRpcServer(port = 45678, hostname?: string) {
     port,
     async fetch(req, srv) {
       const url = new URL(req.url);
+      const address = (srv as any).requestIP?.(req)?.address as string | undefined;
+      if (bindHost === '0.0.0.0' && !isPrivatePeer(address)) {
+        return new Response('Use Tailscale or a TLS reverse proxy for remote access.', { status: 403 });
+      }
       if (url.pathname === '/files') {
-        if (req.method === 'GET') return handleFileDownload(url);
+        if (req.method === 'GET' || req.method === 'HEAD') return handleFileDownload(url, req);
         if (req.method === 'POST' || req.method === 'PUT') return handleFileUpload(url, req);
         return new Response('Method not allowed', { status: 405 });
       }
       if (url.pathname === '/signal' || url.pathname === '/rpc') {
-        const isLocal = isLocalDev(req.url);
-        const address = (srv as any).requestIP?.(req)?.address;
+        const isLocal = ['127.0.0.1','::1','::ffff:127.0.0.1'].includes(address);
         // @ts-expect-error Bun upgrade supports data option in runtime
         if (srv.upgrade(req, { data: { isLocal, address } })) return;
         return new Response('Upgrade failed', { status: 400 });
@@ -558,7 +558,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         const isLocal = !!data?.isLocal;
         const address = data?.address;
         const devBypass = isLocal && process.env.NEXUSLINK_DEV === '1';
-        sessions.set(id, { ws, isLocal, address, authenticated: devBypass });
+        sessions.set(id, { ws: ws as unknown as WebSocket, isLocal, address, authenticated: devBypass });
       },
       async message(ws, raw) {
         let msg: WsMessage;
@@ -569,36 +569,50 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         }
         if (msg.type === 'rpc-request') {
           try {
-            await dispatch(msg.request.method, (msg.request.params as Params) ?? {}, msg.request, ws);
+            await dispatch(msg.request.method, (msg.request.params as Params) ?? {}, msg.request, ws as unknown as WebSocket);
           } catch (err) {
-            console.error('RPC Error:', err);
-            const response: RpcResponse = { id: msg.request.id, error: String(err) };
-            send(ws, { type: 'rpc-response', response });
+            if (err instanceof WorkspaceError) console.warn(`[rpc] ${err.code}: ${err.message}`);
+            else console.error('[rpc] request failed:', err instanceof Error ? err.name : 'unknown error');
+            const response: RpcResponse = { id: msg.request.id, error: err instanceof Error ? err.message : 'Request failed', code: (err as any)?.code || 'INTERNAL' };
+            send(ws as unknown as WebSocket, { type: 'rpc-response', response });
           }
         }
       },
       close(ws) {
+        detachTerminalsForSocket(ws as unknown as WebSocket);
         stopCapturesForSocket(ws as unknown as WebSocket);
         stopWebrtcForSocket(ws as unknown as WebSocket);
         sessions.forEach((s, id) => {
-          if (s.ws === ws) sessions.delete(id);
+          if (s.ws === (ws as unknown as WebSocket)) sessions.delete(id);
         });
       },
     },
   });
 
-  startSidecarReader(send, getPerfSnapshot, getAuthenticatedSessions);
+  const metricTimer = setInterval(async () => {
+    const now = Date.now();
+    const targets = [...sessions.values()].filter(s => s.topics?.has('metrics') && accessToken(s.token) && now-(s.lastMetric || 0)>=(s.metricsInterval || 5000));
+    if (!targets.length) return;
+    try { const data = await getPerfSnapshot(); for(const s of targets) { s.lastMetric=now; send(s.ws,{type:'perf-update',data}); } } catch(e) { console.error('Metrics unavailable'); }
+  },1000);
+  metricTimer.unref();
+  const windowTimer = setInterval(async () => {
+    const targets=[...sessions.values()].filter(s=>s.topics?.has('windows') && accessToken(s.token));
+    if(!targets.length) return;
+    try { const windows=await listWindows(); for(const s of targets) send(s.ws,{type:'windows-update',windows}); } catch {}
+  },5000);
+  windowTimer.unref();
   if (!tailscaleOnly && bindHost === '0.0.0.0') {
     startMdns(port);
   }
 
   const servesClient = await staticAvailable();
-  printLaunchBanner(port, servesClient);
-  console.log(`[rpc-server] listening on ${bindHost}:${port}`);
-  return { port };
+  printLaunchBanner(server.port, servesClient);
+  console.log(`[rpc-server] listening on ${bindHost}:${server.port}`);
+  return { port: server.port, stop: async () => { await closeAgentStore(); clearInterval(metricTimer); clearInterval(windowTimer); stopAllTerminals(); server.stop(true); } };
 }
 
 // Start the server if this file is run directly
 if (import.meta.main) {
-  startRpcServer(45678).catch(console.error);
+  startRpcServer(45678).catch(error => { console.error(error.message); process.exitCode = 1; });
 }
