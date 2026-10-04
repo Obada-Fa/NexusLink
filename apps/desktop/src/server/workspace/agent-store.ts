@@ -1,9 +1,12 @@
-import { dataDirectory } from './security';
+import { dataDirectory, hostId } from './security';
+import type { ActivityRecord } from '@nexuslink/rpc-types';
 let worker: Worker | undefined;
 let nextId=0;
 const pending=new Map<number,{resolve:(v:any)=>void,reject:(e:Error)=>void}>();
 let rows:any[]=[];
 let initialization:Promise<any> | undefined;
+let activityBroadcast:(record:ActivityRecord)=>void=()=>{};
+export function setActivityBroadcast(fn:(record:ActivityRecord)=>void){activityBroadcast=fn;}
 export function initializeAgentStore() {
   if(initialization) return initialization;
   worker=new Worker(new URL('./agent-store-worker.ts',import.meta.url).href);
@@ -28,9 +31,11 @@ export function flushAgents():Promise<void> {
   clearTimeout(timer);timer=undefined;
   if(!queue.length)return tail;
   const batch=queue;queue=[];
-  tail=tail.catch(()=>{}).then(async()=>{try {await call('batch',batch.map(e=>e.data));batch.forEach(e=>e.resolve());}catch(e){batch.forEach(row=>row.reject(e as Error));throw e;}});
+  tail=tail.catch(()=>{}).then(async()=>{try {const result=await call('batch',{entries:batch.map(e=>e.data),hostId:hostId()});for(const record of result.activity || [])activityBroadcast(record);batch.forEach(e=>e.resolve());}catch(e){batch.forEach(row=>row.reject(e as Error));throw e;}});
   return tail;
 }
 export async function storedHistory(task:string,options:any={}) { await flushAgents(); return call('history',{task,...options}); }
 export async function storedActivity(cursor:number) { await flushAgents(); return call('activity',{cursor}); }
+export async function storedActivityV2(cursor:number,throughCursor?:number) { await flushAgents(); return call('activityV2',{cursor,throughCursor}); }
+export async function activityOperation(op:'claim'|'dispatching'|'reject'|'finish'|'status'|'source',data:any) { return call(`action:${op}`,data); }
 export async function closeAgentStore() { await flushAgents();worker?.terminate();worker=undefined;initialization=undefined;rows=[]; }

@@ -43,6 +43,7 @@ import {
   buildOpencodeArgv,
   buildAgyArgv,
   claudeSpawnArgs,
+  buildCodexArgv,
   claudeUserContent,
   thinkingToEffort,
   isSafeAgentToolCall,
@@ -415,6 +416,16 @@ describe('composer flags and attachments', () => {
     expect(claudeSonnet).toContain('sonnet');
     expect(claudeSonnet).toContain('--effort');
     expect(claudeSonnet).toContain('high');
+    expect(claudeSpawnArgs({ bin: 'claude', resumeId: 'provider-session' })).toContain('--resume');
+    expect(claudeSpawnArgs({ bin: 'claude', resumeId: 'provider-session' })).toContain('provider-session');
+
+    const codex = buildCodexArgv({ bin: 'codex', cwd: '/work', text: 'continue', threadId: 'thread-id', model: 'gpt-5.3-codex', thinking: 'high' });
+    expect(codex).toContain('resume');
+    expect(codex).toContain('thread-id');
+    expect(codex).not.toContain('--thread');
+    expect(codex).toContain('model_reasoning_effort="high"');
+    expect(() => buildCodexArgv({ bin: 'codex', cwd: '/work', text: 'plan', mode: 'plan' })).toThrow('Plan mode');
+    expect(sessionIdFromEvent({ type: 'thread.started', thread_id: 'thread-id' })).toBe('thread-id');
 
     expect(isModelEffortSupported('antigravity', 'gemini-3.7-flash')).toBe(true);
     expect(isModelEffortSupported('antigravity', 'claude-sonnet-4-6')).toBe(false);
@@ -1048,4 +1059,3 @@ describe('permission resolution honesty', () => {
     setAgentBroadcast(null);
   });
 });
-

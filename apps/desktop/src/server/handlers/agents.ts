@@ -221,7 +221,7 @@ const AGENT_DEFS: AgentDef[] = [
     name: 'Codex',
     bin: 'codex',
     capabilities: {
-      modes: ['agent', 'plan'],
+      modes: ['agent'],
       thinkingLevels: ['low', 'medium', 'high'],
       models: CODEX_MODELS,
       images: true,
@@ -801,6 +801,7 @@ export function claudeSpawnArgs(opts: {
   model?: string;
   mode?: AgentMode;
   thinking?: string;
+  resumeId?: string | null;
 }): string[] {
   const argv = [
     opts.bin, '--print',
@@ -810,6 +811,7 @@ export function claudeSpawnArgs(opts: {
     '--permission-mode', opts.mode === 'plan' ? 'plan' : 'acceptEdits',
   ];
   if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
+  if (opts.resumeId) argv.push('--resume', opts.resumeId);
   if (isModelEffortSupported('claude', opts.model)) {
     const effort = thinkingToEffort(opts.thinking);
     if (effort && effort !== 'medium') argv.push('--effort', effort);
@@ -860,7 +862,7 @@ export function pendingAgentApprovals(id: string): AgentEvent[] {
 function settleApproval(session: AgentSession, requestId: string, outcome: string) {
   pendingApprovalEvents.get(session.info.agentSessionId)?.delete(requestId);
   session.info.taskState=pendingAgentApprovals(session.info.agentSessionId).length ? 'waiting' : session.info.busy ? 'running' : 'idle';
-  emit(session,{kind:'status',refId:requestId,text:`Approval ${outcome}.`});
+  emit(session,{kind:'status',refId:requestId,approvalOutcome:outcome as AgentEvent['approvalOutcome'],text:`Approval ${outcome}.`});
 }
 
 
@@ -1323,6 +1325,7 @@ export function promptAgent(
   const session = agentSessions.get(agentSessionId);
   if (!session || session.info.status !== 'running') return { ok: false };
   if(session.info.busy) throw new Error('This task is already working. Stop it before sending another prompt.');
+  if (session.info.agent === 'codex' && opts.mode === 'plan') throw new Error('Codex Plan mode is unavailable. Select Agent mode.');
   session.info.turnId=crypto.randomUUID();
   const materialized = materializeAgentImages(session.info.agentSessionId, opts.images);
   const key = parseEnvApiKey(text, ['CURSOR_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENAI_API_KEY']);
@@ -1524,7 +1527,7 @@ export function finishCliTurn(opts: {
 
 export function sessionIdFromEvent(msg: Record<string, unknown>): string | undefined {
   for (const key of [
-    'chatId', 'chat_id', 'sessionId', 'session_id', 'sessionID',
+    'chatId', 'chat_id', 'sessionId', 'session_id', 'sessionID', 'thread_id',
     'conversation_id', 'conversationId',
   ]) {
     if (typeof msg[key] === 'string' && msg[key]) return msg[key] as string;
@@ -2408,8 +2411,12 @@ class ClaudeAdapter implements AgentAdapter {
   private spawnKey = '';
   private sawResult = false;
   private streamedText = false;
+  private resumeId: string | null = null;
+  private hasPrompted = false;
 
   constructor(private session: AgentSession) {}
+
+  bindHostChat(id: string): void { this.resumeId = id; this.hasPrompted = true; }
 
   private ensureProc(opts?: AdapterPromptOpts): Proc {
     const key = `${opts?.model ?? ''}|${opts?.mode ?? 'agent'}|${opts?.thinking ?? ''}`;
@@ -2425,6 +2432,7 @@ class ClaudeAdapter implements AgentAdapter {
         model: opts?.model,
         mode: opts?.mode,
         thinking: opts?.thinking,
+        resumeId: this.resumeId,
       })),
       {
         cwd: this.session.info.cwd,
@@ -2467,7 +2475,8 @@ class ClaudeAdapter implements AgentAdapter {
     const s = this.session;
     const sid = sessionIdFromEvent(msg);
     if (sid) {
-      if (!this.session.info.hostChatId) {
+      this.resumeId = sid;
+      if (this.session.info.hostChatId !== sid) {
         this.session.info.hostChatId = sid;
         saveAgentSessionsToDisk();
         broadcast({ type: 'agent-session-update', session: { ...this.session.info } });
@@ -2577,7 +2586,14 @@ class ClaudeAdapter implements AgentAdapter {
   prompt(text: string, opts?: AdapterPromptOpts): void {
     this.sawResult = false;
     this.streamedText = false;
+    const nextKey = `${opts?.model ?? ''}|${opts?.mode ?? 'agent'}|${opts?.thinking ?? ''}`;
+    if (this.hasPrompted && !this.resumeId && (!this.proc || this.proc.exitCode !== null || this.proc.killed || this.spawnKey !== nextKey)) {
+      setBusy(this.session, false);
+      emit(this.session, { kind: 'error', text: 'Cannot continue Claude conversation: provider session ID was not recovered.' });
+      return;
+    }
     const proc = this.ensureProc(opts);
+    this.hasPrompted = true;
     const line = JSON.stringify({
       type: 'user',
       message: { role: 'user', content: claudeUserContent(text, opts?.images) },
@@ -3393,9 +3409,12 @@ export function buildCodexArgv(opts: {
   thinking?: string;
   imagePaths?: string[];
 }): string[] {
+  if (opts.mode === 'plan') throw new Error('Codex Plan mode is unavailable. Select Agent mode.');
   const argv = [opts.bin, 'exec', '--json', '--cd', opts.cwd];
   if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
-  if (opts.threadId) argv.push('--thread', opts.threadId);
+  const effort = thinkingToEffort(opts.thinking);
+  if (effort && isModelEffortSupported('codex', opts.model)) argv.push('--config', `model_reasoning_effort=${JSON.stringify(effort)}`);
+  if (opts.threadId) argv.push('resume', opts.threadId);
   for (const p of opts.imagePaths ?? []) argv.push('--image', p);
   argv.push(opts.text.trim() || 'Please proceed.');
   return argv;
@@ -3516,7 +3535,7 @@ class CodexAdapter implements AgentAdapter {
     const sid = sessionIdFromEvent(msg);
     if (sid) {
       this.threadId = sid;
-      if (!this.session.info.hostChatId) {
+      if (this.session.info.hostChatId !== sid) {
         this.session.info.hostChatId = sid;
         saveAgentSessionsToDisk();
         broadcast({ type: 'agent-session-update', session: { ...this.session.info } });

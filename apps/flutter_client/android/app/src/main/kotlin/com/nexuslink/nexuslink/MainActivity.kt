@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.Settings
 import android.provider.OpenableColumns
+import androidx.core.app.NotificationCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -62,8 +63,50 @@ class MainActivity : FlutterActivity() {
                     "download.share" -> { val id=(args["id"] as Number).toLong();val uri=downloads.getUriForDownloadedFile(id)?:throw Exception("Download is not complete");startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType(downloads.getMimeTypeForDownloadedFile(id)?:"application/octet-stream").putExtra(Intent.EXTRA_STREAM,uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),"Share file"));result.success(null) }
                     "upload.pick" -> { if(uploadResult!=null)throw Exception("An upload picker is already open");uploadResult=result;uploadArgs=args;startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE),44) }
                     "upload.retry" -> { val uri=conflictingUri?:throw Exception("No upload is waiting for overwrite approval");val saved=conflictingArgs?:throw Exception("Upload selection expired");conflictingUri=null;conflictingArgs=null;upload(uri,saved,result,true) }
-                    "live.status" -> result.success(mapOf("running" to LiveActivityService.running,"overlay" to Settings.canDrawOverlays(this),"bubble" to getSharedPreferences("live",0).getBoolean("bubble",false)))
+                    "live.status" -> {
+                        val livePrefs=getSharedPreferences("live",0)
+                        val notificationManager=getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+                        val channelAvailable=Build.VERSION.SDK_INT<26 || (notificationManager.getNotificationChannel("task_attention")?.importance ?: 0)>0
+                        val notificationPermission=Build.VERSION.SDK_INT<33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED
+                        result.success(mapOf(
+                            "running" to LiveActivityService.running,
+                            "monitoringRequested" to livePrefs.getBoolean("requested",false),
+                            "serviceRunning" to LiveActivityService.running,
+                            "connectionState" to LiveActivityService.connectionState,
+                            "notificationPermission" to notificationPermission,
+                            "notificationChannelAvailable" to (notificationManager.areNotificationsEnabled() && channelAvailable),
+                            "overlay" to Settings.canDrawOverlays(this),
+                            "overlayPermission" to Settings.canDrawOverlays(this),
+                            "bubble" to livePrefs.getBoolean("bubble",false),
+                            "bubbleRequested" to livePrefs.getBoolean("bubble",false),
+                            "bubbleVisible" to LiveActivityService.bubbleVisible,
+                            "bubbleHiddenReason" to LiveActivityService.bubbleHiddenReason,
+                            "notificationActionsEnabled" to livePrefs.getBoolean("actions",false),
+                            "actionsAllowedLocked" to livePrefs.getBoolean("actionsLocked",false),
+                            "lastActionableError" to LiveActivityService.lastError
+                        ))
+                    }
                     "live.permission" -> {startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,Uri.parse("package:$packageName")));result.success(null)}
+                    "live.appInfo" -> {startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:$packageName")));result.success(null)}
+                    "live.configureActions" -> {
+                        val livePrefs=getSharedPreferences("live",0)
+                        val locked=args["locked"]==true
+                        val enabled=args["enabled"]==true || locked
+                        livePrefs.edit().putBoolean("actions",enabled).putBoolean("actionsLocked",enabled && locked).apply()
+                        result.success(mapOf("enabled" to enabled,"locked" to (enabled && locked)))
+                    }
+                    "live.testNotification" -> {
+                        val manager=getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
+                        if(Build.VERSION.SDK_INT>=26 && manager.getNotificationChannel("task_attention")==null)
+                            manager.createNotificationChannel(android.app.NotificationChannel("task_attention","Task updates",android.app.NotificationManager.IMPORTANCE_HIGH))
+                        val allowed=(Build.VERSION.SDK_INT<33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED) && manager.areNotificationsEnabled()
+                        if(allowed)manager.notify("watch-test",9003,NotificationCompat.Builder(this,"task_attention")
+                            .setSmallIcon(R.mipmap.ic_launcher).setContentTitle("NexusLink watch test")
+                            .setContentText("Check whether this appears on your TicWatch.")
+                            .setContentIntent(android.app.PendingIntent.getActivity(this,9003,Intent(this,MainActivity::class.java),android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE))
+                            .setAutoCancel(true).build())
+                        result.success(mapOf("posted" to allowed))
+                    }
                     "live.start" -> {
                         val intent=Intent(this,LiveActivityService::class.java).putExtra("host",text("host"))
                         if(args.containsKey("bubble")) intent.putExtra("bubble",args["bubble"]==true)

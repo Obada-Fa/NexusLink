@@ -1,4 +1,4 @@
-import { initializeAgentStore, storedHistory, storedActivity, closeAgentStore, flushAgents } from './workspace/agent-store';
+import { initializeAgentStore, storedHistory, storedActivity, storedActivityV2, activityOperation, setActivityBroadcast, closeAgentStore, flushAgents } from './workspace/agent-store';
 import { archiveAgentSession, pendingAgentApprovals } from './handlers/agents';
 import { enroll, resume, accessToken, hostId, WorkspaceError, stringParam, isPrivatePeer } from './workspace/security';
 import { workspaceRequest, validateRequest, once } from './workspace/protocol';
@@ -66,6 +66,13 @@ const AUTH_METHODS = new Set<string>([
 
 export async function startRpcServer(port = 45678, hostname?: string) {
   const sessions = new Map<string, Session>();
+  const taskMutations = new Map<string, Promise<unknown>>();
+  async function withTaskMutation<T>(task:string, action:()=>Promise<T>):Promise<T> {
+    const previous=taskMutations.get(task) ?? Promise.resolve();
+    const run=previous.catch(()=>{}).then(action);
+    taskMutations.set(task,run);
+    try {return await run;} finally {if(taskMutations.get(task)===run)taskMutations.delete(task);}
+  }
 
   let bindHost = hostname ?? process.env.NEXUSLINK_HOST ?? process.env.HOST;
   const tailscaleOnly = process.env.NEXUSLINK_TAILSCALE_ONLY === '1' || process.env.TAILSCALE_ONLY === '1';
@@ -88,6 +95,21 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   await initializeAgentStore();
 
   function send(ws: WebSocket, msg: WsMessage) {
+    // Handshake and RPC errors must still reach an unauthenticated socket.
+    // Every unsolicited event needs a current credential at delivery time,
+    // including PTY output queued after an attach or during revocation.
+    if (msg.type !== 'rpc-response') {
+      const id = findSession(ws);
+      const session = id ? sessions.get(id) : undefined;
+      if (!session?.authenticated || !(accessToken(session.token) ||
+          (session.isLocal && process.env.NEXUSLINK_DEV === '1' && validateToken(session.token || '')))) {
+        detachTerminalsForSocket(ws);
+        stopCapturesForSocket(ws);
+        stopWebrtcForSocket(ws);
+        if (ws.readyState === 1) ws.close(1008, 'Authorization expired');
+        return;
+      }
+    }
     if (ws.readyState === 1) {
       if ((ws as any).getBufferedAmount?.() > 4 * 1024 * 1024) { ws.close(1013, 'Client too slow; reconnect to replay'); return; }
       ws.send(JSON.stringify(msg));
@@ -116,6 +138,9 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   setSignalingSend(send);
   setCaptureSend(send);
   setWebrtcSend(send);
+  setActivityBroadcast(record=>{
+    for(const s of sessions.values())if(s.topics?.has('activity'))send(s.ws,{type:'activity-update',record});
+  });
 
   // Session/agent lifecycle pushes go to every authenticated client so a
   // reconnecting phone immediately sees current state.
@@ -149,7 +174,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
     }
 
     validateRequest(method, params);
-    if (session?.role === 'monitor' && !AUTH_METHODS.has(method) && !['session.subscribe','session.getCapabilities','session.heartbeat','agent.listSessions','activity.snapshot'].includes(method)) throw new WorkspaceError('PERMISSION_DENIED','Monitoring connections only receive task status.');
+    if (session?.role === 'monitor' && !AUTH_METHODS.has(method) && !['session.subscribe','session.getCapabilities','session.heartbeat','agent.listSessions','activity.snapshot','activity.snapshotV2','activity.action','activity.actionStatus'].includes(method)) throw new WorkspaceError('PERMISSION_DENIED','Monitoring connections only receive task status and scoped notification actions.');
     if (method === 'session.hello') { send(ws, {type:'rpc-response',response:{id:req.id,result:{protocolVersion:2}}}); return; }
     if (method === 'session.enroll' || method === 'session.resume') {
       const result = method === 'session.enroll' ? enroll(stringParam(params,'code'),stringParam(params,'name')) : resume(stringParam(params,'credential'),params.role === 'monitor' ? 'monitor':'control');
@@ -159,10 +184,10 @@ export async function startRpcServer(port = 45678, hostname?: string) {
     if (method === 'session.subscribe') {
       if (session) {
         const topics = params.topics;
-        if (!Array.isArray(topics) || topics.some(t=> !['agents','windows','metrics'].includes(t as string))) throw new WorkspaceError('INVALID_ARGUMENT','Invalid subscriptions.');
+        if (!Array.isArray(topics) || topics.some(t=> !['agents','windows','metrics','activity'].includes(t as string))) throw new WorkspaceError('INVALID_ARGUMENT','Invalid subscriptions.');
         session.topics = new Set(topics as string[]);
         session.metricsInterval=params.metricsInterval===2000?2000:5000;
-        if(session.role === 'monitor') session.topics=new Set(['agents']);
+        if(session.role === 'monitor') session.topics=new Set(['agents',...(topics.includes('activity')?['activity']:[])]);
       }
       send(ws,{type:'rpc-response',response:{id:req.id,result:{ok:true}}}); return;
     }
@@ -343,6 +368,47 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         result=await archiveAgentSession(stringParam(params,'agentSessionId'),params.archived!==false); break;
       case 'activity.snapshot':
         result={sessions:listAgentSessions(),...await storedActivity(Number(params.cursor)||0)}; break;
+      case 'activity.snapshotV2':
+        result=await storedActivityV2(Number(params.cursor)||0,params.throughCursor===undefined?undefined:Number(params.throughCursor)); break;
+      case 'activity.actionStatus': {
+        const device=accessToken(session?.token)?.deviceId || 'development';
+        result=await activityOperation('status',{device,operationId:params.operationId});
+        if(!result)throw new WorkspaceError('NOT_FOUND','Notification action operation was not found.');
+        break;
+      }
+      case 'activity.action': {
+        const device=accessToken(session?.token)?.deviceId || 'development';
+        const task=stringParam(params,'agentSessionId');
+        result=await withTaskMutation(task,async()=>{
+          const operationId=stringParam(params,'operationId');
+          const args=JSON.stringify({hostId:params.hostId,agentSessionId:task,expectedTurnId:params.expectedTurnId,sourceCursor:params.sourceCursor,action:params.action,requestId:params.requestId,text:params.text});
+          const claimed=await activityOperation('claim',{device,operationId,args});
+          if(!claimed.fresh)return claimed;
+          try {
+            if(params.hostId!==hostId())throw new WorkspaceError('INVALID_ARGUMENT','Notification belongs to another host.');
+            const source=await activityOperation('source',{sourceCursor:params.sourceCursor});
+            if(!source || source.hostId!==hostId() || source.agentSessionId!==task || source.turnId!==params.expectedTurnId || !source.availableActions?.includes(params.action))throw new WorkspaceError('STALE_ACTION','Notification is no longer actionable.');
+            if(params.action!=='reply' && source.requestId!==params.requestId)throw new WorkspaceError('STALE_ACTION','Approval request has changed.');
+            const current=listAgentSessions().find(s=>s.agentSessionId===task);
+            if(!current || current.archived || current.status!=='running' || current.turnId!==params.expectedTurnId)throw new WorkspaceError('STALE_ACTION','Task or turn has changed.');
+            if(params.action==='reply' && (current.busy || !['idle','completed','failed'].includes(current.taskState || '')))throw new WorkspaceError('STALE_ACTION','Task is not ready for a reply.');
+            if(params.action!=='reply' && !pendingAgentApprovals(task).some(e=>e.refId===params.requestId && e.turnId===params.expectedTurnId))throw new WorkspaceError('STALE_ACTION','Approval is no longer pending.');
+          }catch(error){
+            return await activityOperation('reject',{device,operationId,reason:error instanceof Error?error.message:'Action no longer available'});
+          }
+          await activityOperation('dispatching',{device,operationId});
+          try {
+            const accepted=params.action==='reply'
+              ? promptAgent(task,String(params.text))
+              : resolveAgentPermission(task,String(params.requestId),params.action==='approve');
+            const state=accepted.ok?'succeeded':'rejected';
+            return await activityOperation('finish',{device,operationId,state,reason:accepted.reason});
+          }catch(error){
+            return await activityOperation('finish',{device,operationId,state:'uncertain',reason:error instanceof Error?error.message:'Delivery outcome unknown'});
+          }
+        });
+        break;
+      }
       case 'agent.list':
         result = listAgents();
         break;
@@ -383,7 +449,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         result = listAgentModels(params.agent as string, params.refresh === true);
         break;
       case 'agent.prompt':
-        result = await once(accessToken(session?.token)?.deviceId || 'development',method,params,()=>promptAgent(
+        result = await withTaskMutation(String(params.agentSessionId),()=>once(accessToken(session?.token)?.deviceId || 'development',method,params,()=>promptAgent(
           params.agentSessionId as string,
           (params.text as string) ?? '',
           {
@@ -396,14 +462,14 @@ export async function startRpcServer(port = 45678, hostname?: string) {
               ? params.images as AgentImageAttachment[]
               : undefined,
           },
-        ));
+        )));
         break;
       case 'agent.permission':
-        result = resolveAgentPermission(
+        result = await withTaskMutation(String(params.agentSessionId),async()=>resolveAgentPermission(
           params.agentSessionId as string,
           params.requestId as string,
           params.allow as boolean,
-        );
+        ));
         break;
       case 'agent.setApprovalMode':
         result = setAgentApprovalMode(

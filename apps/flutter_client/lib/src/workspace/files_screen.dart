@@ -543,29 +543,53 @@ class _TransfersScreenState extends ConsumerState<TransfersScreen>
   List<Map<String, dynamic>> _rows = [];
   String? _error;
   Timer? _timer;
+  bool _foreground = true;
+  bool _refreshing = false;
+  bool _wasVisible = false;
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _start();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _syncPolling();
+    });
   }
 
-  void _start() {
-    _refresh();
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _syncPolling();
+    });
+  }
+
+  bool get _visible =>
+      _foreground &&
+      ref.read(workspaceTabProvider) == 1 &&
+      (ModalRoute.of(context)?.isCurrent ?? false);
+
+  void _syncPolling() {
+    final visible = _visible;
+    if (visible && !_wasVisible) _refresh();
+    _wasVisible = visible;
     _timer?.cancel();
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _refresh());
+    if (visible &&
+        _rows.any(
+          (r) => r['status'] == 'running' || r['status'] == 'pending',
+        )) {
+      _timer = Timer.periodic(const Duration(seconds: 1), (_) => _refresh());
+    }
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _start();
-    } else {
-      _timer?.cancel();
-    }
+    _foreground = state == AppLifecycleState.resumed;
+    _syncPolling();
   }
 
   Future<void> _refresh() async {
+    if (_refreshing || !_visible) return;
+    _refreshing = true;
     try {
       final rows = await PlatformBridge.call('download.list') as List;
       if (mounted) {
@@ -575,6 +599,9 @@ class _TransfersScreenState extends ConsumerState<TransfersScreen>
       }
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
+    } finally {
+      _refreshing = false;
+      if (mounted) _syncPolling();
     }
   }
 
@@ -586,92 +613,99 @@ class _TransfersScreenState extends ConsumerState<TransfersScreen>
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(
-      title: const Text('Downloads'),
-      actions: [
-        IconButton(
-          tooltip: 'Android downloads',
-          onPressed: () => PlatformBridge.call('download.show'),
-          icon: const Icon(Icons.folder_open),
-        ),
-      ],
-    ),
-    body: _error != null
-        ? Center(child: Text(_error!))
-        : ListView(
-            children: [
-              for (final row in _rows)
-                ListTile(
-                  title: Text(row['name'] as String),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '${row['status']}${row['status'] == 'failed' ? ' · Error ${row['reason']}' : ''}',
-                      ),
-                      if (row['status'] == 'running')
-                        LinearProgressIndicator(
-                          value: (row['total'] as num? ?? 0) > 0
-                              ? (row['bytes'] as num) / (row['total'] as num)
-                              : null,
-                        ),
-                    ],
-                  ),
-                  trailing: PopupMenuButton<String>(
-                    onSelected: (action) async {
-                      try {
-                        if (action == 'retry') {
-                          final client = ref.read(activeClientProvider);
-                          if ((client?.hostId ?? client?.wsUrl) !=
-                              row['host']) {
-                            throw Exception(
-                              'Connect to the original PC to retry.',
-                            );
-                          }
-                          await enqueueDownload(
-                            ref,
-                            row['path'] as String,
-                            row['name'] as String,
-                          );
-                        } else {
-                          await PlatformBridge.call('download.$action', {
-                            'id': row['id'],
-                          });
-                        }
-                        await _refresh();
-                      } catch (e) {
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(
-                            context,
-                          ).showSnackBar(SnackBar(content: Text('$e')));
-                        }
-                      }
-                    },
-                    itemBuilder: (_) => row['status'] == 'completed'
-                        ? [
-                            const PopupMenuItem(
-                              value: 'open',
-                              child: Text('Open'),
-                            ),
-                            const PopupMenuItem(
-                              value: 'share',
-                              child: Text('Share'),
-                            ),
-                          ]
-                        : [
-                            const PopupMenuItem(
-                              value: 'cancel',
-                              child: Text('Cancel'),
-                            ),
-                            const PopupMenuItem(
-                              value: 'retry',
-                              child: Text('Retry'),
-                            ),
-                          ],
-                  ),
-                ),
-            ],
+  Widget build(BuildContext context) {
+    ref.listen(workspaceTabProvider, (_, _) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _syncPolling();
+      });
+    });
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Downloads'),
+        actions: [
+          IconButton(
+            tooltip: 'Android downloads',
+            onPressed: () => PlatformBridge.call('download.show'),
+            icon: const Icon(Icons.folder_open),
           ),
-  );
+        ],
+      ),
+      body: _error != null
+          ? Center(child: Text(_error!))
+          : ListView(
+              children: [
+                for (final row in _rows)
+                  ListTile(
+                    title: Text(row['name'] as String),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${row['status']}${row['status'] == 'failed' ? ' · Error ${row['reason']}' : ''}',
+                        ),
+                        if (row['status'] == 'running')
+                          LinearProgressIndicator(
+                            value: (row['total'] as num? ?? 0) > 0
+                                ? (row['bytes'] as num) / (row['total'] as num)
+                                : null,
+                          ),
+                      ],
+                    ),
+                    trailing: PopupMenuButton<String>(
+                      onSelected: (action) async {
+                        try {
+                          if (action == 'retry') {
+                            final client = ref.read(activeClientProvider);
+                            if ((client?.hostId ?? client?.wsUrl) !=
+                                row['host']) {
+                              throw Exception(
+                                'Connect to the original PC to retry.',
+                              );
+                            }
+                            await enqueueDownload(
+                              ref,
+                              row['path'] as String,
+                              row['name'] as String,
+                            );
+                          } else {
+                            await PlatformBridge.call('download.$action', {
+                              'id': row['id'],
+                            });
+                          }
+                          await _refresh();
+                        } catch (e) {
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(
+                              context,
+                            ).showSnackBar(SnackBar(content: Text('$e')));
+                          }
+                        }
+                      },
+                      itemBuilder: (_) => row['status'] == 'completed'
+                          ? [
+                              const PopupMenuItem(
+                                value: 'open',
+                                child: Text('Open'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'share',
+                                child: Text('Share'),
+                              ),
+                            ]
+                          : [
+                              const PopupMenuItem(
+                                value: 'cancel',
+                                child: Text('Cancel'),
+                              ),
+                              const PopupMenuItem(
+                                value: 'retry',
+                                child: Text('Retry'),
+                              ),
+                            ],
+                    ),
+                  ),
+              ],
+            ),
+    );
+  }
 }
