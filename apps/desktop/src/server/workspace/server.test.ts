@@ -5,6 +5,7 @@ import {join} from 'node:path';
 import {enableEnrollment,revokeDevice} from './security';
 import {startRpcServer} from '../index';
 import {persistAgent,flushAgents,storedActivityV2} from './agent-store';
+import {hasPty} from '../handlers/terminal';
 const directory=await mkdtemp(join(tmpdir(),'nexuslink-rpc-test-'));
 const previousDataDirectory=process.env.NEXUSLINK_DATA_DIR;
 process.env.NEXUSLINK_DATA_DIR=directory;
@@ -41,7 +42,7 @@ test('real dispatcher rejects unauthenticated RPC and HTTP, then revocation inva
   } finally {ws.close();}
 },20000);
 
-test('revoked attachment receives no further terminal output and shell survives',async()=>{
+test.skipIf(!hasPty())('revoked attachment receives no further terminal output and shell survives',async()=>{
   const first=await client();const second=await client();
   try {
     const firstAuth=(await first.call('session.enroll',{code:enableEnrollment(),name:'revoked phone'})).result;
@@ -57,6 +58,28 @@ test('revoked attachment receives no further terminal output and shell survives'
     expect((await second.call('terminal.list')).result.some((s:any)=>s.terminalId===created.terminalId)).toBe(true);
     await second.call('terminal.kill',{terminalId:created.terminalId});
   } finally {first.ws.close();second.ws.close();}
+},20000);
+
+test('chat RPC authenticates, excludes monitors, and tracks duplicate delivery',async()=>{
+  const control=await client();const monitor=await client();
+  try {
+    expect((await control.call('chat.list')).code).toBe('UNAUTHENTICATED');
+    const auth=(await control.call('session.enroll',{code:enableEnrollment(),name:'chat phone'})).result;
+    await monitor.call('session.resume',{credential:auth.credential,role:'monitor'});
+    expect((await control.call('session.getCapabilities')).result.features).toContain('chat.library.v1');
+    for(const method of ['chat.list','chat.folders','chat.historyPage','chat.refresh','chat.subscribe','chat.send','chat.sendStatus'])expect((await monitor.call(method)).code).toBe('PERMISSION_DENIED');
+    const created=(await control.call('agent.createSession',{agent:'mock',cwd:directory,title:'Chat library test'})).result;
+    const library=(await control.call('chat.list')).result;
+    const chat=library.items.find((row:any)=>row.agentSessionId===created.agentSessionId);
+    expect(chat).toBeDefined();
+    const params={chatId:chat.id,text:'Hello',operationId:crypto.randomUUID()};
+    expect((await control.call('chat.send',params)).result.state).toBe('delivered');
+    expect((await control.call('chat.send',params)).result.state).toBe('delivered');
+    expect((await control.call('chat.sendStatus',{operationId:params.operationId})).result.state).toBe('delivered');
+    await Bun.sleep(650);
+    const page=(await control.call('chat.historyPage',{chatId:chat.id})).result;
+    expect(page.events.filter((event:any)=>event.kind==='user')).toHaveLength(1);
+  } finally {control.ws.close();monitor.ws.close();}
 },20000);
 
 test('activity v2 replays committed records and deduplicates monitor replies',async()=>{

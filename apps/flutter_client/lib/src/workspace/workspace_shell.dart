@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../screens/agent_screen.dart';
+import '../chats/chat_library_screen.dart';
 import '../services/notification_service.dart';
 import '../screens/terminal_screen.dart';
 import '../screens/launcher_screen.dart';
@@ -128,7 +128,7 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
                           key: _keys[i],
                           onGenerateRoute: (_) => MaterialPageRoute(
                             builder: (_) => switch (i) {
-                              0 => const AgentScreen(),
+                              0 => const ChatLibraryScreen(),
                               1 => const WorkspaceFilesScreen(),
                               2 => const TerminalScreen(),
                               _ => const PcScreen(),
@@ -153,7 +153,7 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
                     destinations: const [
                       NavigationDestination(
                         icon: Icon(Icons.auto_awesome_outlined),
-                        label: 'Agents',
+                        label: 'Chats',
                       ),
                       NavigationDestination(
                         icon: Icon(Icons.folder_outlined),

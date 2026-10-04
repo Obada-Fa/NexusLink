@@ -84,6 +84,12 @@
         "typescript": "^5.4.0",
       },
     },
+    "packages/chat-core": {
+      "name": "@nexuslink/chat-core",
+      "dependencies": {
+        "@nexuslink/rpc-types": "workspace:*",
+      },
+    },
     "packages/gesture-engine": {
       "name": "@nexuslink/gesture-engine",
       "devDependencies": {
@@ -385,6 +391,8 @@
     "@next/swc-win32-ia32-msvc": ["@next/swc-win32-ia32-msvc@14.2.33", "", { "os": "win32", "cpu": "ia32" }, "sha512-pc9LpGNKhJ0dXQhZ5QMmYxtARwwmWLpeocFmVG5Z0DzWq5Uf0izcI8tLc+qOpqxO1PWqZ5A7J1blrUIKrIFc7Q=="],
 
     "@next/swc-win32-x64-msvc": ["@next/swc-win32-x64-msvc@14.2.33", "", { "os": "win32", "cpu": "x64" }, "sha512-nOjfZMy8B94MdisuzZo9/57xuFVLHJaDj5e/xrduJp9CV2/HrfxTRH2fbyLe+K9QT41WBLUd4iXX3R7jBp0EUg=="],
+
+    "@nexuslink/chat-core": ["@nexuslink/chat-core@workspace:packages/chat-core"],
 
     "@nexuslink/desktop": ["@nexuslink/desktop@workspace:apps/desktop"],
 

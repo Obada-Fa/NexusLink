@@ -20,6 +20,8 @@ import {
   parseOpencodeExport,
 } from '../host-chats';
 import { realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+const testFolder = tmpdir();
 
 describe('cleanMessageText', () => {
   test('strips timestamp and extracts inner user_query text', () => {
@@ -190,7 +192,7 @@ describe('Antigravity workspace paths', () => {
       .toBe('/home/user/Projects/mobile/opendesktop');
     expect(fileUriToPath('file:///home/user/Programming/market%20place'))
       .toBe('/home/user/Programming/market place');
-    expect(parseAgyWorkspaceUris('["file:///tmp"]')).toBe(realpathSync('/tmp'));
+    expect(parseAgyWorkspaceUris(JSON.stringify([testFolder]))).toBe(realpathSync(testFolder));
     expect(parseAgyWorkspaceUris('')).toBe('');
   });
 
@@ -198,14 +200,14 @@ describe('Antigravity workspace paths', () => {
     expect(cwdFromAgyProjectResources({
       id: 'abc',
       projectResources: {
-        resources: [{ gitFolder: { folderUri: 'file:///tmp' } }],
+        resources: [{ gitFolder: { folderUri: testFolder } }],
       },
-    })).toBe(realpathSync('/tmp'));
+    })).toBe(realpathSync(testFolder));
     expect(cwdFromAgyProjectResources({
-      resources: [{ folderUri: 'file:///tmp' }],
-    })).toBe(realpathSync('/tmp'));
+      resources: [{ folderUri: testFolder }],
+    })).toBe(realpathSync(testFolder));
     expect(cwdFromAgyProjectResources({ id: 'default-cli-project', projectResources: {} })).toBe('');
-    expect(cwdFromAgyProjectResources({ name: '/tmp', projectResources: {} })).toBe(realpathSync('/tmp'));
+    expect(cwdFromAgyProjectResources({ name: testFolder, projectResources: {} })).toBe(realpathSync(testFolder));
   });
 });
 
@@ -219,11 +221,11 @@ describe('Antigravity CLI history cwd', () => {
   test('parses history.jsonl workspace lines', () => {
     expect(parseAgyCliHistoryLine({
       display: 'uploadapk assets on github',
-      workspace: '/tmp',
+      workspace: testFolder,
       conversationId: 'abc',
     })).toEqual({
       conversationId: 'abc',
-      workspace: realpathSync('/tmp'),
+      workspace: realpathSync(testFolder),
       display: 'uploadapk assets on github',
     });
     expect(parseAgyCliHistoryLine({ display: 'no folder' })).toBeNull();
@@ -257,8 +259,12 @@ describe('unified chat list metadata', () => {
   });
 
   test('reconstructs cwd from dashed project slugs', () => {
-    expect(cwdFromDashedSlug('tmp')).toBe(realpathSync('/tmp'));
-    expect(cwdFromDashedSlug('-tmp')).toBe(realpathSync('/tmp'));
+    if (process.platform === 'win32') {
+      expect(cwdFromDashedSlug('nexuslink-missing-project-123456789')).toBe('');
+    } else {
+      expect(cwdFromDashedSlug('tmp')).toBe(realpathSync('/tmp'));
+      expect(cwdFromDashedSlug('-tmp')).toBe(realpathSync('/tmp'));
+    }
   });
 
   test('fills a missing source from the agent id', () => {

@@ -3,9 +3,19 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 export function appDataDir(): string {
+  if (process.env.NEXUSLINK_DATA_DIR) return process.env.NEXUSLINK_DATA_DIR;
   return process.env.APPDATA
     ? join(process.env.APPDATA, 'NexusLink')
     : join(homedir(), 'AppData', 'Roaming', 'NexusLink');
+}
+
+export function persistentHostId(): string {
+  const path = join(appDataDir(), 'host-id');
+  mkdirSync(appDataDir(), { recursive: true });
+  if (!existsSync(path)) writeFileSync(path, crypto.randomUUID(), { flag: 'wx' });
+  const id = readFileSync(path, 'utf8').trim();
+  if (!/^[a-f0-9-]{36}$/i.test(id)) throw new Error('Invalid saved NexusLink host identity.');
+  return id;
 }
 
 function tokensPath(): string {

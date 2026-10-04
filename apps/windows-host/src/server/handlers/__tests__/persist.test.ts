@@ -7,6 +7,8 @@ describe('session token persist', () => {
   test('round-trips a token through %APPDATA% override', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'nexuslink-persist-'));
     const prev = process.env.APPDATA;
+    const previousData = process.env.NEXUSLINK_DATA_DIR;
+    delete process.env.NEXUSLINK_DATA_DIR;
     process.env.APPDATA = dir;
     try {
       const persist = await import('../../persist');
@@ -17,6 +19,7 @@ describe('session token persist', () => {
       expect(raw).toContain('tok-1');
     } finally {
       process.env.APPDATA = prev;
+      process.env.NEXUSLINK_DATA_DIR = previousData;
       rmSync(dir, { recursive: true, force: true });
     }
   });

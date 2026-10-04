@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+      - 'test-v*'
   workflow_dispatch:
 
 permissions:
@@ -12,16 +13,24 @@ permissions:
 jobs:
   windows-host:
     runs-on: windows-latest
+    env:
+      NEXUSLINK_PFX_B64: ${{ secrets.NEXUSLINK_PFX_B64 }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --no-progress -y
+      - name: Add NSIS to PATH
+        shell: pwsh
+        run: '"${env:ProgramFiles(x86)}\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append'
       - name: Build host and installer
         shell: pwsh
         run: ./packaging/windows/build.ps1
       - name: Authenticode (optional)
-        if: ${{ secrets.NEXUSLINK_PFX_B64 != '' }}
+        if: ${{ env.NEXUSLINK_PFX_B64 != '' }}
         shell: pwsh
         env:
           NEXUSLINK_PFX_B64: ${{ secrets.NEXUSLINK_PFX_B64 }}
@@ -43,6 +52,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release-notes.md
           files: |
             dist/NexusLink-Host-Setup.exe
           generate_release_notes: true
+          prerelease: ${{ startsWith(github.ref_name, 'test-') }}

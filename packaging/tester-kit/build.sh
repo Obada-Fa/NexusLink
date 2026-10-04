@@ -28,11 +28,11 @@ mkdir -p "$LINUX_OUT" "$WIN_OUT"
 
 echo "==> Compiling Linux host"
 bun build --compile --outfile "$LINUX_OUT/nexuslink-host" \
-  apps/desktop/src/server/index.ts
+  apps/desktop/src/server/index.ts apps/desktop/src/server/workspace/agent-store-worker.ts packages/chat-core/src/worker.ts packages/chat-core/src/providers/worker.ts
 
 echo "==> Compiling Windows host (cross)"
 bun build --compile --target=bun-windows-x64 --outfile "$WIN_OUT/nexuslink-host.exe" \
-  apps/windows-host/src/server/index.ts
+  apps/windows-host/src/server/index.ts apps/desktop/src/server/workspace/agent-store-worker.ts packages/chat-core/src/worker.ts packages/chat-core/src/providers/worker.ts
 
 APK_SRC=""
 if [[ -x "$FLUTTER" ]]; then

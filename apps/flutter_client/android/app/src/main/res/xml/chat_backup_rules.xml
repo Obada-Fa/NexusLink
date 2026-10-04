@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="database" path="chat-cache.sqlite" />
+    <exclude domain="database" path="chat-cache.sqlite-wal" />
+    <exclude domain="database" path="chat-cache.sqlite-shm" />
+    <exclude domain="database" path="chat-cache.sqlite-journal" />
+</full-backup-content>

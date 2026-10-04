@@ -24,6 +24,10 @@ import { printLaunchBanner, tailscaleIpv4FromCli } from './launch-banner';
 import { startMdns } from './mdns';
 import { handleFileDownload, handleFileUpload } from './files-http';
 import { startPerfBroadcast } from './perf';
+import { appDataDir, persistentHostId } from './persist';
+import { initializeAgentStore, storedHistory, closeAgentStore } from '../../../desktop/src/server/workspace/agent-store';
+import { createChatLibrary } from '../../../desktop/src/server/workspace/chat-library';
+import { CHAT_METHODS } from '../../../../packages/chat-core/src/index';
 
 type Params = Record<string, unknown>;
 
@@ -45,6 +49,13 @@ const AUTH_METHODS = new Set<string>([
 
 export async function startRpcServer(port = 45678, hostname?: string) {
   const sessions = new Map<string, Session>();
+  const stableHostId = persistentHostId();
+  await initializeAgentStore({directory:appDataDir(),hostId:stableHostId});
+  const chats = await createChatLibrary(appDataDir(),stableHostId,(connection,revision)=>{
+    const ws=connection as WebSocket;
+    const id=findSession(ws); const session=id?sessions.get(id):undefined;
+    if(session?.authenticated && session.token && validateToken(session.token)) send(ws,{type:'chat-library-update',revision});
+  });
 
   let bindHost = hostname ?? process.env.NEXUSLINK_HOST ?? process.env.HOST;
   const tailscaleOnly = process.env.NEXUSLINK_TAILSCALE_ONLY === '1' || process.env.TAILSCALE_ONLY === '1';
@@ -101,7 +112,19 @@ export async function startRpcServer(port = 45678, hostname?: string) {
     }
 
     let result: unknown;
+    if (method.startsWith('chat.')) {
+      // Legacy pairing rotates tokens on reconnect. Operations remain in the
+      // authenticated host-control namespace so a reconnect can reconcile them.
+      result = await chats.request(method, params, ws, 'windows-control');
+      send(ws, {type:'rpc-response',response:{id:req.id,result}}); return;
+    }
     switch (method) {
+      case 'session.getCapabilities':
+        result = {protocolVersion:1,hostId:stableHostId,platform:'win32',methods:[...CHAT_METHODS,'agent.historyPage'],features:['chat.library.v1','agent.historyPage'],files:{open:true}};
+        break;
+      case 'agent.historyPage':
+        result = await storedHistory(params.agentSessionId as string,params);
+        break;
       case 'fs.list':
         result = await handleFsList(params.path as string, params.showHidden as boolean | undefined);
         break;
@@ -449,6 +472,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         }
       },
       close(ws) {
+        chats.subscribe(ws, false);
         killTerminalsForSocket(ws as unknown as WebSocket);
         stopCapturesForSocket(ws as unknown as WebSocket);
         sessions.forEach((s, id) => {
@@ -468,7 +492,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   const servesClient = await staticAvailable();
   printLaunchBanner(port, servesClient);
   console.log(`[windows-host] listening on ${bindHost}:${server.port}`);
-  return { port: server.port };
+  return { port: server.port, stop: async () => { await chats.close(); await closeAgentStore(); stopTray(); server.stop(true); } };
 }
 
 if (import.meta.main) {

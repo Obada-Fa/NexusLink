@@ -128,6 +128,8 @@ self.onmessage = (message: MessageEvent) => {
     } else if(op==='action:source') {
       const row=db.query('SELECT body FROM activity_v2 WHERE cursor=?').get(data.sourceCursor) as any;
       result=row?JSON.parse(row.body):null;
+    } else if(op==='close') {
+      db.close(); result=true;
     }
     self.postMessage({id,result});
   } catch(error) { self.postMessage({id,error:error instanceof Error?error.message:'Storage failure'}); }

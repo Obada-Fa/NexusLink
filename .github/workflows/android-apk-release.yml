@@ -17,6 +17,7 @@ on:
     tags:
       - 'v*'
       - 'android-v*'
+      - 'test-v*'
   workflow_dispatch:
     inputs:
       version:
@@ -47,10 +48,11 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.44.8'
+          flutter-version: '3.47.6'
           cache: true
 
       - name: Configure existing release identity
+        if: ${{ !startsWith(github.ref_name, 'test-') }}
         shell: bash
         env:
           KEYSTORE_BASE64: ${{ secrets.NEXUSLINK_RELEASE_KEYSTORE_BASE64 }}
@@ -82,6 +84,13 @@ jobs:
         run: |
           set -euo pipefail
           RAW="${{ github.event.inputs.version || github.ref_name }}"
+          VARIANT=release
+          PREFIX=nexuslink
+          if [[ "$RAW" == test-* ]]; then
+            VARIANT=debug
+            PREFIX=nexuslink-test
+            RAW="${RAW#test-}"
+          fi
           RAW="${RAW#android-}"
           RAW="${RAW#v}"
           NAME="${RAW%%+*}"
@@ -90,6 +99,8 @@ jobs:
           if ! [[ "$CODE" =~ ^[0-9]+$ ]]; then CODE="1"; fi
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "variant=$VARIANT" >> "$GITHUB_OUTPUT"
+          echo "prefix=$PREFIX" >> "$GITHUB_OUTPUT"
           echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           echo "Building $NAME+$CODE"
 
@@ -98,14 +109,14 @@ jobs:
 
       - name: Build release APK
         run: |
-          flutter build apk --release \
+          flutter build apk --${{ steps.ver.outputs.variant }} \
             --build-name="${{ steps.ver.outputs.name }}" \
             --build-number="${{ steps.ver.outputs.code }}"
 
       - name: Rename artifact
         run: |
-          cp build/app/outputs/flutter-apk/app-release.apk \
-            "nexuslink-${{ steps.ver.outputs.name }}+${{ steps.ver.outputs.code }}.apk"
+          cp build/app/outputs/flutter-apk/app-${{ steps.ver.outputs.variant }}.apk \
+            "${{ steps.ver.outputs.prefix }}-${{ steps.ver.outputs.name }}+${{ steps.ver.outputs.code }}.apk"
 
       - name: Upload APK artifact (workflow)
         uses: actions/upload-artifact@v4
@@ -118,9 +129,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: NexusLink Android ${{ steps.ver.outputs.name }}+${{ steps.ver.outputs.code }}
+          name: ${{ startsWith(github.ref_name, 'test-') && 'NexusLink Test' || 'NexusLink Android' }} ${{ steps.ver.outputs.name }}+${{ steps.ver.outputs.code }}
+          body_path: release-notes.md
           generate_release_notes: true
+          prerelease: ${{ startsWith(github.ref_name, 'test-') }}
           files: |
-            apps/flutter_client/nexuslink-${{ steps.ver.outputs.name }}+${{ steps.ver.outputs.code }}.apk
+            apps/flutter_client/${{ steps.ver.outputs.prefix }}-${{ steps.ver.outputs.name }}+${{ steps.ver.outputs.code }}.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

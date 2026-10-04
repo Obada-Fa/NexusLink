@@ -21,7 +21,9 @@ let sendFn: (ws: WebSocket, msg: any) => void = () => {};
 export function setSend(fn: (ws: WebSocket, msg: WsMessage) => void) { sendFn = fn; }
 let ptyAvailable: boolean | undefined;
 export function hasPty(): boolean {
-  return ptyAvailable ??= Bun.spawnSync(['python3', '-c', 'import pty, termios, fcntl'], { stdout: 'ignore', stderr: 'ignore' }).exitCode === 0;
+  if (ptyAvailable !== undefined) return ptyAvailable;
+  try { return ptyAvailable = Bun.spawnSync(['python3', '-c', 'import pty, termios, fcntl'], { stdout: 'ignore', stderr: 'ignore' }).exitCode === 0; }
+  catch { return ptyAvailable = false; }
 }
 export function resolveTerminalCwd(raw?: string): string {
   const home = homedir();

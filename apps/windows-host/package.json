@@ -6,7 +6,7 @@
     "start": "bun run src/server/index.ts",
     "dev": "bun run src/server/index.ts",
     "test": "bun test",
-    "compile": "bun build --compile --outfile ../../dist/windows/nexuslink-host.exe src/server/index.ts"
+    "compile": "bun build --compile --outfile ../../dist/windows/nexuslink-host.exe src/server/index.ts ../desktop/src/server/workspace/agent-store-worker.ts ../../packages/chat-core/src/worker.ts ../../packages/chat-core/src/providers/worker.ts"
   },
   "dependencies": {
     "@nexuslink/rpc-types": "workspace:*",

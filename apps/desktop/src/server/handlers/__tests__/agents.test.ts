@@ -2,7 +2,8 @@
 
 import { describe, expect, test } from 'bun:test';
 import { homedir, tmpdir } from 'node:os';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { join, delimiter } from 'node:path';
 import type { AgentEvent, WsMessage } from '@nexuslink/rpc-types';
 import {
   listAgents,
@@ -201,7 +202,16 @@ describe('agent gateway', () => {
       const wrapped = spawnArgv(['C:\\tools\\cursor-agent.cmd', 'login']);
       expect(wrapped[0]).toBe('cmd.exe');
       expect(wrapped).toContain('C:\\tools\\cursor-agent.cmd');
-      expect(resolveBin('cursor-agent')).toBeTruthy();
+      const fixture = mkdtempSync(join(tmpdir(), 'nexuslink-cli-fixture-'));
+      const originalPath = process.env.PATH;
+      try {
+        writeFileSync(join(fixture, 'nexuslink-test-cli.cmd'), '@echo off');
+        process.env.PATH = fixture + delimiter + (originalPath || '');
+        expect(resolveBin('nexuslink-test-cli')).toBe(join(fixture, 'nexuslink-test-cli.cmd'));
+      } finally {
+        process.env.PATH = originalPath;
+        rmSync(fixture, { recursive: true, force: true });
+      }
       const agyHome = process.env.LOCALAPPDATA;
       if (agyHome && existsSync(`${agyHome}\\agy\\bin\\agy.exe`)) {
         expect(resolveBin('agy')).toMatch(/agy\.exe$/i);

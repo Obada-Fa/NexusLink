@@ -35,13 +35,25 @@ import 'cwd_picker.dart';
 import 'terminal_screen.dart';
 import '../workspace/project.dart';
 import '../workspace/changes_screen.dart';
+import '../chats/chat_models.dart';
+import '../chats/chat_repository.dart';
 
 /// PC conversations will get their own screen. Skip the slow
 /// `agent.listHostChats` scan on this tab until then.
 const bool kAgentHostChatsInAgentTab = false;
 
 class AgentScreen extends ConsumerStatefulWidget {
-  const AgentScreen({super.key});
+  final ChatSummary? libraryChat;
+  final bool startNew;
+  final String? initialFolder;
+  final String? initialTaskId;
+  const AgentScreen({
+    super.key,
+    this.libraryChat,
+    this.startNew = false,
+    this.initialFolder,
+    this.initialTaskId,
+  });
 
   @override
   ConsumerState<AgentScreen> createState() => _AgentScreenState();
@@ -101,6 +113,26 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   RpcClient? _boundClient;
   int _syncGen = 0;
   GitWorkingTree? _gitTree;
+  String? _libraryOlder;
+  String? _historyNotice;
+  bool _savedCopy = false;
+  String? _deliveryOperation;
+  Timer? _libraryTimer;
+  bool _librarySyncing = false;
+  bool _startedNew = false;
+  bool _libraryForeground = true;
+  ChatSummary? _librarySummary;
+  final Map<String, Map<String, dynamic>> _libraryEvents = {};
+  String? _libraryRevision;
+  ChatSummary get _chatSummary => _librarySummary ?? widget.libraryChat!;
+  bool get _isLibrary => widget.libraryChat != null;
+  bool get _replyAllowed =>
+      !_isLibrary ||
+      (_chatSummary.canReply &&
+          !_savedCopy &&
+          _client?.status == RpcStatus.connected &&
+          !_busy &&
+          _deliveryOperation == null);
 
   RpcClient? get _client => ref.read(activeClientProvider);
 
@@ -109,11 +141,32 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _input.addListener(_draftChanged);
+    if (_isLibrary) {
+      _libraryTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+        if (_libraryForeground && _client?.status == RpcStatus.connected) {
+          unawaited(_loadLibrary(quiet: true));
+        }
+      });
+    }
     _load();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _libraryForeground = state == AppLifecycleState.resumed;
+    if (_isLibrary && !_libraryForeground) {
+      final chat = _chatSummary;
+      unawaited(
+        ref
+            .read(chatCacheProvider)
+            .saveDraft(
+              chat.hostId,
+              chat.id,
+              _input.text,
+              position: _scroll.hasClients ? _scroll.offset : null,
+            ),
+      );
+    }
     if (state == AppLifecycleState.resumed) {
       unawaited(_onForeground());
     }
@@ -135,6 +188,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   Future<void> _load() async {
     final client = _client;
+    if (_isLibrary && _active == null) await _loadLibrary(savedOnly: true);
+    if (_isLibrary &&
+        (client == null || client.status != RpcStatus.connected)) {
+      await _loadLibrary();
+      return;
+    }
     if (client == null) {
       setState(() {
         _loading = false;
@@ -191,6 +250,26 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         _error = null;
       });
       _openPendingTask();
+      if (widget.initialTaskId != null && _active == null) {
+        final task = _sessions
+            .where((session) => session.agentSessionId == widget.initialTaskId)
+            .firstOrNull;
+        if (task != null) await _openSession(task);
+      }
+      if (_isLibrary) await _loadLibrary();
+      if (widget.startNew &&
+          !_startedNew &&
+          _agents.any((agent) => agent.available)) {
+        _startedNew = true;
+        final prefs = await SharedPreferences.getInstance();
+        final last = prefs.getString('chat-last-source:${client.hostId}');
+        final agent =
+            _agents
+                .where((agent) => agent.available && agent.id == last)
+                .firstOrNull ??
+            _agents.firstWhere((agent) => agent.available);
+        if (mounted) await _newChat(agent, cwd: widget.initialFolder);
+      }
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -202,6 +281,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   Future<void> _refreshSnapshot({bool syncTranscript = true}) async {
+    if (_isLibrary) {
+      await _loadLibrary(quiet: true);
+      return;
+    }
     final client = _client;
     if (client == null || client.status != RpcStatus.connected) return;
     final gen = ++_syncGen;
@@ -300,8 +383,252 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
   }
 
+  Future<void> _loadLibrary({
+    bool quiet = false,
+    bool older = false,
+    bool savedOnly = false,
+  }) async {
+    if (!_isLibrary || _librarySyncing || !mounted) return;
+    _librarySyncing = true;
+    final chat = widget.libraryChat!;
+    final repository = ref.read(chatRepositoryProvider);
+    final generation = ++_syncGen;
+    final first = _active == null;
+    try {
+      final page = savedOnly
+          ? await repository.cache.history(chat.hostId, chat.id)
+          : await repository.history(
+              chat,
+              olderCursor: older ? _libraryOlder : null,
+            );
+      if (page == null) return;
+      if (savedOnly) page['saved'] = true;
+      if (!mounted ||
+          generation != _syncGen ||
+          !identical(repository, ref.read(chatRepositoryProvider))) {
+        return;
+      }
+      if (page['restart'] == true) {
+        _libraryOlder = null;
+        _libraryEvents.clear();
+        _librarySyncing = false;
+        await _loadLibrary(quiet: quiet);
+        return;
+      }
+      final current = page['chat'] is Map
+          ? ChatSummary(Map<String, dynamic>.from(page['chat'] as Map))
+          : _chatSummary;
+      final raw = (page['events'] as List? ?? [])
+          .map((event) => Map<String, dynamic>.from(event as Map))
+          .toList();
+      if (_libraryRevision != null &&
+          _libraryRevision != page['revision'] &&
+          page['appendOnly'] != true &&
+          !savedOnly) {
+        _libraryEvents.clear();
+      }
+      _libraryRevision = page['revision'] as String?;
+      for (final event in raw) {
+        if (event['historical'] == true &&
+            event['kind'] == 'permission-request') {
+          event['kind'] = 'status';
+          event['text'] =
+              'Historical permission request · ${event['toolName'] ?? 'Work details'}';
+        }
+        _libraryEvents[event['id'] as String? ?? '${event['seq']}'] = event;
+      }
+      final ordered = _libraryEvents.values.toList()
+        ..sort((a, b) => (a['seq'] as num).compareTo(b['seq'] as num));
+      final loaded = ordered.map(AgentEvent.fromJson).toList();
+      final hasNew =
+          loaded.length != _events.length ||
+          (loaded.isNotEmpty &&
+              _events.isNotEmpty &&
+              loaded.last.text != _events.last.text);
+      final oldExtent = _scroll.hasClients
+          ? _scroll.position.maxScrollExtent
+          : 0.0;
+      final oldOffset = _scroll.hasClients ? _scroll.offset : 0.0;
+      setState(() {
+        _librarySummary = current;
+        _savedCopy = page['saved'] == true;
+        _historyNotice =
+            page['reason'] as String? ??
+            (page['completeness'] == 'partial'
+                ? 'Some history is unavailable or content was truncated.'
+                : null);
+        _active = AgentSessionInfo(
+          agentSessionId: current.sessionId ?? 'library:${chat.id}',
+          agent: current.source,
+          cwd: current.folderPath ?? '',
+          title: current.title,
+          busy: current.execution == 'working',
+          status: 'running',
+          hostChatId: current.json['nativeId'] as String?,
+        );
+        _busy = current.execution == 'working';
+        _events
+          ..clear()
+          ..addAll(loaded);
+        _libraryOlder = page['olderCursor'] as String?;
+        _hasOlder = !_savedCopy && _libraryOlder != null;
+        _loading = false;
+        _error = null;
+      });
+      if (first) {
+        final draft = await ref
+            .read(chatCacheProvider)
+            .draft(chat.hostId, chat.id);
+        if (!mounted || generation != _syncGen) return;
+        _input.text = draft?['text'] as String? ?? '';
+        _deliveryOperation = draft?['operation'] as String?;
+        if (chat.folderPath != null) {
+          ref.read(projectProvider.notifier).select(chat.folderPath!);
+        }
+        final position = (draft?['position'] as num?)?.toDouble();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_scroll.hasClients) {
+            _scroll.jumpTo(
+              (position ?? _scroll.position.maxScrollExtent)
+                  .clamp(0.0, _scroll.position.maxScrollExtent)
+                  .toDouble(),
+            );
+          }
+        });
+      } else if (older) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_scroll.hasClients) {
+            _scroll.jumpTo(
+              (oldOffset + _scroll.position.maxScrollExtent - oldExtent)
+                  .clamp(0.0, _scroll.position.maxScrollExtent)
+                  .toDouble(),
+            );
+          }
+        });
+      } else if (hasNew) {
+        _scrollToEnd();
+      }
+      if (current.json['managed'] == true &&
+          current.sessionId != null &&
+          !_savedCopy) {
+        await _syncApprovals(current.sessionId!);
+      }
+    } catch (error) {
+      if (mounted && generation == _syncGen) {
+        setState(() {
+          _loading = false;
+          _historyNotice =
+              'Couldn’t refresh this conversation. Your saved messages and draft remain available.';
+        });
+      }
+    } finally {
+      _librarySyncing = false;
+    }
+  }
+
+  Future<void> _sendLibrary() async {
+    if (!_replyAllowed || _sending || _input.text.trim().isEmpty) return;
+    final chat = _chatSummary;
+    final text = _input.text;
+    final operation = 'chat-${DateTime.now().microsecondsSinceEpoch}';
+    await ref.read(chatCacheProvider).saveDraft(chat.hostId, chat.id, text);
+    await ref
+        .read(chatCacheProvider)
+        .saveOperation(chat.hostId, chat.id, operation);
+    setState(() {
+      _sending = true;
+      _deliveryOperation = operation;
+    });
+    try {
+      final outcome = await ref
+          .read(chatRepositoryProvider)
+          .send(
+            chat,
+            text,
+            operation,
+            model: _model,
+            thinking: _modelSupportsEffort ? _thinking : null,
+            mode: _mode,
+            images: [
+              for (final photo in _photos)
+                {
+                  'name': photo.name,
+                  'mime': photo.mime,
+                  'data': base64Encode(photo.bytes),
+                },
+            ],
+          );
+      if (!mounted) return;
+      if (outcome['state'] == 'delivered') {
+        _input.clear();
+        _photos.clear();
+        _deliveryOperation = null;
+        await ref
+            .read(chatCacheProvider)
+            .saveOperation(chat.hostId, chat.id, null);
+        await ref.read(chatCacheProvider).saveDraft(chat.hostId, chat.id, '');
+        await _loadLibrary(quiet: true);
+      } else if (outcome['state'] == 'rejected') {
+        _deliveryOperation = null;
+        _toast(
+          outcome['reason'] as String? ??
+              'Reply unavailable. Your draft is saved.',
+        );
+        await ref
+            .read(chatCacheProvider)
+            .saveOperation(chat.hostId, chat.id, null);
+      } else {
+        _toast('Delivery uncertain. Check delivery before trying again.');
+      }
+    } catch (error) {
+      if (mounted) {
+        _toast(
+          'Delivery uncertain. Your draft is saved. Check delivery after reconnecting.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Future<void> _checkDelivery() async {
+    final operation = _deliveryOperation;
+    if (operation == null || _client?.status != RpcStatus.connected) return;
+    try {
+      final status = await _client!.request('chat.sendStatus', {
+        'operationId': operation,
+      });
+      if (!mounted) return;
+      if (status is Map && status['state'] == 'delivered') {
+        setState(() {
+          _deliveryOperation = null;
+          _input.clear();
+        });
+        await ref
+            .read(chatCacheProvider)
+            .saveOperation(_chatSummary.hostId, _chatSummary.id, null);
+        await _loadLibrary(quiet: true);
+      } else if (status is Map && status['state'] == 'rejected') {
+        setState(() => _deliveryOperation = null);
+        await ref
+            .read(chatCacheProvider)
+            .saveOperation(_chatSummary.hostId, _chatSummary.id, null);
+        _toast('Reply was not dispatched. Your draft is saved.');
+      } else {
+        _toast(
+          'Delivery is still uncertain. Check the original conversation on the PC.',
+        );
+      }
+    } catch (error) {
+      if (mounted) _toast('Reconnect to the PC to check delivery.');
+    }
+  }
+
   /// Ask a permission request that arrived while this chat was in the background.
   void _flushPendingApproval() {
+    if (_isLibrary && (_savedCopy || _chatSummary.json['managed'] != true)) {
+      return;
+    }
     /* Approval cards remain inline until explicitly answered. */
   }
 
@@ -315,6 +642,18 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final key = _draftKey(id);
     _draftTimer?.cancel();
     _draftTimer = Timer(const Duration(milliseconds: 500), () async {
+      if (_isLibrary) {
+        final chat = widget.libraryChat!;
+        await ref
+            .read(chatCacheProvider)
+            .saveDraft(
+              chat.hostId,
+              chat.id,
+              text,
+              position: _scroll.hasClients ? _scroll.offset : null,
+            );
+        return;
+      }
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(key, text);
     });
@@ -346,6 +685,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   Future<void> _older() async {
+    if (_isLibrary) {
+      await _loadLibrary(older: true);
+      return;
+    }
     final id = _active?.agentSessionId;
     final client = _client;
     if (id == null || client == null || _events.isEmpty) return;
@@ -508,6 +851,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   Future<void> _submitPermission(String? requestId, bool allow) async {
+    if (_client?.status != RpcStatus.connected ||
+        (_isLibrary && (_savedCopy || _chatSummary.json['managed'] != true))) {
+      return;
+    }
     final client = _client;
     final session = _active;
     if (client == null || session == null || requestId == null || !mounted) {
@@ -646,6 +993,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       await _loadComposerPrefs(agent.id, isNewChat: true);
       await _refreshModels(agent.id, force: true);
       await _refreshGitTree();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        'chat-last-source:${activeClient.hostId}',
+        agent.id,
+      );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -913,6 +1265,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   Future<void> _send() async {
+    if (_isLibrary) {
+      await _sendLibrary();
+      return;
+    }
     if (_busy || _sending) return;
     final text = _input.text.trim();
     final session = _active;
@@ -1002,6 +1358,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   bool get _canStop => _busy || transcriptHasOpenTools(_events);
 
   Future<void> _cancel() async {
+    if (_isLibrary) return;
     final session = _active;
     final client = _client;
     if (session == null) return;
@@ -1312,6 +1669,25 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   void _leaveChat() {
+    if (widget.initialTaskId != null) {
+      Navigator.of(context).pop();
+      return;
+    }
+    if (_isLibrary) {
+      final chat = widget.libraryChat!;
+      unawaited(
+        ref
+            .read(chatCacheProvider)
+            .saveDraft(
+              chat.hostId,
+              chat.id,
+              _input.text,
+              position: _scroll.hasClients ? _scroll.offset : null,
+            ),
+      );
+      Navigator.of(context).pop();
+      return;
+    }
     setState(() {
       _active = null;
       _events.clear();
@@ -1446,6 +1822,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   Future<void> _openComposerMenu() async {
+    if (_isLibrary && !_replyAllowed) return;
     await _refreshGitTree();
     if (!mounted) return;
     final cwd = _active?.cwd.trim() ?? '';
@@ -1959,6 +2336,20 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     _userWantsListen = false;
     _listenGen++;
     _speech.stop();
+    _libraryTimer?.cancel();
+    if (_isLibrary) {
+      final chat = widget.libraryChat!;
+      unawaited(
+        ref
+            .read(chatCacheProvider)
+            .saveDraft(
+              chat.hostId,
+              chat.id,
+              _input.text,
+              position: _scroll.hasClients ? _scroll.offset : null,
+            ),
+      );
+    }
     _draftTimer?.cancel();
     _input.removeListener(_draftChanged);
     _input.dispose();
@@ -1985,7 +2376,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       }
     });
     return PopScope(
-      canPop: _active == null,
+      canPop: _isLibrary || widget.initialTaskId != null || _active == null,
       onPopInvokedWithResult: (didPop, _) {
         if (!didPop) _leaveChat();
       },
@@ -1996,14 +2387,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           leading: _active == null
               ? null
               : IconButton(
-                  tooltip: 'Agent list',
+                  tooltip: 'Back to chats',
                   icon: const Icon(Icons.arrow_back),
                   onPressed: _leaveChat,
                 ),
           title: _active == null
-              ? const Text('Agents', style: TextStyle(fontSize: 16))
+              ? const Text('Chats', style: TextStyle(fontSize: 16))
               : InkWell(
-                  onTap: () => _renameSessionDialog(_active!),
+                  onTap: _isLibrary && _chatSummary.json['managed'] != true
+                      ? null
+                      : () => _renameSessionDialog(_active!),
                   borderRadius: BorderRadius.circular(8),
                   child: Padding(
                     padding: const EdgeInsets.symmetric(
@@ -2038,7 +2431,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   ),
                 ),
           actions: [
-            if (_active != null)
+            if (_active != null &&
+                (!_isLibrary || _chatSummary.json['managed'] == true))
               IconButton(
                 tooltip: 'Archive task',
                 icon: const Icon(Icons.archive_outlined),
@@ -2460,6 +2854,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   Color _chatBackgroundColor(String? agentId) => const Color(0xFF0B0D12);
 
   Widget _chatWithTerminal() {
+    if (_isLibrary) return _chat();
     return Column(
       children: [
         Container(
@@ -2579,7 +2974,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         if (_newActivity)
           TextButton(
             onPressed: () => _scrollToEnd(force: true),
-            child: const Text('New activity ↓'),
+            child: const Text('Jump to latest ↓'),
           ),
         Expanded(
           child: Container(
@@ -2599,6 +2994,37 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             ),
           ),
         ),
+        if (_isLibrary &&
+            (_savedCopy || _historyNotice != null || !_replyAllowed))
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Text(
+              _savedCopy
+                  ? 'Saved copy · PC offline. Drafts stay on this phone.'
+                  : _historyNotice ??
+                        widget.libraryChat!.replyReason ??
+                        'Replying is unavailable while this chat is working on the PC.',
+            ),
+          ),
+        if (_isLibrary && _deliveryOperation != null)
+          TextButton(
+            onPressed: _checkDelivery,
+            child: const Text('Delivery uncertain · Check delivery'),
+          ),
+        if (_isLibrary && !widget.libraryChat!.canReply && !_savedCopy)
+          TextButton(
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => AgentScreen(
+                  startNew: true,
+                  initialFolder: widget.libraryChat!.folderPath,
+                ),
+              ),
+            ),
+            child: const Text(
+              'Start new chat — creates a separate conversation',
+            ),
+          ),
         _composer(),
       ],
     );
@@ -3063,7 +3489,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                             : const Color(0xFF4ADE80)),
                 ),
           title: Text(
-            toolGroupTitle(tools),
+            _isLibrary ? 'Work details' : toolGroupTitle(tools),
             style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
           ),
           subtitle: summary.isEmpty
@@ -3855,13 +4281,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                     controller: _input,
                     minLines: 1,
                     maxLines: 6,
-                    enabled: !_busy,
+                    enabled: _isLibrary || !_busy,
                     onSubmitted: (_) => _send(),
                     decoration: InputDecoration(
                       hintText: _needsSignIn
                           ? 'login or CURSOR_API_KEY=…'
                           : _photos.isEmpty
-                          ? 'Message the agent…'
+                          ? 'Write a reply…'
                           : 'Add a note about the photo…',
                       isDense: true,
                       filled: true,
@@ -3881,9 +4307,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                         icon: const Icon(Icons.add),
                       ),
                       const SizedBox(width: 2),
-                      _modeChip(),
+                      if (!_isLibrary) _modeChip(),
                       const SizedBox(width: 6),
-                      Flexible(child: _modelChip()),
+                      if (!_isLibrary) Flexible(child: _modelChip()),
                       const SizedBox(width: 4),
                       const Spacer(),
                       IconButton(
@@ -3897,9 +4323,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                         ),
                       ),
                       IconButton.filled(
-                        tooltip: _canStop ? 'Stop' : 'Send',
-                        onPressed: _canStop ? _cancel : _send,
-                        icon: Icon(_canStop ? Icons.stop : Icons.arrow_upward),
+                        tooltip: !_isLibrary && _canStop ? 'Stop' : 'Send',
+                        onPressed: _isLibrary
+                            ? (_replyAllowed ? _send : null)
+                            : (_canStop ? _cancel : _send),
+                        icon: Icon(
+                          !_isLibrary && _canStop
+                              ? Icons.stop
+                              : Icons.arrow_upward,
+                        ),
                       ),
                     ],
                   ),

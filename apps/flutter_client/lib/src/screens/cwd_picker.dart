@@ -135,7 +135,7 @@ class _CwdPickerSheetState extends ConsumerState<_CwdPickerSheet>
     } catch (_) {}
     projects.sort((a, b) => comparePathNames(a.name, b.name));
     if (home != '/') {
-      projects.add(_ProjectHint('Home', home));
+      projects.add(_ProjectHint('Home folder', home));
     }
 
     if (!mounted) return;
