@@ -1,4 +1,5 @@
 import { persistAgent, loadedAgentRows } from '../workspace/agent-store';
+import { CodexAppServer } from '../../../../../packages/chat-core/src/providers/codex';
 // Agent gateway: run AI coding agents (Claude Code, Cursor CLI, OpenCode,
 // Antigravity) on the host and expose them to the phone as chat sessions with a
 // normalized event stream — the phone renders a native chat UI, never a terminal.
@@ -226,7 +227,7 @@ const AGENT_DEFS: AgentDef[] = [
       models: CODEX_MODELS,
       images: true,
     },
-    makeAdapter: (s) => new CodexAdapter(s),
+    makeAdapter: (s) => new CodexAppServerAdapter(s),
   },
 
   {
@@ -1167,6 +1168,7 @@ export function createAgentSession(
     taskState: 'idle',
     updatedAt: Date.now(),
     hostChatId: opts?.hostChatId,
+    imported: !!opts?.hostChatId,
   };
   const session: AgentSession = {
     info, history: [], adapter: null as unknown as AgentAdapter, seq: 0,
@@ -1247,7 +1249,6 @@ export function openHostChat(params: {
     (s) => s.info.agent === agent && s.info.hostChatId === hostChatId,
   );
   if (existing) {
-    existing.info.createdAt = Date.now();
     existing.info.status = 'running';
     existing.info.icon = existing.info.icon ?? getCachedAgentIcon(agent);
     if (params.cwd?.trim()) {
@@ -1271,6 +1272,7 @@ export function openHostChat(params: {
   const info = createAgentSession(agent, cwd, title, { hostChatId });
   const session = agentSessions.get(info.agentSessionId);
   if (!session) return info;
+  session.info.imported = true;
   const def = AGENT_DEFS.find((d) => d.id === agent);
   const bin = def?.bin ? which(def.bin) : null;
   const history = loadHostChatHistory(agent, hostChatId, bin);
@@ -1279,14 +1281,14 @@ export function openHostChat(params: {
     seedHistory(session, [{
       kind: 'status',
       text: viewOnly
-        ? 'Loaded from Cursor IDE. History is view-only — a new Cursor CLI chat starts if you send a message.'
+        ? 'Loaded from Cursor IDE. Read only. Start a new chat to use Cursor CLI.'
         : 'Opened this conversation from the PC. Send a message to continue it.',
       ts: Date.now(),
     }]);
   } else if (viewOnly) {
     seedHistory(session, [{
       kind: 'status',
-      text: 'Cursor IDE chats cannot be continued from the CLI. Sending a message starts a new Cursor CLI chat in this project.',
+      text: 'Cursor IDE chats are read only. Start a new chat to use Cursor CLI.',
       ts: Date.now(),
     }]);
   }
@@ -1324,6 +1326,8 @@ export function promptAgent(
   loadAgentSessionsFromDisk();
   const session = agentSessions.get(agentSessionId);
   if (!session || session.info.status !== 'running') return { ok: false };
+  if (session.info.hostChatId?.startsWith('ide:')) throw new Error('Cursor IDE chats are read only. Start a new chat to use Cursor CLI.');
+  if (session.info.imported) throw new Error('Replying is unavailable until this app confirms the original PC chat is safe to continue. Start a new chat to reply.');
   if(session.info.busy) throw new Error('This task is already working. Stop it before sending another prompt.');
   if (session.info.agent === 'codex' && opts.mode === 'plan') throw new Error('Codex Plan mode is unavailable. Select Agent mode.');
   session.info.turnId=crypto.randomUUID();
@@ -3458,114 +3462,88 @@ export function parseCodexStreamEvent(msg: Record<string, unknown>): AgentDelta[
   return [];
 }
 
-class CodexAdapter implements AgentAdapter {
-  private proc: Proc | null = null;
-  private streamGen = 0;
-  private threadId: string | null = null;
-  private sawResult = false;
-  private pendingResult: AgentDelta | undefined;
-  private streamedText = false;
-  private apiKey = process.env.OPENAI_API_KEY || '';
-
+class CodexAppServerAdapter implements AgentAdapter {
+  private server?: CodexAppServer;
+  private initialization?: Promise<void>;
+  private threadId?: string;
+  private turnId?: string;
+  private generation=0;
+  private streamed = new Set<string>();
   constructor(private session: AgentSession) {}
-
-  bindHostChat(id: string): void {
-    this.threadId = id;
-  }
-
-  private extraEnv(): Record<string, string> {
-    const env: Record<string, string> = {};
-    if (this.apiKey) env.OPENAI_API_KEY = this.apiKey;
-    return env;
-  }
-
-  prompt(text: string, opts?: AdapterPromptOpts): void {
-    const key = parseEnvApiKey(text, ['OPENAI_API_KEY']);
-    if (key) {
-      this.apiKey = key.value;
-      this.cancel();
-      setBusy(this.session, false);
-      emit(this.session, { kind: 'status', text: `Saved ${key.name} for this chat. Send your task again.` });
-      return;
+  bindHostChat(id:string) {this.threadId=id;}
+  private async ready() {
+    if(!this.initialization) {
+      const server=new CodexAppServer({
+        notification:(method,params)=>this.notification(method,params),
+        request:(id,method,params)=>this.request(id,method,params),
+        closed:()=>{
+          if(this.server!==server)return;
+          this.initialization=undefined;this.server=undefined;
+          if(this.session.info.busy){emit(this.session,{kind:'error',text:'Codex disconnected. Check the PC installation and sign-in before replying.'});setBusy(this.session,false);}
+        },
+      });
+      this.server=server;
+      this.initialization=server.initialize(resolveBin('codex') || 'codex').catch(error=>{server.close();if(this.server===server){this.server=undefined;this.initialization=undefined;}throw error;});
     }
-    this.cancel();
-    this.sawResult = false;
-    this.pendingResult = undefined;
-    this.streamedText = false;
-    const bin = resolveBin('codex') ?? 'codex';
-    const argv = buildCodexArgv({
-      bin,
-      cwd: this.session.info.cwd,
-      threadId: this.threadId,
-      text,
-      model: opts?.model,
-      mode: opts?.mode,
-      thinking: opts?.thinking,
-      imagePaths: opts?.imagePaths,
+    await this.initialization;
+  }
+  prompt(text:string,options:AdapterPromptOpts={}) {
+    const generation=++this.generation;
+    this.streamed.clear();
+    void this.start(text,options,generation).catch(()=>{
+      if(generation!==this.generation)return;
+      emit(this.session,{kind:'error',text:'Codex could not start this reply. Update Codex and check its sign-in on the PC.'});setBusy(this.session,false);
     });
-    const gen = this.streamGen;
-    const { proc, stderr, drained } = spawnJsonCli(
-      argv,
-      this.session.info.cwd,
-      (msg) => {
-        if (this.streamGen !== gen) return;
-        this.onEvent(msg);
-      },
-      this.extraEnv(),
-    );
-    this.proc = proc;
-    proc.exited.then(async (code) => {
-      if (this.streamGen !== gen) return;
-      await drained.catch(() => {});
-      if (this.streamGen !== gen) return;
-      const errText = await stderr.catch(() => '');
-      if (!this.session.info.busy) return;
-      setBusy(this.session, false);
-      const isSuccess = code === 0;
-      const fail = finishCliTurn({ sawResult: isSuccess, exitCode: code, stderr: isSuccess ? '' : errText });
-      if (!fail) {
-        emit(this.session, this.pendingResult ?? { kind: 'result', text: '' });
-        return;
-      }
-      emit(this.session, withoutDuplicateResult({ kind: 'error', text: sanitizeCliError(fail.text ?? '', 'Codex') }, this.streamedText));
-    }).catch(() => {});
   }
-
-  private onEvent(msg: Record<string, unknown>): void {
-    const sid = sessionIdFromEvent(msg);
-    if (sid) {
-      this.threadId = sid;
-      if (this.session.info.hostChatId !== sid) {
-        this.session.info.hostChatId = sid;
-        saveAgentSessionsToDisk();
-        broadcast({ type: 'agent-session-update', session: { ...this.session.info } });
-      }
-    }
-    const events = parseCodexStreamEvent(msg);
-    for (const ev of events) {
-      if (ev.kind === 'text' || ev.kind === 'text-delta') this.streamedText = true;
-      if (ev.kind === 'result') {
-        this.pendingResult = withoutDuplicateResult(ev, this.streamedText);
-        this.sawResult = true;
-        continue;
-      }
-      if (ev.kind === 'error') {
-        this.sawResult = true;
-        setBusy(this.session, false);
-      }
-      emit(this.session, withoutDuplicateResult(ev, this.streamedText));
+  private async start(text:string,options:AdapterPromptOpts,generation:number) {
+    await this.ready();
+    if(generation!==this.generation)return;
+    const result=await this.server!.request(this.threadId?'thread/resume':'thread/start',this.threadId?{threadId:this.threadId}:{cwd:this.session.info.cwd,...(options.model?{model:options.model}:{})});
+    if(generation!==this.generation)return;
+    if(!result.thread?.id)throw new Error('Codex returned no thread identity');
+    this.threadId=result.thread.id;
+    this.session.info.hostChatId=this.threadId;
+    saveAgentSessionsToDisk();broadcast({type:'agent-session-update',session:{...this.session.info}});
+    const input:any[]=[{type:'text',text}];
+    for(const path of options.imagePaths || []) input.push({type:'localImage',path});
+    const turn=await this.server!.request('turn/start',{threadId:this.threadId,input,...(options.model?{model:options.model}:{}),...(options.thinking?{effort:options.thinking==='extra-high'?'xhigh':options.thinking}:{})});
+    if(generation!==this.generation){if(turn.turn?.id)await this.server?.request('turn/interrupt',{threadId:this.threadId,turnId:turn.turn.id});return;}
+    if(this.session.info.busy)this.turnId=turn.turn?.id;
+  }
+  private notification(method:string,params:any) {
+    if(params?.threadId && params.threadId!==this.threadId)return;
+    if(!this.session.info.busy)return;
+    if(method==='item/agentMessage/delta') {
+      this.streamed.add(params.itemId);emit(this.session,{kind:'text-delta',text:params.delta,refId:params.itemId});
+    } else if(method==='item/started' || method==='item/completed') {
+      const item=params.item;
+      if(item?.type==='agentMessage' && method==='item/completed' && !this.streamed.has(item.id))emit(this.session,{kind:'text',text:item.text,refId:item.id});
+      else if(item?.type==='commandExecution' || item?.type==='fileChange')emit(this.session,{kind:method==='item/started'?'tool-start':'tool-end',toolName:item.type==='commandExecution'?'Command':'File changes',toolInput:item.command || JSON.stringify(item.changes),toolOutput:item.aggregatedOutput,refId:item.id});
+    } else if(method==='turn/started') {this.turnId=params.turn?.id;}
+    else if(method==='turn/completed') {
+      const failed=params.turn?.status==='failed';
+      emit(this.session,{kind:failed?'error':'result',text:failed?'Codex reply failed. Check the app on the PC.':''});setBusy(this.session,false);this.turnId=undefined;
+    } else if(method==='error' && params.willRetry!==true) {
+      emit(this.session,{kind:'error',text:'Codex reported an error. Check sign-in and configuration on the PC.'});setBusy(this.session,false);
     }
   }
-
-  cancel(): void {
-    this.streamGen += 1;
-    try { this.proc?.kill(); } catch {}
-    this.proc = null;
+  private request(id:string|number,method:string,params:any) {
+    const ref=String(id);
+    if(params?.threadId!==this.threadId || !this.session.info.busy) {this.server?.respond(id,{decision:'decline'});return;}
+    if(!['item/commandExecution/requestApproval','item/fileChange/requestApproval'].includes(method)) {
+      if(method==='item/permissions/requestApproval')this.server?.respond(id,{permissions:{},scope:'turn'});else this.server?.reject(id);
+      emit(this.session,{kind:'status',text:'Codex requested an interaction this phone does not support. Open the chat on the PC.'});return;
+    }
+    if(getAgentApprovalMode('codex')==='auto'){this.server?.respond(id,{decision:'accept'});return;}
+    this.session.pendingPermissions.set(ref,allow=>this.server?.respond(id,{decision:allow?'accept':'decline'}));
+    emit(this.session,{kind:'permission-request',refId:ref,toolName:method==='item/commandExecution/requestApproval'?'Command':'File changes',toolInput:JSON.stringify(params),text:params.reason || 'Codex needs your approval.'});
   }
-
-  close(): void {
-    this.cancel();
+  permission(id:string,allow:boolean) {const callback=this.session.pendingPermissions.get(id);this.session.pendingPermissions.delete(id);callback?.(allow);}
+  cancel() {
+    ++this.generation;
+    if(this.server && this.threadId && this.turnId)void this.server.request('turn/interrupt',{threadId:this.threadId,turnId:this.turnId}).catch(()=>{});
   }
+  close() {this.cancel();this.server?.close();this.server=undefined;this.initialization=undefined;}
 }
 
 export function archiveAgentSession(id:string,archived:boolean) {

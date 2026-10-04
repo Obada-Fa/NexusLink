@@ -3,6 +3,9 @@ import { WorkspaceError, stringParam, intParam, hostId, downloadToken } from './
 import { readText, writeText, listPage, renameFile, gitChanges, gitDiff, hostPath, EDIT_BYTES } from './files';
 import { listTerminals, attachTerminal, detachTerminal, hasPty } from '../handlers/terminal';
 import { stat } from 'node:fs/promises';
+import { CHAT_METHODS } from '../../../../../packages/chat-core/src/index';
+let chatLibraryReady = false;
+export function setChatLibraryReady(ready: boolean) { chatLibraryReady = ready; }
 const mutations = new Map<string, { fingerprint: string; result: Promise<unknown> }>();
 export async function once(device: string, method: string, params: Record<string,unknown>, action: () => unknown) {
   const operation = stringParam(params, 'operationId', true);
@@ -22,8 +25,8 @@ export async function once(device: string, method: string, params: Record<string
 export const SUPPORTED_METHODS = ['activity.snapshot', 'activity.snapshotV2', 'activity.action', 'activity.actionStatus', 'agent.archive', 'agent.cancel', 'agent.close', 'agent.createSession', 'agent.history', 'agent.historyPage', 'agent.list', 'agent.listHostChats', 'agent.listModels', 'agent.listSessions', 'agent.openHostChat', 'agent.pendingApprovals', 'agent.permission', 'agent.prompt', 'agent.renameSession', 'agent.setApprovalMode', 'agent.setSessionCwd', 'appSession.close', 'appSession.create', 'appSession.list', 'appSession.resize', 'apps.launch', 'apps.list', 'apps.refresh', 'clipboard.get', 'clipboard.set', 'fs.gitChanges', 'fs.gitDiff', 'fs.gitStatus', 'fs.list', 'fs.listPage', 'fs.listProjects', 'fs.mkdir', 'fs.read', 'fs.readText', 'fs.rename', 'fs.writeText', 'ide.start', 'ide.status', 'ide.stop', 'input.buttonDown', 'input.buttonUp', 'input.keyEvent', 'input.mouseClick', 'input.mouseMove', 'input.mouseMoveAbs', 'input.mouseScroll', 'input.typeText', 'process.list', 'push.listTokens', 'push.registerToken', 'push.removeToken', 'push.sendTest', 'screen.getMetadata', 'screen.reportStats', 'screen.startCapture', 'screen.stopCapture', 'session.disconnect', 'session.enroll', 'session.getCapabilities', 'session.heartbeat', 'session.hello', 'session.resume', 'session.subscribe', 'system.getInfo', 'system.getPerf', 'terminal.attach', 'terminal.create', 'terminal.detach', 'terminal.input', 'terminal.kill', 'terminal.list', 'terminal.resize', 'transfer.authorize', 'webrtc.signal', 'webrtc.start', 'webrtc.stop', 'window.activate', 'window.adopt', 'window.list', 'window.release'] as const;
 export function capabilities() {
   return { protocolVersion: 2, hostId:hostId(), hostVersion:'2.0.0', platform:process.platform,
-    methods:[...SUPPORTED_METHODS],
-    features:['terminal.attach','fs.readText','fs.writeText','fs.listPage','fs.rename','fs.gitChanges','fs.gitDiff','transfer.authorize','session.subscribe','agent.historyPage','agent.archive','agent.pendingApprovals','activity.snapshot','activity.v2','activity.actions.v1'],
+    methods:[...SUPPORTED_METHODS,...(chatLibraryReady ? CHAT_METHODS : [])],
+    features:['terminal.attach','fs.readText','fs.writeText','fs.listPage','fs.rename','fs.gitChanges','fs.gitDiff','transfer.authorize','session.subscribe','agent.historyPage','agent.archive','agent.pendingApprovals','activity.snapshot','activity.v2','activity.actions.v1',...(chatLibraryReady ? ['chat.library.v1'] : [])],
     terminal:{ available:hasPty(), backend:'python-pty', maxSessions:12 }, files:{maxEditBytes:EDIT_BYTES,maxEditLines:20000},
     streaming:{experimental:true,available:!!process.env.DISPLAY,reason:process.env.DISPLAY?null:'Requires an X11 display'} };
 }

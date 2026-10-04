@@ -5,6 +5,9 @@
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../chats/chat_cache.dart';
+import '../workspace/platform_bridge.dart';
 
 import '../rpc/rpc_client.dart';
 import 'last_host.dart';
@@ -102,6 +105,12 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
       state = state.copyWith(status: RpcStatus.connected);
     } catch (_) {
       client.dispose();
+      if (client.credentialRevoked) {
+        final prefs = await SharedPreferences.getInstance();
+        final host = prefs.getString('chat-host:$wsUrl');
+        if (host != null) await ChatCache().clear(host, includeDrafts: true);
+        await PlatformBridge.removeCredential(wsUrl);
+      }
       if (generation == _generation) {
         _currentClient = null;
         if (!_disposed) {

@@ -1,6 +1,8 @@
 import type { WorkspaceRpc } from './workspace';
+import type { ChatRpc } from './chat';
+export * from './chat';
 export * from './workspace';
-export type RpcMethod = keyof WorkspaceRpc
+export type RpcMethod = keyof WorkspaceRpc | keyof ChatRpc
   | 'fs.list'
   | 'fs.read'
   | 'fs.write'
@@ -87,7 +89,7 @@ export interface RpcResponse<T = unknown> {
 }
 
 export type Params<M extends RpcMethod> =
-  M extends keyof WorkspaceRpc ? WorkspaceRpc[M]['params'] : M extends 'fs.list'
+  M extends keyof ChatRpc ? ChatRpc[M]['params'] : M extends keyof WorkspaceRpc ? WorkspaceRpc[M]['params'] : M extends 'fs.list'
     ? { path: string; showHidden?: boolean }
     : M extends 'fs.read'
     ? { path: string }
@@ -237,7 +239,7 @@ export type Params<M extends RpcMethod> =
     : never
 
 export type Result<M extends RpcMethod> =
-  M extends keyof WorkspaceRpc ? WorkspaceRpc[M]['result'] : M extends 'fs.list'
+  M extends keyof ChatRpc ? ChatRpc[M]['result'] : M extends keyof WorkspaceRpc ? WorkspaceRpc[M]['result'] : M extends 'fs.list'
     ? FileEntry[]
     : M extends 'fs.read'
     ? string
@@ -548,6 +550,7 @@ export interface AgentInfo {
 }
 
 export interface AgentSessionInfo {
+  imported?: boolean
   taskState?: 'idle'|'running'|'waiting'|'completed'|'failed'|'canceled'|'interrupted'
   turnId?: string
   updatedAt?: number
@@ -604,6 +607,7 @@ export interface AgentEvent {
 }
 
 export type WsMessage =
+  | { type: 'chat-library-update'; revision: number }
   | { type: 'rpc-request'; request: RpcRequest }
   | { type: 'rpc-response'; response: RpcResponse }
   | { type: 'stream-frame'; streamId: string; data: string; timestamp: number }

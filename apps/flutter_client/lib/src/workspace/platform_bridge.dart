@@ -18,6 +18,14 @@ class PlatformBridge {
     }
   }
 
+  static Future<void> removeCredential(String host) async {
+    if (Platform.isAndroid) {
+      await channel.invokeMethod('credential.remove', {'host': host});
+    } else {
+      _memory.remove(host);
+    }
+  }
+
   static Future<dynamic> call(
     String method, [
     Map<String, dynamic> args = const {},

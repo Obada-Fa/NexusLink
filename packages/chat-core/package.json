@@ -1,0 +1,8 @@
+{
+  "name": "@nexuslink/chat-core",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": { "test": "bun test" },
+  "dependencies": { "@nexuslink/rpc-types": "workspace:*" }
+}

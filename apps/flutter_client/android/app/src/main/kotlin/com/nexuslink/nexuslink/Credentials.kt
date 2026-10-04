@@ -11,6 +11,9 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 object Credentials {
+    fun remove(context:Context,host:String) {
+        context.getSharedPreferences("devices",0).edit().remove(host).apply()
+    }
     private const val alias = "nexuslink.devices.v2"
     private fun key(): SecretKey {
         val store=KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

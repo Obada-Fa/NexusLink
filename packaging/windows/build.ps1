@@ -11,19 +11,25 @@ if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
     throw 'Bun is required to compile the host. Install from https://bun.sh'
 }
 bun install
+if ($LASTEXITCODE -ne 0) { throw 'Workspace dependency installation failed' }
 
 Write-Host 'Building PWA…'
 bun run --cwd apps/mobile-client build
+if ($LASTEXITCODE -ne 0) { throw 'PWA build failed' }
 
 Write-Host 'Compiling Windows host…'
 $env:NEXUSLINK_STATIC_DIR = (Join-Path $Root 'apps\mobile-client\out')
-bun build --compile --outfile (Join-Path $Out 'nexuslink-host.exe') apps/windows-host/src/server/index.ts
+bun build --compile --outfile (Join-Path $Out 'nexuslink-host.exe') apps/windows-host/src/server/index.ts apps/desktop/src/server/workspace/agent-store-worker.ts packages/chat-core/src/worker.ts packages/chat-core/src/providers/worker.ts
+if ($LASTEXITCODE -ne 0) { throw 'Windows host compilation failed' }
+bun scripts/smoke-compiled-host.ts (Join-Path $Out 'nexuslink-host.exe')
+if ($LASTEXITCODE -ne 0) { throw 'Compiled host smoke test failed' }
 
 Copy-Item -Recurse -Force (Join-Path $Root 'apps\mobile-client\out') (Join-Path $Out 'www')
 
 if (Get-Command cargo -ErrorAction SilentlyContinue) {
     Write-Host 'Building sidecar…'
     cargo build --release --manifest-path (Join-Path $Root 'sidecar\Cargo.toml')
+    if ($LASTEXITCODE -ne 0) { throw 'Sidecar build failed' }
     $sidecar = Join-Path $Root 'sidecar\target\release\nexuslink-sidecar.exe'
     if (Test-Path $sidecar) { Copy-Item $sidecar $Out }
 }
@@ -35,6 +41,7 @@ $nsi = Join-Path $PSScriptRoot 'nexuslink.nsi'
 if (Get-Command makensis -ErrorAction SilentlyContinue) {
     Write-Host 'Building installer…'
     makensis /DHOST_DIR="$Out" $nsi
+    if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
 } else {
     Write-Host 'makensis not found — zip the dist\windows folder or install NSIS.'
 }

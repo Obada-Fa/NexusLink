@@ -27,7 +27,9 @@
         android:label="${appLabel}"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:usesCleartextTraffic="true">
+        android:usesCleartextTraffic="true"
+        android:fullBackupContent="@xml/chat_backup_rules"
+        android:dataExtractionRules="@xml/chat_data_extraction_rules">
         <service android:name=".LiveActivityService" android:exported="false" android:foregroundServiceType="connectedDevice"/>
         <receiver android:name=".NotificationActionReceiver" android:exported="false"/>
         <activity

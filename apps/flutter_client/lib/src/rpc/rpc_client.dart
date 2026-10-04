@@ -103,6 +103,7 @@ class RpcClient {
   String? pairingCode;
   String? token;
   String? hostId;
+  bool credentialRevoked = false;
   Map<String, dynamic> capabilities = {};
   String phase = 'disconnected';
   int _generation = 0;
@@ -215,10 +216,15 @@ class RpcClient {
               'UNAUTHENTICATED',
             );
           }
-          auth = expectMap(
-            await _requestRaw('session.resume', {'credential': credential}),
-            'session.resume',
-          );
+          try {
+            auth = expectMap(
+              await _requestRaw('session.resume', {'credential': credential}),
+              'session.resume',
+            );
+          } on RpcException catch (error) {
+            if (error.code == 'UNAUTHENTICATED') credentialRevoked = true;
+            rethrow;
+          }
         }
         token = auth['token'] as String;
         hostId = auth['hostId'] as String;
@@ -234,6 +240,17 @@ class RpcClient {
         token = await performPairingHandshake(_requestRaw);
         capabilities = {};
         hostId = wsUrl;
+        try {
+          capabilities = expectMap(
+            await _requestRaw('session.getCapabilities', {}),
+            'session.getCapabilities',
+          );
+          if (capabilities['hostId'] is String) {
+            hostId = capabilities['hostId'] as String;
+          }
+        } on RpcException {
+          // Preserve access to NexusLink chats on hosts predating capabilities.
+        }
       }
       if (_closed || generation != _generation || !identical(_ws, ws)) {
         throw RpcException(

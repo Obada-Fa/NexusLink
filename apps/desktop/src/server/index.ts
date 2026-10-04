@@ -2,6 +2,10 @@ import { initializeAgentStore, storedHistory, storedActivity, storedActivityV2, 
 import { archiveAgentSession, pendingAgentApprovals } from './handlers/agents';
 import { enroll, resume, accessToken, hostId, WorkspaceError, stringParam, isPrivatePeer } from './workspace/security';
 import { workspaceRequest, validateRequest, once } from './workspace/protocol';
+import { createChatLibrary } from './workspace/chat-library';
+import { dataDirectory } from './workspace/security';
+import { closeSecurityStore } from './workspace/security';
+import { setChatLibraryReady } from './workspace/protocol';
 import { detachTerminalsForSocket, stopAllTerminals } from './handlers/terminal';
 // Linux/X11 host. Windows ships as apps/windows-host — do not add win32 branches here.
 import type { WsMessage, RpcRequest, RpcResponse, RpcMethod } from '@nexuslink/rpc-types';
@@ -93,6 +97,12 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   }
   bindHost = bindHost ?? '0.0.0.0';
   await initializeAgentStore();
+  const chats = await createChatLibrary(dataDirectory(), hostId(), (connection, revision) => {
+    const ws = connection as WebSocket;
+    const id = findSession(ws);
+    if (id && sessions.get(id)?.role !== 'monitor') send(ws, { type: 'chat-library-update', revision });
+  });
+  setChatLibraryReady(true);
 
   function send(ws: WebSocket, msg: WsMessage) {
     // Handshake and RPC errors must still reach an unauthenticated socket.
@@ -190,6 +200,10 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         if(session.role === 'monitor') session.topics=new Set(['agents',...(topics.includes('activity')?['activity']:[])]);
       }
       send(ws,{type:'rpc-response',response:{id:req.id,result:{ok:true}}}); return;
+    }
+    if (method.startsWith('chat.')) {
+      const result = await chats.request(method, params, ws, accessToken(session?.token)?.deviceId || 'development');
+      send(ws, { type: 'rpc-response', response: { id: req.id, result } }); return;
     }
     const extra = await workspaceRequest(method,params,ws,accessToken(session?.token)?.deviceId || 'development');
     if (extra.handled) { send(ws,{type:'rpc-response',response:{id:req.id,result:extra.result}}); return; }
@@ -645,6 +659,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         }
       },
       close(ws) {
+        chats.subscribe(ws, false);
         detachTerminalsForSocket(ws as unknown as WebSocket);
         stopCapturesForSocket(ws as unknown as WebSocket);
         stopWebrtcForSocket(ws as unknown as WebSocket);
@@ -675,7 +690,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   const servesClient = await staticAvailable();
   printLaunchBanner(server.port, servesClient);
   console.log(`[rpc-server] listening on ${bindHost}:${server.port}`);
-  return { port: server.port, stop: async () => { await closeAgentStore(); clearInterval(metricTimer); clearInterval(windowTimer); stopAllTerminals(); server.stop(true); } };
+  return { port: server.port, stop: async () => { setChatLibraryReady(false); await chats.close(); await closeAgentStore(); clearInterval(metricTimer); clearInterval(windowTimer); stopAllTerminals(); server.stop(true); closeSecurityStore(); } };
 }
 
 // Start the server if this file is run directly

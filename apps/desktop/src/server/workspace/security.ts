@@ -22,6 +22,7 @@ function db() {
 }
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 export function hostId(): string { return (db().query('SELECT value FROM settings WHERE key=?').get('hostId') as any).value; }
+export function closeSecurityStore() { database?.close(); database = undefined as any; tokens.clear(); }
 export function enableEnrollment(): string {
   const code = String(randomInt(10000000, 100000000));
   db().query('INSERT OR REPLACE INTO enrollment VALUES (1, ?, ?, 0)').run(hash(code), Date.now() + 300000);
@@ -38,7 +39,7 @@ export function enroll(code: string, name: string) {
     db().query('INSERT INTO devices VALUES (?, ?, ?, ?)').run(deviceId, name.slice(0, 100), hash(credential), Date.now());
     db().query('DELETE FROM enrollment').run();
   })();
-  return { deviceId, credential, hostId: hostId(), ...resume(credential) };
+  return { credential, ...resume(credential) };
 }
 export function listDevices() { return db().query('SELECT id, name, created FROM devices').all(); }
 export function revokeDevice(id: string) { db().query('DELETE FROM devices WHERE id=?').run(id); }
