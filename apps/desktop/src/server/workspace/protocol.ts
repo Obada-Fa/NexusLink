@@ -19,11 +19,11 @@ export async function once(device: string, method: string, params: Record<string
   while (mutations.size > 2048) mutations.delete(mutations.keys().next().value!);
   return await result;
 }
-export const SUPPORTED_METHODS = ['activity.snapshot', 'agent.archive', 'agent.cancel', 'agent.close', 'agent.createSession', 'agent.history', 'agent.historyPage', 'agent.list', 'agent.listHostChats', 'agent.listModels', 'agent.listSessions', 'agent.openHostChat', 'agent.pendingApprovals', 'agent.permission', 'agent.prompt', 'agent.renameSession', 'agent.setApprovalMode', 'agent.setSessionCwd', 'appSession.close', 'appSession.create', 'appSession.list', 'appSession.resize', 'apps.launch', 'apps.list', 'apps.refresh', 'clipboard.get', 'clipboard.set', 'fs.gitChanges', 'fs.gitDiff', 'fs.gitStatus', 'fs.list', 'fs.listPage', 'fs.listProjects', 'fs.mkdir', 'fs.read', 'fs.readText', 'fs.rename', 'fs.writeText', 'ide.start', 'ide.status', 'ide.stop', 'input.buttonDown', 'input.buttonUp', 'input.keyEvent', 'input.mouseClick', 'input.mouseMove', 'input.mouseMoveAbs', 'input.mouseScroll', 'input.typeText', 'process.list', 'push.listTokens', 'push.registerToken', 'push.removeToken', 'push.sendTest', 'screen.getMetadata', 'screen.reportStats', 'screen.startCapture', 'screen.stopCapture', 'session.disconnect', 'session.enroll', 'session.getCapabilities', 'session.heartbeat', 'session.hello', 'session.resume', 'session.subscribe', 'system.getInfo', 'system.getPerf', 'terminal.attach', 'terminal.create', 'terminal.detach', 'terminal.input', 'terminal.kill', 'terminal.list', 'terminal.resize', 'transfer.authorize', 'webrtc.signal', 'webrtc.start', 'webrtc.stop', 'window.activate', 'window.adopt', 'window.list', 'window.release'] as const;
+export const SUPPORTED_METHODS = ['activity.snapshot', 'activity.snapshotV2', 'activity.action', 'activity.actionStatus', 'agent.archive', 'agent.cancel', 'agent.close', 'agent.createSession', 'agent.history', 'agent.historyPage', 'agent.list', 'agent.listHostChats', 'agent.listModels', 'agent.listSessions', 'agent.openHostChat', 'agent.pendingApprovals', 'agent.permission', 'agent.prompt', 'agent.renameSession', 'agent.setApprovalMode', 'agent.setSessionCwd', 'appSession.close', 'appSession.create', 'appSession.list', 'appSession.resize', 'apps.launch', 'apps.list', 'apps.refresh', 'clipboard.get', 'clipboard.set', 'fs.gitChanges', 'fs.gitDiff', 'fs.gitStatus', 'fs.list', 'fs.listPage', 'fs.listProjects', 'fs.mkdir', 'fs.read', 'fs.readText', 'fs.rename', 'fs.writeText', 'ide.start', 'ide.status', 'ide.stop', 'input.buttonDown', 'input.buttonUp', 'input.keyEvent', 'input.mouseClick', 'input.mouseMove', 'input.mouseMoveAbs', 'input.mouseScroll', 'input.typeText', 'process.list', 'push.listTokens', 'push.registerToken', 'push.removeToken', 'push.sendTest', 'screen.getMetadata', 'screen.reportStats', 'screen.startCapture', 'screen.stopCapture', 'session.disconnect', 'session.enroll', 'session.getCapabilities', 'session.heartbeat', 'session.hello', 'session.resume', 'session.subscribe', 'system.getInfo', 'system.getPerf', 'terminal.attach', 'terminal.create', 'terminal.detach', 'terminal.input', 'terminal.kill', 'terminal.list', 'terminal.resize', 'transfer.authorize', 'webrtc.signal', 'webrtc.start', 'webrtc.stop', 'window.activate', 'window.adopt', 'window.list', 'window.release'] as const;
 export function capabilities() {
   return { protocolVersion: 2, hostId:hostId(), hostVersion:'2.0.0', platform:process.platform,
     methods:[...SUPPORTED_METHODS],
-    features:['terminal.attach','fs.readText','fs.writeText','fs.listPage','fs.rename','fs.gitChanges','fs.gitDiff','transfer.authorize','session.subscribe','agent.historyPage','agent.archive','agent.pendingApprovals','activity.snapshot'],
+    features:['terminal.attach','fs.readText','fs.writeText','fs.listPage','fs.rename','fs.gitChanges','fs.gitDiff','transfer.authorize','session.subscribe','agent.historyPage','agent.archive','agent.pendingApprovals','activity.snapshot','activity.v2','activity.actions.v1'],
     terminal:{ available:hasPty(), backend:'python-pty', maxSessions:12 }, files:{maxEditBytes:EDIT_BYTES,maxEditLines:20000},
     streaming:{experimental:true,available:!!process.env.DISPLAY,reason:process.env.DISPLAY?null:'Requires an X11 display'} };
 }
@@ -65,7 +65,7 @@ export function validateRequest(method:string,p:Record<string,unknown>) {
     if(p.role!==undefined && p.role!=='control' && p.role!=='monitor') throw new WorkspaceError('INVALID_ARGUMENT','Invalid connection role.');
   }
   if(method==='session.subscribe') {
-    if(!Array.isArray(p.topics) || p.topics.some(topic=>!['agents','metrics','windows'].includes(topic))) throw new WorkspaceError('INVALID_ARGUMENT','Invalid subscription topics.');
+    if(!Array.isArray(p.topics) || p.topics.some(topic=>!['agents','metrics','windows','activity'].includes(topic))) throw new WorkspaceError('INVALID_ARGUMENT','Invalid subscription topics.');
     if(p.metricsInterval!==undefined && p.metricsInterval!==2000 && p.metricsInterval!==5000) throw new WorkspaceError('INVALID_ARGUMENT','Metrics interval must be two or five seconds.');
   }
   if(method==='terminal.create' || method==='terminal.resize') { intParam(p,'cols',80,1,1000); intParam(p,'rows',24,1,1000); }
@@ -90,5 +90,14 @@ export function validateRequest(method:string,p:Record<string,unknown>) {
   if(method==='fs.gitDiff') {stringParam(p,'cwd');stringParam(p,'path');if(p.staged!==undefined && typeof p.staged!=='boolean') throw new WorkspaceError('INVALID_ARGUMENT','Invalid staged flag.');}
   if(method==='agent.historyPage') {stringParam(p,'agentSessionId');intParam(p,'limit',100,1,200);if(p.beforeSeq!==undefined && p.afterSeq!==undefined) throw new WorkspaceError('INVALID_ARGUMENT','Choose one history cursor.');if(p.beforeSeq!==undefined)intParam(p,'beforeSeq',0,1,Number.MAX_SAFE_INTEGER);if(p.afterSeq!==undefined)intParam(p,'afterSeq',0,0,Number.MAX_SAFE_INTEGER);}
   if(method==='activity.snapshot') intParam(p,'cursor',0,0,Number.MAX_SAFE_INTEGER);
+  if(method==='activity.snapshotV2') {intParam(p,'cursor',0,0,Number.MAX_SAFE_INTEGER);if(p.throughCursor!==undefined)intParam(p,'throughCursor',0,0,Number.MAX_SAFE_INTEGER);}
+  if(method==='activity.action') {
+    for(const key of ['operationId','hostId','agentSessionId','expectedTurnId'])stringParam(p,key);
+    intParam(p,'sourceCursor',0,1,Number.MAX_SAFE_INTEGER);
+    if(!['approve','deny','reply'].includes(p.action as string))throw new WorkspaceError('INVALID_ARGUMENT','Invalid notification action.');
+    if(p.action==='reply'){const text=stringParam(p,'text');if(!text.trim()||Buffer.byteLength(text,'utf8')>8192)throw new WorkspaceError('INVALID_ARGUMENT','Reply must be 1–8192 UTF-8 bytes.');}
+    else stringParam(p,'requestId');
+  }
+  if(method==='activity.actionStatus')stringParam(p,'operationId');
   if(method==='agent.permission' && typeof p.allow!=='boolean') throw new WorkspaceError('INVALID_ARGUMENT','Approval must be a boolean.');
 }

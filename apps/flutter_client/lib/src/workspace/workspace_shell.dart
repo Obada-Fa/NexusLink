@@ -247,6 +247,7 @@ class _PcScreenState extends ConsumerState<PcScreen>
     with WidgetsBindingObserver {
   Map<String, dynamic>? _info;
   bool _live = false, _bubble = false;
+  Map<String, dynamic> _liveStatus = {};
   String? _error;
   bool _awaitingOverlayPermission = false;
 
@@ -273,9 +274,25 @@ class _PcScreenState extends ConsumerState<PcScreen>
         await _setLive(true, bubble: true);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Floating status bubble enabled')),
+            const SnackBar(
+              content: Text(
+                'Bubble requested. It appears while NexusLink is in the background.',
+              ),
+            ),
           );
         }
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text(
+              'Overlay access is still unavailable. In App info, allow restricted settings if shown, then allow display over other apps.',
+            ),
+            action: SnackBarAction(
+              label: 'App info',
+              onPressed: () => PlatformBridge.call('live.appInfo'),
+            ),
+          ),
+        );
       }
     }
   }
@@ -296,8 +313,11 @@ class _PcScreenState extends ConsumerState<PcScreen>
       if (mounted) {
         setState(() {
           _info = info;
-          _live = live?['running'] == true;
-          _bubble = live?['bubble'] == true;
+          _liveStatus = live == null
+              ? {}
+              : Map<String, dynamic>.from(live as Map);
+          _live = _liveStatus['monitoringRequested'] == true;
+          _bubble = _liveStatus['bubbleRequested'] == true;
         });
       }
     } catch (e) {
@@ -316,12 +336,7 @@ class _PcScreenState extends ConsumerState<PcScreen>
       } else {
         await PlatformBridge.call('live.stop');
       }
-      if (mounted) {
-        setState(() {
-          _live = enabled;
-          if (bubble != null) _bubble = bubble;
-        });
-      }
+      await _load();
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
     }
@@ -403,28 +418,123 @@ class _PcScreenState extends ConsumerState<PcScreen>
           if (Platform.isAndroid) ...[
             SwitchListTile(
               title: const Text('Live activity'),
-              subtitle: const Text(
-                'Show task status in top status bar and ongoing notification',
+              subtitle: Text(
+                'Monitoring: ${_liveStatus['connectionState'] ?? 'stopped'} · Notifications: ${_liveStatus['notificationPermission'] == true && _liveStatus['notificationChannelAvailable'] == true ? 'available' : 'unavailable'}',
               ),
               value: _live,
               onChanged: (v) => _setLive(v),
             ),
             SwitchListTile(
               title: const Text('Floating status bubble'),
-              subtitle: const Text(
-                'Show live status pill on top (working, needs approval)',
+              subtitle: Text(
+                _liveStatus['bubbleVisible'] == true
+                    ? 'Visible'
+                    : '${_liveStatus['bubbleHiddenReason'] ?? 'Hidden'} · Notifications remain available',
               ),
               value: _bubble,
               onChanged: (value) async {
                 if (value) {
                   final status = await PlatformBridge.call('live.status');
                   if (status['overlay'] != true) {
+                    if (!context.mounted) return;
+                    final proceed = await showDialog<bool>(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: const Text('Allow floating bubble'),
+                        content: const Text(
+                          'NexusLink needs display-over-other-apps access to show a small task bubble while you use other apps. Notifications still work without it.',
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(ctx, false),
+                            child: const Text('Later'),
+                          ),
+                          TextButton(
+                            onPressed: () => Navigator.pop(ctx, true),
+                            child: const Text('Open settings'),
+                          ),
+                        ],
+                      ),
+                    );
+                    if (proceed != true) return;
                     _awaitingOverlayPermission = true;
                     await PlatformBridge.call('live.permission');
                     return;
                   }
                 }
                 await _setLive(value || _live, bubble: value);
+              },
+            ),
+            SwitchListTile(
+              title: const Text('Notification actions'),
+              subtitle: Text(
+                ref
+                            .read(activeClientProvider)
+                            ?.supports('activity.actions.v1') ==
+                        true
+                    ? 'Allow approve, deny, and text reply from notifications'
+                    : 'Update the PC host to enable watch actions',
+              ),
+              value: _liveStatus['notificationActionsEnabled'] == true,
+              onChanged:
+                  ref
+                          .read(activeClientProvider)
+                          ?.supports('activity.actions.v1') ==
+                      true
+                  ? (value) async {
+                      await PlatformBridge.call('live.configureActions', {
+                        'enabled': value,
+                        'locked':
+                            value &&
+                            _liveStatus['actionsAllowedLocked'] == true,
+                      });
+                      await _load();
+                    }
+                  : null,
+            ),
+            SwitchListTile(
+              title: const Text('Allow actions while phone is locked'),
+              subtitle: const Text(
+                'Permits notification actions without unlocking the phone. This does not verify who is wearing the watch.',
+              ),
+              value: _liveStatus['actionsAllowedLocked'] == true,
+              onChanged:
+                  ref
+                          .read(activeClientProvider)
+                          ?.supports('activity.actions.v1') ==
+                      true
+                  ? (value) async {
+                      await PlatformBridge.call('live.configureActions', {
+                        'enabled':
+                            value ||
+                            _liveStatus['notificationActionsEnabled'] == true,
+                        'locked': value,
+                      });
+                      await _load();
+                    }
+                  : null,
+            ),
+            ListTile(
+              leading: const Icon(Icons.watch_outlined),
+              title: const Text('Send test notification'),
+              subtitle: const Text(
+                'In Mobvoi Health, enable notifications for this installed NexusLink package. Check the watch itself for delivery.',
+              ),
+              onTap: () async {
+                final status = await PlatformBridge.call(
+                  'live.testNotification',
+                );
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        status['posted'] == true
+                            ? 'Posted on the phone. Confirm delivery on the TicWatch.'
+                            : 'Phone notifications are unavailable. Check notification permission and channel settings.',
+                      ),
+                    ),
+                  );
+                }
               },
             ),
           ],

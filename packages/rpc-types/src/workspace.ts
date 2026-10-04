@@ -17,12 +17,29 @@ export interface TextDocument {
   readOnlyReason:string|null;truncated:boolean;binary:boolean;mode:number;
 }
 export interface AuthSession {token:string;expires:number;hostId:string;deviceId:string}
+export interface ActivityRecord {
+  cursor:number;ts:number;hostId:string;agentSessionId:string;turnId?:string;eventSeq:number;
+  kind:'completed'|'failed'|'approval-requested'|'approval-resolved'|'task-updated';
+  requestId?:string;approvalOutcome?:'allowed'|'denied'|'canceled'|'expired';
+  title:string;project:string;provider:string;taskState:string;preview:string;
+  previewComplete?:boolean;availableActions:Array<'approve'|'deny'|'reply'|'open'>;
+}
+export interface ActivitySnapshotV2 {
+  sessions:AgentSessionInfo[];
+  pendingApprovals:Array<{agentSessionId:string;requestId:string;event:AgentEvent}>;
+  events:ActivityRecord[];nextCursor:number;throughCursor:number;hasMore:boolean;replayGap:boolean;
+}
+export interface ActivityActionRequest {
+  operationId:string;hostId:string;agentSessionId:string;expectedTurnId:string;
+  sourceCursor:number;action:'approve'|'deny'|'reply';requestId?:string;text?:string;
+}
+export interface ActivityActionResult {operationId:string;state:'claimed'|'dispatching'|'succeeded'|'rejected'|'uncertain';reason?:string}
 export interface WorkspaceRpc {
   'session.hello': {params:{};result:{protocolVersion:2}};
   'session.enroll': {params:{code:string;name:string};result:AuthSession & {credential:string}};
   'session.resume': {params:{credential:string;role?:'control'|'monitor'};result:AuthSession};
   'session.getCapabilities': {params:{};result:HostCapabilities};
-  'session.subscribe': {params:{topics:Array<'agents'|'metrics'|'windows'>;metricsInterval?:number};result:{ok:boolean}};
+  'session.subscribe': {params:{topics:Array<'agents'|'metrics'|'windows'|'activity'>;metricsInterval?:number};result:{ok:boolean}};
   'terminal.list': {params:{};result:TerminalSummary[]};
   'terminal.attach': {params:{terminalId:string;afterSeq?:number};result:TerminalSummary & {gap:boolean;oldestSeq:number}};
   'terminal.detach': {params:{terminalId:string};result:{ok:boolean}};
@@ -37,9 +54,12 @@ export interface WorkspaceRpc {
   'agent.pendingApprovals': {params:{agentSessionId:string};result:AgentEvent[]};
   'agent.archive': {params:{agentSessionId:string;archived?:boolean};result:{ok:boolean}};
   'activity.snapshot': {params:{cursor?:number};result:{sessions:AgentSessionInfo[];cursor:number;events:Array<{cursor:number;type:'agent-event';agentSessionId:string;event:Pick<AgentEvent,'seq'|'ts'|'kind'|'turnId'|'refId'>}>}};
+  'activity.snapshotV2': {params:{cursor?:number;throughCursor?:number};result:ActivitySnapshotV2};
+  'activity.action': {params:ActivityActionRequest;result:ActivityActionResult};
+  'activity.actionStatus': {params:{operationId:string};result:ActivityActionResult};
 }
 export const WORKSPACE_METHODS = [
   'session.hello','session.enroll','session.resume','session.getCapabilities','session.subscribe',
   'terminal.list','terminal.attach','terminal.detach','fs.readText','fs.writeText','fs.listPage','fs.rename',
-  'fs.gitChanges','fs.gitDiff','transfer.authorize','agent.historyPage','agent.pendingApprovals','agent.archive','activity.snapshot',
+  'fs.gitChanges','fs.gitDiff','transfer.authorize','agent.historyPage','agent.pendingApprovals','agent.archive','activity.snapshot','activity.snapshotV2','activity.action','activity.actionStatus',
 ] as const satisfies readonly (keyof WorkspaceRpc)[];

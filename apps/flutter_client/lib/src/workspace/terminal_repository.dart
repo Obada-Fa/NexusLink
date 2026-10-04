@@ -1,10 +1,21 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xterm/xterm.dart';
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
+import '../screens/terminal_input_controller.dart';
+
+String newTerminalOperationId() {
+  final random = Random.secure();
+  final bytes = List<int>.generate(16, (_) => random.nextInt(256));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  final hex = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}';
+}
 
 final terminalRepositoryProvider = Provider((ref) {
   final repository = TerminalRepository();
@@ -28,10 +39,11 @@ class TerminalRepository {
     _status = client?.statusStream.listen((status) {
       if (status == RpcStatus.connected) {
         _restore();
-      } else
+      } else {
         for (final t in _sessions.values) {
           t.disconnected();
         }
+      }
     });
     _restore();
   }
@@ -75,6 +87,7 @@ class RemoteTerminal extends ChangeNotifier {
   RemoteTerminal(this.host, this.key, {this.cwd, this.id}) {
     terminal = Terminal(
       maxLines: 4000,
+      inputHandler: const CursorModeInputHandler(),
       onOutput: input,
       onResize: (w, h, _, _) => resize(w, h),
     );
@@ -170,13 +183,13 @@ class RemoteTerminal extends ChangeNotifier {
       if (_disposed || generation != _generation) return;
       id ??= prefs.getString('terminal:$host:$key');
       if (id == null) {
-        _operation ??= '$host:$key:${DateTime.now().microsecondsSinceEpoch}';
+        _operation ??= newTerminalOperationId();
         final response = await connection.requestMap('terminal.create', {
           'cols': terminal.viewWidth > 0 ? terminal.viewWidth : 80,
           'rows': terminal.viewHeight > 0 ? terminal.viewHeight : 24,
           'detached': true,
           'operationId': _operation,
-          'taskId': key,
+          if (key != 'global' && !key.startsWith('global:')) 'taskId': key,
           if (cwd != null) 'cwd': cwd,
         });
         id = response['terminalId'] as String;

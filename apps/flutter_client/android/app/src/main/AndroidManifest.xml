@@ -29,6 +29,7 @@
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">
         <service android:name=".LiveActivityService" android:exported="false" android:foregroundServiceType="connectedDevice"/>
+        <receiver android:name=".NotificationActionReceiver" android:exported="false"/>
         <activity
             android:name=".MainActivity"
             android:exported="true"

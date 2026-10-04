@@ -579,6 +579,7 @@ export interface AgentHostChat {
 /** Normalized event emitted by any agent adapter (superset of stream-json). */
 export interface AgentEvent {
   turnId?: string
+  approvalOutcome?: 'allowed'|'denied'|'canceled'|'expired'
   seq: number
   ts: number
   kind:
@@ -617,5 +618,6 @@ export type WsMessage =
   | { type: 'agent-session-update'; session: AgentSessionInfo }
   | { type: 'agent-session-deleted'; agentSessionId: string }
   | { type: 'agent-event'; agentSessionId: string; event: AgentEvent }
+  | { type: 'activity-update'; record: import('./workspace').ActivityRecord }
   | { type: 'apps-update'; apps: AppInfo[] }
   | { type: 'windows-update'; windows: WindowInfo[] }
