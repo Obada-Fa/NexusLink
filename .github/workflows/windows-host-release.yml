@@ -6,6 +6,11 @@ on:
       - 'v*'
       - 'test-v*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release tag to attach the rebuilt installer to'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -49,11 +54,12 @@ jobs:
             dist/NexusLink-Host-Setup.exe
             dist/windows/**
       - name: GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           body_path: release-notes.md
           files: |
             dist/NexusLink-Host-Setup.exe
           generate_release_notes: true
-          prerelease: ${{ startsWith(github.ref_name, 'test-') }}
+          prerelease: ${{ startsWith(inputs.release_tag || github.ref_name, 'test-') }}

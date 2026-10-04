@@ -55,6 +55,6 @@ flutter analyze
 
 ## Pending release acceptance
 
-This PC has no Android SDK at the standard local installation path; the ignored Android `local.properties` still references a Linux SDK directory. No APK or physical-device result is claimed. The existing release signing requirements in [ANDROID-RELEASE.md](ANDROID-RELEASE.md) still apply.
+This PC has no Android SDK at the standard local installation path; the ignored Android `local.properties` still references a Linux SDK directory. GitHub Actions built and attached the separately signed NexusLink Test APK for `test-v1.0.34+40`. The PWA production build and compiled Windows host startup/list RPC passed locally. No physical-device result is claimed. The existing production signing requirements in [ANDROID-RELEASE.md](ANDROID-RELEASE.md) still apply.
 
 Before release, complete [ANDROID-ACCEPTANCE.md](ANDROID-ACCEPTANCE.md) against both hosts and record each installed provider's discovery, history, and continuation separately. Verify PC-originated updates, native-ID continuity for supported managed replies, busy/unknown refusal, sleeping/waking the PC, network changes, background drafts and reading position, credential revocation, host restart, and cached launch latency. The plan's release gate remains open until those checks pass.

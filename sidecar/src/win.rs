@@ -12,11 +12,11 @@ use windows::Win32::Graphics::Gdi::{
     ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ, SRCCOPY,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    mouse_event, SetCursorPos, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTDOWN,
+    mouse_event, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTDOWN,
     MOUSEEVENTF_RIGHTUP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetSystemMetrics, GetWindowTextW, IsWindowVisible, SM_CXSCREEN, SM_CYSCREEN,
+    EnumWindows, GetSystemMetrics, GetWindowTextW, IsWindowVisible, SetCursorPos, SM_CXSCREEN, SM_CYSCREEN,
 };
 
 struct PtySession {
@@ -44,7 +44,7 @@ pub fn screen_grab(_params: Option<Value>) -> Result<Value, String> {
         if w <= 0 || h <= 0 {
             return Err("no screen".into());
         }
-        let hdc = GetDC(HWND(0));
+        let hdc = GetDC(HWND::default());
         let mem = CreateCompatibleDC(hdc);
         let hbmp = CreateCompatibleBitmap(hdc, w, h);
         let old = SelectObject(mem, HGDIOBJ(hbmp.0));
@@ -66,7 +66,7 @@ pub fn screen_grab(_params: Option<Value>) -> Result<Value, String> {
         SelectObject(mem, old);
         let _ = DeleteObject(HGDIOBJ(hbmp.0));
         let _ = DeleteDC(mem);
-        ReleaseDC(HWND(0), hdc);
+        ReleaseDC(HWND::default(), hdc);
 
         let mut rgb = vec![0u8; (w * h * 3) as usize];
         for i in 0..(w * h) as usize {
