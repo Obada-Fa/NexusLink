@@ -561,3 +561,16 @@ export function activateWindow(windowId: string): { ok: boolean } {
   run(['wmctrl', '-i', '-a', windowId]);
   return { ok: true };
 }
+
+/** Ask the application to close normally, allowing unsaved-work dialogs. */
+export function closeWindow(windowId: string): { ok: boolean } {
+  if (typeof windowId !== 'string' || !/^0x[0-9a-f]+$/i.test(windowId)) {
+    throw new Error('Invalid window ID.');
+  }
+  const result = Bun.spawnSync(['wmctrl', '-i', '-c', windowId], {
+    env: { ...process.env, DISPLAY },
+    stderr: 'pipe',
+  });
+  if (result.exitCode !== 0) throw new Error('Could not close the window.');
+  return { ok: true };
+}

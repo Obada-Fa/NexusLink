@@ -13,7 +13,7 @@ import 'src/state/connection.dart';
 import 'src/state/last_host.dart';
 import 'src/workspace/workspace_shell.dart';
 import 'src/widgets/connection_lifecycle.dart';
-import 'src/widgets/link_actions.dart';
+import 'src/state/saved_devices.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -59,7 +59,11 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
   bool _scanning = false;
   bool _connecting = false;
   String? _error;
-  String? _lastHostUrl;
+  List<SavedDevice> _devices = [];
+  bool _showAddDevice = false;
+  String? _connectingUrl;
+  final _nameController = TextEditingController();
+  String _newIcon = 'desktop';
 
   @override
   void initState() {
@@ -69,32 +73,176 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
 
   @override
   void dispose() {
+    _nameController.dispose();
     _urlController.dispose();
     _pairingController.dispose();
     super.dispose();
   }
 
   Future<void> _loadLastHost() async {
-    String? last = await loadLastHostUrl();
-    if (Platform.isAndroid) {
-      final deepLink = await PlatformBridge.call('live.pendingTask');
+    try {
+      final devices = await SavedDevices.load();
       if (!mounted) return;
-      if (deepLink is Map) {
-        last = deepLink['host'] as String? ?? last;
-        ref
-            .read(pendingTaskProvider.notifier)
-            .select(deepLink['taskId'] as String?);
+      setState(() {
+        _devices = devices;
+        _showAddDevice = devices.isEmpty;
+      });
+      if (Platform.isAndroid) {
+        final deepLink = await PlatformBridge.call('live.pendingTask');
+        if (!mounted) return;
+        if (deepLink is Map && deepLink['host'] is String) {
+          ref
+              .read(pendingTaskProvider.notifier)
+              .select(deepLink['taskId'] as String?);
+          await _connect(deepLink['host'] as String);
+        }
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _error = 'Could not load saved devices: $error';
+          _showAddDevice = true;
+        });
       }
     }
-    if (!mounted || last == null) return;
-    final target = last;
-    setState(() {
-      _lastHostUrl = target;
-      if (_urlController.text.isEmpty) {
-        _urlController.text = target;
+  }
+
+  IconData _deviceIcon(String icon) => switch (icon) {
+    'laptop' => Icons.laptop_mac_rounded,
+    'server' => Icons.dns_rounded,
+    'gaming' => Icons.sports_esports_rounded,
+    _ => Icons.desktop_windows_rounded,
+  };
+
+  Future<void> _editDevice(SavedDevice device) async {
+    var name = device.name;
+    var icon = device.icon;
+    final result = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => StatefulBuilder(
+        builder: (context, update) => Padding(
+          padding: EdgeInsets.fromLTRB(
+            24,
+            8,
+            24,
+            MediaQuery.viewInsetsOf(context).bottom + 24,
+          ),
+          child: SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'Edit device',
+                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 16),
+                TextFormField(
+                  initialValue: name,
+                  maxLength: 40,
+                  decoration: const InputDecoration(labelText: 'Device name'),
+                  onChanged: (value) => update(() => name = value),
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 12,
+                  children: deviceIcons
+                      .map(
+                        (value) => ChoiceChip(
+                          label: Icon(_deviceIcon(value)),
+                          tooltip: value,
+                          selected: icon == value,
+                          onSelected: (_) => update(() => icon = value),
+                        ),
+                      )
+                      .toList(),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  lastHostLabel(device.url),
+                  style: const TextStyle(color: Colors.white54),
+                ),
+                const SizedBox(height: 20),
+                FilledButton(
+                  onPressed: name.trim().isEmpty
+                      ? null
+                      : () => Navigator.pop(context, 'save'),
+                  child: const Text('Save'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(context, 'remove'),
+                  child: const Text('Remove saved device'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    final devices = [
+      for (final saved in _devices)
+        if (saved.url != device.url)
+          saved
+        else if (result == 'save')
+          SavedDevice(url: saved.url, name: name.trim(), icon: icon),
+    ];
+    try {
+      await SavedDevices.save(devices);
+      if (mounted) {
+        setState(() {
+          _devices = devices;
+          _showAddDevice = devices.isEmpty;
+        });
       }
-    });
-    await _connect(target);
+    } catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    }
+  }
+
+  Widget _deviceCard(SavedDevice device) {
+    final connecting = _connectingUrl == device.url;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      clipBehavior: Clip.antiAlias,
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 18,
+          vertical: 12,
+        ),
+        leading: Container(
+          width: 56,
+          height: 56,
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              colors: [Color(0xFF537FE7), Color(0xFF7756C9)],
+            ),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Icon(_deviceIcon(device.icon), color: Colors.white, size: 30),
+        ),
+        title: Text(
+          device.name,
+          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 18),
+        ),
+        subtitle: Text(connecting ? 'Connecting…' : 'Tap to connect'),
+        trailing: connecting
+            ? const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : IconButton(
+                tooltip: 'Edit device',
+                icon: const Icon(Icons.more_horiz),
+                onPressed: _connecting ? null : () => _editDevice(device),
+              ),
+        onTap: _connecting ? null : () => _connect(device.url),
+        onLongPress: _connecting ? null : () => _editDevice(device),
+      ),
+    );
   }
 
   Future<void> _scan() async {
@@ -113,9 +261,12 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
     }
   }
 
-  Future<void> _connect(String wsUrl) async {
+  Future<void> _connect(String wsUrl, {String? name, String? icon}) async {
+    if (_connecting) return;
+    wsUrl = normalizeHostWsUrl(wsUrl);
     setState(() {
       _connecting = true;
+      _connectingUrl = wsUrl;
       _error = null;
     });
     try {
@@ -127,17 +278,43 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                 ? null
                 : _pairingController.text.trim(),
           );
+      var devices = await SavedDevices.remember(wsUrl, name: name);
+      if (icon != null) {
+        devices = [
+          for (final device in devices)
+            if (device.url == wsUrl)
+              SavedDevice(url: device.url, name: device.name, icon: icon)
+            else
+              device,
+        ];
+        await SavedDevices.save(devices);
+      }
       await saveLastHostUrl(wsUrl);
       if (!mounted) return;
-      setState(() => _lastHostUrl = wsUrl.trim());
+      _pairingController.clear();
+      setState(() {
+        _devices = devices;
+        _showAddDevice = false;
+      });
       await Navigator.of(
         context,
       ).push(MaterialPageRoute(builder: (_) => const WorkspaceShell()));
       // Returned from the launcher (disconnected) — nothing else to do.
     } catch (e) {
-      if (mounted) setState(() => _error = 'Could not connect: $e');
+      if (mounted) {
+        setState(() {
+          _error = 'Could not connect: $e';
+          _urlController.text = wsUrl;
+          _showAddDevice = true;
+        });
+      }
     } finally {
-      if (mounted) setState(() => _connecting = false);
+      if (mounted) {
+        setState(() {
+          _connecting = false;
+          _connectingUrl = null;
+        });
+      }
     }
   }
 
@@ -173,123 +350,121 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                       style: const TextStyle(color: Colors.redAccent),
                     ),
                   ),
-                ..._hosts.map(
-                  (h) => Card(
-                    child: ListTile(
-                      leading: const Icon(Icons.computer),
-                      title: Text(h.name),
-                      subtitle: Text(
-                        '${h.address}:${h.port}',
-                        style: const TextStyle(color: Color(0xFF93C5FD)),
-                      ),
-                      trailing: _connecting
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.chevron_right),
-                      onTap: _connecting ? null : () => _connect(h.wsUrl),
-                      onLongPress: () => showLinkActions(
-                        context,
-                        '${h.address}:${h.port}',
-                        h.wsUrl,
-                      ),
+                if (_devices.isNotEmpty) ...[
+                  const Text(
+                    'YOUR DEVICES',
+                    style: TextStyle(
+                      fontSize: 12,
+                      letterSpacing: 1.2,
+                      color: Colors.white54,
                     ),
                   ),
-                ),
-                if (_hosts.isEmpty && !_scanning)
-                  Text(
-                    'No hosts found on this network.',
+                  const SizedBox(height: 12),
+                  ..._devices.map(_deviceCard),
+                  const Text(
+                    'Long-press to change a name or icon',
                     textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.4),
-                    ),
+                    style: TextStyle(color: Colors.white38, fontSize: 12),
                   ),
-                const SizedBox(height: 16),
+                  const SizedBox(height: 20),
+                ],
                 OutlinedButton.icon(
-                  onPressed: _scanning ? null : _scan,
-                  icon: _scanning
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.refresh),
+                  onPressed: _connecting
+                      ? null
+                      : () => setState(() => _showAddDevice = !_showAddDevice),
+                  icon: Icon(_showAddDevice ? Icons.expand_less : Icons.add),
                   label: Text(
-                    _scanning ? 'Scanning…' : 'Find a PC on this Wi-Fi',
+                    _showAddDevice ? 'Hide device setup' : 'Add device',
                   ),
                 ),
-                if (_lastHostUrl != null) ...[
+                if (_showAddDevice) ...[
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: _nameController,
+                    maxLength: 40,
+                    decoration: const InputDecoration(
+                      labelText: 'Device name',
+                      hintText: 'e.g. Office PC',
+                    ),
+                  ),
+                  Wrap(
+                    spacing: 12,
+                    children: deviceIcons
+                        .map(
+                          (value) => ChoiceChip(
+                            label: Icon(_deviceIcon(value)),
+                            tooltip: value,
+                            selected: _newIcon == value,
+                            onSelected: (_) => setState(() => _newIcon = value),
+                          ),
+                        )
+                        .toList(),
+                  ),
+                  const SizedBox(height: 16),
+                  OutlinedButton.icon(
+                    onPressed: _scanning || _connecting ? null : _scan,
+                    icon: _scanning
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.wifi_find),
+                    label: Text(
+                      _scanning ? 'Scanning…' : 'Find a PC on this Wi-Fi',
+                    ),
+                  ),
+                  ..._hosts.map(
+                    (host) => Card(
+                      child: ListTile(
+                        leading: const Icon(Icons.computer),
+                        title: Text(host.name),
+                        subtitle: Text('${host.address}:${host.port}'),
+                        onTap: _connecting
+                            ? null
+                            : () => _connect(
+                                host.wsUrl,
+                                name: _nameController.text.trim().isEmpty
+                                    ? host.name
+                                    : _nameController.text.trim(),
+                                icon: _newIcon,
+                              ),
+                      ),
+                    ),
+                  ),
                   const SizedBox(height: 24),
-                  Text(
-                    'LAST CONNECTION',
-                    style: TextStyle(
-                      fontSize: 11,
-                      letterSpacing: 0.8,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white.withValues(alpha: 0.4),
+                  TextField(
+                    controller: _pairingController,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: 'Pairing code (first connection)',
+                      helperText: 'On your PC: bun run host:pair',
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: _urlController,
+                    onChanged: (_) => setState(() {}),
+                    decoration: InputDecoration(
+                      labelText: 'Device address',
+                      hintText: 'ws://host:45678/rpc',
+                      border: const OutlineInputBorder(),
                     ),
                   ),
                   const SizedBox(height: 8),
-                  Card(
-                    child: ListTile(
-                      leading: const Icon(Icons.history),
-                      title: Text(lastHostLabel(_lastHostUrl!)),
-                      subtitle: Text(
-                        _lastHostUrl!,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: Color(0xFF93C5FD)),
-                      ),
-                      trailing: _connecting
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.chevron_right),
-                      onTap: _connecting
-                          ? null
-                          : () {
-                              _urlController.text = _lastHostUrl!;
-                              _connect(_lastHostUrl!);
-                            },
-                      onLongPress: () => showLinkActions(
-                        context,
-                        lastHostLabel(_lastHostUrl!),
-                        _lastHostUrl,
-                      ),
-                    ),
+                  FilledButton(
+                    onPressed: _connecting || _urlController.text.isEmpty
+                        ? null
+                        : () => _connect(
+                            _urlController.text,
+                            name: _nameController.text.trim().isEmpty
+                                ? 'My PC'
+                                : _nameController.text.trim(),
+                            icon: _newIcon,
+                          ),
+                    child: const Text('Connect'),
                   ),
                 ],
-                const SizedBox(height: 24),
-                TextField(
-                  controller: _pairingController,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(
-                    labelText: 'Pairing code (first connection)',
-                    helperText: 'On your PC: bun run host:pair',
-                  ),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: _urlController,
-                  onChanged: (_) => setState(() {}),
-                  decoration: InputDecoration(
-                    labelText: _lastHostUrl != null
-                        ? 'Or enter a different host'
-                        : 'Manual: ws://host:45678/rpc',
-                    border: const OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                FilledButton(
-                  onPressed: _connecting || _urlController.text.isEmpty
-                      ? null
-                      : () => _connect(_urlController.text),
-                  child: const Text('Connect'),
-                ),
               ],
             ),
           ),
