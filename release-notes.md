@@ -1,11 +1,10 @@
-## NexusLink Test 1.0.34+40 — PC chat library
+## NexusLink Test 1.0.35+41 — Saved devices and PC app menus
 
-Android opens on Recent chats, with Folders, search, provider/archive filters, offline saved transcripts, and retained drafts. Both PC hosts share a persistent chat index and source health reporting. Managed replies use durable operation IDs and never automatically resend uncertain deliveries. Codex managed sessions use the official app-server protocol and keep their native thread identity.
+- The login screen shows saved PCs as named cards with desktop, laptop, server, or gaming icons. Tap a card to reconnect using the existing pairing credentials.
+- Long-press a device to rename it, change its icon, or remove it. The previous connection migrates automatically, and address entry is available under Add device.
+- The mobile PC tab has Running apps and Favourites / most used menus. Favourites and mobile usage counts are saved separately for each PC.
+- Long-press apps to favourite, close, or restart them. Desktop close/restart requires the updated Linux PC host from this release. Normal window close allows applications to display unsaved-work prompts.
 
-The Android asset is **NexusLink Test**, application ID `com.nexuslink.nexuslink.test`, built with debug signing. It installs alongside the production app. It is not a production-signed update. An existing Test installation signed with another certificate cannot be updated by this APK; preserve its drafts and settings before replacing it.
+This APK is **NexusLink Test** (com.nexuslink.nexuslink.test), built with debug signing as in the preceding Test releases. It installs alongside the production app. Android requires matching signing certificates to update an existing Test installation.
 
-The Windows installer contains the shared library and embedded database/provider workers. Its standalone startup and chat-list RPC were verified outside the source checkout.
-
-Imported conversations remain read only when the original PC run's safety cannot be established. Busy, missing-folder, unsupported IDE, and host-interrupted sessions do not silently start another run. Real Android/Windows/Linux lifecycle acceptance remains pending; see `docs/CHAT-LIBRARY-IMPLEMENTATION.md`.
-
-Validation: 159 Flutter tests and 74 host tests passed, with one environment-dependent skip in each suite. PWA production compilation and the Windows standalone smoke check passed.
+Validation: targeted Flutter analysis and 12 mobile tests passed; 48 host/protocol tests passed, with two environment-dependent integration tests skipped. Physical-device install and lifecycle testing have not been performed.

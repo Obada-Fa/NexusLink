@@ -18,7 +18,7 @@ import { setSend as setSignalingSend } from './handlers/signaling';
 import { mouseMove, mouseClick, mouseScroll, keyEvent, typeText, buttonDown, buttonUp, mouseMoveAbs } from './handlers/input';
 import { setSend as setCaptureSend, startCapture, stopCapture, stopCapturesForSocket, getScreenMetadata, reportStreamStats } from './handlers/capture';
 import {
-  listWindows, listApps, refreshApps, launchApp, adoptWindow, releaseWindow, activateWindow,
+  listWindows, listApps, refreshApps, launchApp, adoptWindow, releaseWindow, activateWindow, closeWindow,
   getWindowGeometry, getAdoptedCaptureRegion, setAppsBroadcast, initAppWatcher,
   setWindowsBroadcast, initWindowWatcher,
 } from './handlers/windows';
@@ -319,6 +319,9 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         break;
       case 'window.release':
         result = releaseWindow(params.windowId as string);
+        break;
+      case 'window.close':
+        result = closeWindow(params.windowId as string);
         break;
       case 'window.activate':
         result = activateWindow(params.windowId as string);

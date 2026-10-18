@@ -33,6 +33,7 @@ export type RpcMethod = keyof WorkspaceRpc | keyof ChatRpc
   | 'window.list'
   | 'window.adopt'
   | 'window.release'
+  | 'window.close'
   | 'window.activate'
   | 'apps.list'
   | 'apps.refresh'
@@ -149,7 +150,7 @@ export type Params<M extends RpcMethod> =
     ? { windowId: string; viewportW?: number; viewportH?: number }
     : M extends 'window.release'
     ? { windowId: string }
-    : M extends 'window.activate'
+    : M extends 'window.activate' | 'window.close'
     ? { windowId: string }
     : M extends 'apps.list'
     ? {}
@@ -299,7 +300,7 @@ export type Result<M extends RpcMethod> =
     ? { region: CaptureRegion }
     : M extends 'window.release'
     ? { ok: boolean }
-    : M extends 'window.activate'
+    : M extends 'window.activate' | 'window.close'
     ? { ok: boolean }
     : M extends 'apps.list'
     ? AppInfo[]
