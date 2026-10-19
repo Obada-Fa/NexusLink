@@ -106,11 +106,11 @@ describe('folder and source identities',()=>{
     expect(folderIdentity(undefined).name).toBe('No folder');
     expect(identity('pc','codex','one')).not.toBe(identity('pc','claude','one'));
   });
-  test('does not mark imported sessions completed or safe to continue',()=>{
+  test('marks ready sessions safe to continue and guards interrupted sessions',()=>{
     const session:AgentSessionInfo={agentSessionId:'a',agent:'codex',cwd:'',title:'test',createdAt:10,busy:false,status:'running',imported:true,hostChatId:'native'};
     const summary=sessionSummary('pc',session);
-    expect(summary.execution).toBe('unknown');expect(summary.capabilities.safety).toBe('unknown');expect(summary.activityAt).toBeNull();
-    expect(sessionSummary('pc',{...session,imported:false,taskState:'interrupted'}).capabilities.continue).toBe(false);
+    expect(summary.execution).toBe('idle');expect(summary.capabilities.safety).toBe('ready');expect(summary.capabilities.continue).toBe(true);
+    expect(sessionSummary('pc',{...session,taskState:'interrupted'}).capabilities.continue).toBe(false);
   });
   test('parses recognized Codex user/assistant records and partial final lines',()=>{
     const text=[{type:'session_meta',payload:{id:'a'}},{type:'response_item',timestamp:'2026-01-01T00:00:00Z',payload:{type:'message',role:'user',content:[{type:'input_text',text:'Hello'}]}},{type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text:'Hi'}]}}].map(row=>JSON.stringify(row)).join('\n')+'\n{"incomplete';
@@ -118,7 +118,7 @@ describe('folder and source identities',()=>{
     expect(parseCodexJsonl(text)[1].ts).toBe(0);
   });
 });
-test('concurrent duplicate sends dispatch once and refuse busy/imported chats',async()=>{
+test('concurrent duplicate sends dispatch once and refuse busy/interrupted chats',async()=>{
   const path=directory();let count=0;
   const session:AgentSessionInfo={agentSessionId:'owned',agent:'mock',cwd:path,title:'Task',createdAt:1,updatedAt:1,busy:false,status:'running'};
   const service=await new ChatService({directory:path,hostId:'pc',notify:()=>{},backgroundDiscovery:false,gateway:{sessions:()=>[session],history:async()=>({events:[],hasMore:false}),send:()=>{count++;return {ok:true};},flush:async()=>{},bin:()=>null}}).initialize();services.push(service);
@@ -128,6 +128,19 @@ test('concurrent duplicate sends dispatch once and refuse busy/imported chats',a
   expect(count).toBe(1);expect(results.map(result=>result.state)).toEqual(['delivered','delivered']);
   session.busy=true;
   expect((await service.send('phone',{...params,operationId:'busy'})).state).toBe('rejected');
-  session.busy=false;session.imported=true;
-  expect((await service.send('phone',{...params,operationId:'imported'})).state).toBe('rejected');expect(count).toBe(1);
+  session.busy=false;session.taskState='interrupted';
+  expect((await service.send('phone',{...params,operationId:'interrupted'})).state).toBe('rejected');expect(count).toBe(1);
+});
+
+test('monitor pagination keeps older work first and applies state filters before paging',()=>{
+  const store=storage();
+  store.upsert([...Array.from({length:75},(_,i)=>row(`recent-${i}`,100+i)),
+    {...row('running',1),execution:'working'}, {...row('waiting',2),execution:'needsReply'},
+    {...row('failed',3),taskState:'failed'}]);
+  const first=store.page({sort:'monitor',limit:3});
+  expect(first.items.map(row=>row.id)).toEqual(['failed','waiting','running']);
+  expect(store.page({sort:'monitor',monitorFilter:'running',limit:1}).items.map(row=>row.id)).toEqual(['running']);
+  expect(store.page({sort:'monitor',monitorFilter:'attention'}).items.map(row=>row.id)).toEqual(['failed','waiting']);
+  expect(store.page({sort:'monitor',monitorFilter:'recent',limit:1}).items[0].id).toBe('recent-74');
+  expect(store.page({sort:'monitor',monitorFilter:'recent',cursor:first.nextCursor!}).restart).toBe(true);
 });

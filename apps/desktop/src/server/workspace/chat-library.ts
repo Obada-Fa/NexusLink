@@ -1,5 +1,5 @@
 import { ChatService } from '../../../../../packages/chat-core/src/index';
-import { listAgentSessions, promptAgent, resolveBin } from '../handlers/agents';
+import { listAgentSessions, promptAgent, resolveBin, openHostChat, cancelAgent } from '../handlers/agents';
 import { storedHistory, flushAgents } from './agent-store';
 
 export async function createChatLibrary(directory: string, hostId: string, notify: (connection: object, revision: number) => void) {
@@ -9,5 +9,7 @@ export async function createChatLibrary(directory: string, hostId: string, notif
     send:promptAgent,
     flush:flushAgents,
     bin:source=>resolveBin(source === 'cursor' ? 'cursor-agent' : source === 'antigravity' ? 'agy' : source),
+    openHostChat: params => openHostChat(params),
+    cancel: id => cancelAgent(id),
   }}).initialize();
 }

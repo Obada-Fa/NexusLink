@@ -78,7 +78,7 @@ export class LibraryStorage {
     const limit = Math.min(100,Math.max(1,query.limit ?? 50));
     if (!Number.isInteger(limit)) throw new Error('Invalid page size');
     const revision = this.revision();
-    const fingerprint = JSON.stringify([query.query || '',query.source || '',query.folderId,query.archived === true,query.sort || '',folders]);
+    const fingerprint = JSON.stringify([query.query || '',query.source || '',query.folderId,query.archived === true,query.sort || '',query.monitorFilter || 'all',folders]);
     let offset = 0;
     if (query.cursor) {
       let cursor: any;
@@ -91,6 +91,13 @@ export class LibraryStorage {
     if (query.source) { where.push('source=?'); args.push(query.source); }
     if (query.folderId !== undefined) { where.push('folder IS ?'); args.push(query.folderId); }
     if (query.query) { where.push('instr(search,?)>0'); args.push(query.query.toLowerCase()); }
+    if (query.monitorFilter && !['all','running','attention','recent'].includes(query.monitorFilter)) throw new Error('Invalid monitor filter');
+    const priority = `CASE WHEN json_extract(body,'$.execution')='needsReply' OR json_extract(body,'$.taskState') IN ('failed','interrupted') THEN 0 WHEN json_extract(body,'$.execution')='working' THEN 1 ELSE 2 END`;
+    if (!folders && query.monitorFilter && query.monitorFilter !== 'all') {
+      where.push(`(${priority})=?`);
+      args.push(query.monitorFilter === 'attention' ? 0 : query.monitorFilter === 'running' ? 1 : 2);
+    }
+    const order = query.sort === 'monitor' ? `${priority},activity DESC,id` : 'activity DESC,id';
     let items: any[];
     if (folders) {
       items = (this.db.query(`SELECT body,COUNT(*) AS count,MAX(activity) AS activity FROM chats WHERE ${where.join(' AND ')} GROUP BY folder`).all(...args) as any[]).map(row=>{
@@ -99,7 +106,7 @@ export class LibraryStorage {
       });
       items.sort(query.sort === 'name' ? (a,b)=>a.name.localeCompare(b.name)||String(a.id).localeCompare(String(b.id)) : (a,b)=>(b.activityAt||0)-(a.activityAt||0)||String(a.id).localeCompare(String(b.id)));
       items = items.slice(offset,offset+limit+1);
-    } else items = (this.db.query(`SELECT body FROM chats WHERE ${where.join(' AND ')} ORDER BY activity DESC,id LIMIT ? OFFSET ?`).all(...args,limit+1,offset) as any[]).map(row=>JSON.parse(row.body));
+    } else items = (this.db.query(`SELECT body FROM chats WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ? OFFSET ?`).all(...args,limit+1,offset) as any[]).map(row=>JSON.parse(row.body));
     const hasMore = items.length > limit;
     return { items: items.slice(0,limit), nextCursor: hasMore ? Buffer.from(JSON.stringify({revision,fingerprint,offset:offset+limit})).toString('base64url') : null, revision, sources: this.health() };
   }

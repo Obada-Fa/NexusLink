@@ -551,6 +551,9 @@ export interface AgentInfo {
 }
 
 export interface AgentSessionInfo {
+  /** Latest observed activity, not an estimate of task completion. */
+  activity?: 'working' | 'editing' | 'reading' | 'running-command' | 'thinking' | 'responding'
+  activityAt?: number
   imported?: boolean
   taskState?: 'idle'|'running'|'waiting'|'completed'|'failed'|'canceled'|'interrupted'
   turnId?: string

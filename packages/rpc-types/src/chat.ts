@@ -16,6 +16,8 @@ export interface ChatSummary {
   folderName: string;
   activityAt: number | null;
   archived: boolean;
+  taskState?: string;
+  activity?: string;
   execution: 'working' | 'needsReply' | 'idle' | 'unknown';
   capabilities: { read: boolean; continue: boolean; safety: ContinuationSafety; reason?: string };
 }
@@ -35,6 +37,8 @@ export interface SourceHealth {
   durationMs?: number;
 }
 export interface ChatQuery {
+  sort?: string;
+  monitorFilter?: 'all' | 'running' | 'attention' | 'recent';
   query?: string;
   source?: string;
   folderId?: string | null;
@@ -75,6 +79,7 @@ export interface ChatSend {
   requiredFolder?: string;
   expectedRevision?: number;
   operationId: string;
+  interrupt?: boolean;
 }
 export interface ChatDelivery {
   operationId: string;

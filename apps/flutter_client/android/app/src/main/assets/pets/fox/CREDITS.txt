@@ -1,0 +1,8 @@
+Red Fox — Virtual Pet Desktop contributors
+Artwork created by the upstream project using OpenAI image generation.
+License: MIT; full notice in LICENSE.txt.
+Source: https://github.com/sheelarajeshkumar/virtual-pet-desktop
+Pinned revision: 9a4f83cc277daf4869d09810256028e3dee44ec7
+Imported: fox-atlas.png (896 x 1792, 32 frames of 224 x 224).
+Artwork unchanged. NexusLink supplies its own Android rendering and behavior.
+The upstream manifest is retained for provenance; only the main behavior atlas is bundled.

@@ -7,7 +7,7 @@ import { identity, folderIdentity } from './identity';
 import { workerPath } from './worker-path';
 export { identity, folderIdentity } from './identity';
 
-export const CHAT_METHODS = ['chat.list','chat.folders','chat.historyPage','chat.refresh','chat.subscribe','chat.send','chat.sendStatus'] as const;
+export const CHAT_METHODS = ['chat.list','chat.folders','chat.historyPage','chat.refresh','chat.subscribe','chat.send','chat.sendStatus','chat.cancel'] as const;
 const SOURCES = ['claude','cursor','codex','opencode','antigravity'];
 export interface ChatGateway {
   sessions(): AgentSessionInfo[];
@@ -15,6 +15,8 @@ export interface ChatGateway {
   send(id: string, text: string, options: Pick<ChatSend, 'images' | 'model' | 'thinking' | 'mode'>): { ok: boolean };
   flush(): Promise<void>;
   bin(source: string): string | null;
+  openHostChat?(params: { agent: string; hostChatId: string; cwd?: string; title?: string }): AgentSessionInfo;
+  cancel?(id: string): { ok: boolean };
 }
 export interface ChatServiceOptions {
   directory: string;
@@ -29,8 +31,8 @@ export function sessionSummary(hostId: string, session: AgentSessionInfo): ChatS
   const folder = folderIdentity(session.cwd);
   const imported = session.imported === true;
   const interrupted = session.taskState === 'interrupted';
-  const safety = session.busy ? 'busy' : imported || interrupted ? 'unknown' : 'ready';
-  return {id:identity(hostId,session.agent,session.hostChatId || session.agentSessionId),hostId,source:session.agent,sourceName:sourceName(session.agent),nativeId:session.hostChatId,agentSessionId:session.agentSessionId,managed:!imported,title:session.title,preview:session.preview,folderId:folder.id,folderPath:folder.path,folderName:folder.name,activityAt:imported?null:validActivity(session.updatedAt) || validActivity(session.createdAt),archived:session.archived === true,execution:session.busy ? 'working' : session.taskState === 'waiting' ? 'needsReply' : imported || interrupted ? 'unknown' : 'idle',capabilities:{read:true,continue:safety === 'ready' && session.status === 'running',safety,reason:safety === 'busy' ? 'This chat is working on the PC.' : interrupted ? 'This chat was interrupted by a host restart. Check the original run on the PC, or start a new chat.' : imported ? 'Replying is unavailable until the source confirms this PC chat is safe to continue.' : undefined}};
+  const safety = session.busy ? 'busy' : interrupted ? 'unknown' : 'ready';
+  return {id:identity(hostId,session.agent,session.hostChatId || session.agentSessionId),hostId,source:session.agent,sourceName:sourceName(session.agent),nativeId:session.hostChatId,agentSessionId:session.agentSessionId,managed:!imported,title:session.title,preview:session.preview,folderId:folder.id,folderPath:folder.path,folderName:folder.name,activityAt:validActivity(session.updatedAt) || validActivity(session.createdAt),archived:session.archived === true,taskState:session.taskState,activity:session.activity,execution:session.taskState === 'waiting' ? 'needsReply' : session.busy ? 'working' : interrupted ? 'unknown' : 'idle',capabilities:{read:true,continue:safety === 'ready' && session.status === 'running',safety,reason:safety === 'busy' ? 'This chat is working on the PC.' : interrupted ? 'This chat was interrupted by a host restart. Check the original run on the PC, or start a new chat.' : undefined}};
 }
 function sourceName(source: string) { return ({claude:'Claude Code',cursor:'Cursor',codex:'Codex',opencode:'OpenCode',antigravity:'Antigravity',mock:'NexusLink'} as Record<string,string>)[source] || source; }
 
@@ -128,7 +130,11 @@ export class ChatService {
       const response=await this.provider(source,'scan');
       const rows:ChatSummary[]=response.result.filter(row=>typeof row.hostChatId === 'string').map(row=>{
         const folder=folderIdentity(row.cwd);
-        return {id:identity(this.options.hostId,source,row.hostChatId),hostId:this.options.hostId,source,sourceName:row.source || sourceName(source),nativeId:row.hostChatId,title:row.title,preview:row.preview,folderId:folder.id,folderPath:folder.path,folderName:folder.name,activityAt:validActivity(row.updatedAt),archived:row.archived === true,execution:row.busy ? 'working' : 'unknown',capabilities:{read:true,continue:false,safety:row.busy?'busy':'unknown',reason:row.hostChatId.startsWith('ide:')?'Cursor IDE chats are read only. Start a new chat to use Cursor CLI.':'Replying is unavailable until this app confirms the original PC chat is safe to continue.'}};
+        const isIde=row.hostChatId.startsWith('ide:');
+        const canContinue=!isIde && (row.resumable !== false);
+        const isBusy=row.busy === true;
+        const safety:ContinuationSafety=isBusy ? 'busy' : canContinue ? 'ready' : 'unknown';
+        return {id:identity(this.options.hostId,source,row.hostChatId),hostId:this.options.hostId,source,sourceName:row.source || sourceName(source),nativeId:row.hostChatId,title:row.title,preview:row.preview,folderId:folder.id,folderPath:folder.path,folderName:folder.name,activityAt:validActivity(row.updatedAt),archived:row.archived === true,execution:isBusy ? 'working' : 'idle',capabilities:{read:true,continue:canContinue,safety,reason:isIde?'Cursor IDE chats are read only. Start a new chat to use Cursor CLI.':isBusy?'This chat is working on the PC.':undefined}};
       });
       // Legacy readers cannot distinguish a partial scan from disappearance.
       // Only authoritative app-server/export scans may remove missing records.
@@ -193,8 +199,24 @@ export class ChatService {
       let dispatched=false;
       try {
         await this.syncSessions();
-        const row:ChatSummary|undefined=await this.call('get',{id:params.chatId});
-        if(!row || !row.agentSessionId || !row.capabilities.continue || row.capabilities.safety!=='ready') throw new Error(row?.capabilities.reason || 'This chat is read only. Start a new chat to reply.');
+        let row:ChatSummary|undefined=await this.call('get',{id:params.chatId});
+        if(!row || (!row.agentSessionId && !row.nativeId) || !row.capabilities.continue) throw new Error(row?.capabilities.reason || 'This chat is read only. Start a new chat to reply.');
+        if(!row.agentSessionId && row.nativeId && this.options.gateway.openHostChat) {
+          const session = this.options.gateway.openHostChat({agent: row.source, hostChatId: row.nativeId, cwd: row.folderPath || undefined, title: row.title});
+          if (session) {
+            row.agentSessionId = session.agentSessionId;
+            await this.syncSessions();
+          }
+        }
+        if(!row.agentSessionId) throw new Error('Could not open conversation session');
+        if (params.interrupt && this.options.gateway.cancel) {
+          this.options.gateway.cancel(row.agentSessionId);
+          await new Promise(r => setTimeout(r, 100));
+          await this.syncSessions();
+          row = await this.call('get', { id: params.chatId }) || row;
+        } else if (row.capabilities.safety === 'busy') {
+          throw new Error('This chat is working on the PC. Stop it before sending another prompt.');
+        }
         if(row.source !== 'mock' && !this.options.gateway.bin(row.source)) throw new Error(`${row.sourceName} is unavailable. Install or sign in to this app on the PC.`);
         if(params.expectedRevision!==undefined && params.expectedRevision!==this.revision) throw new Error('Chat changed. Refresh it before replying.');
         if(!row.folderPath || !existsSync(row.folderPath) || !statSync(row.folderPath).isDirectory()) throw new Error('The recorded folder is unavailable. Choose a folder before replying.');
@@ -216,11 +238,37 @@ export class ChatService {
     switch(method) {
       case 'chat.list': return this.list(params);
       case 'chat.folders': return this.list(params,true);
-      case 'chat.historyPage': await this.syncSessions();return {...await this.historyPage(params),chat:await this.call('get',{id:params.chatId})};
+      case 'chat.historyPage': {
+        await this.syncSessions();
+        let row: ChatSummary | undefined = await this.call('get', { id: params.chatId });
+        if (row && !row.agentSessionId && row.nativeId && this.options.gateway.openHostChat) {
+          const session = this.options.gateway.openHostChat({
+            agent: row.source,
+            hostChatId: row.nativeId,
+            cwd: row.folderPath || undefined,
+            title: row.title,
+          });
+          if (session) {
+            await this.syncSessions();
+            row = await this.call('get', { id: params.chatId }) || row;
+          }
+        }
+        return {...await this.historyPage(params),chat:await this.call('get',{id:params.chatId}) || row};
+      }
       case 'chat.refresh': return this.refresh(params.source);
       case 'chat.subscribe': if(typeof params.enabled!=='boolean')throw new Error('Invalid subscription');return this.subscribe(connection,params.enabled);
       case 'chat.send': return this.send(device,params);
       case 'chat.sendStatus': return this.call('status',{device,operationId:params.operationId});
+      case 'chat.cancel': {
+        await this.syncSessions();
+        const row: ChatSummary | undefined = await this.call('get', { id: params.chatId });
+        if (row?.agentSessionId && this.options.gateway.cancel) {
+          this.options.gateway.cancel(row.agentSessionId);
+          await this.syncSessions();
+          return { ok: true };
+        }
+        return { ok: false };
+      }
       default: throw new Error('Unknown chat method');
     }
   }

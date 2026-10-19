@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'last_host.dart';
+import 'wake_config.dart';
 
 const savedDevicesKey = 'nexuslink-saved-devices';
 const deviceIcons = ['desktop', 'laptop', 'server', 'gaming'];
@@ -10,12 +11,30 @@ class SavedDevice {
     required this.url,
     required this.name,
     this.icon = 'desktop',
+    this.wake,
   });
   final String url;
   final String name;
   final String icon;
+  final WakeConfig? wake;
+  SavedDevice copyWith({
+    String? name,
+    String? icon,
+    WakeConfig? wake,
+    bool clearWake = false,
+  }) => SavedDevice(
+    url: url,
+    name: name ?? this.name,
+    icon: icon ?? this.icon,
+    wake: clearWake ? null : wake ?? this.wake,
+  );
 
-  Map<String, String> toJson() => {'url': url, 'name': name, 'icon': icon};
+  Map<String, dynamic> toJson() => {
+    'url': url,
+    'name': name,
+    'icon': icon,
+    if (wake != null) 'wake': wake!.toJson(),
+  };
 }
 
 class SavedDevices {
@@ -29,6 +48,11 @@ class SavedDevices {
         return SavedDevice(
           url: normalizeHostWsUrl(data['url'] as String),
           name: data['name'] as String,
+          wake: data['wake'] is Map
+              ? WakeConfig.fromJson(
+                  Map<String, dynamic>.from(data['wake'] as Map),
+                )
+              : null,
           icon: deviceIcons.contains(data['icon'])
               ? data['icon'] as String
               : 'desktop',

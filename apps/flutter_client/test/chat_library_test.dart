@@ -125,7 +125,7 @@ void main() {
     },
   );
   testWidgets(
-    'Recent opens first and folder navigation preserves recorded Windows paths',
+    'Monitor opens first and folder navigation preserves recorded Windows paths',
     (tester) async {
       final repository = FakeRepository();
       await tester.pumpWidget(
@@ -139,7 +139,8 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('Fix login'), findsOneWidget);
-      expect(find.text('Today'), findsOneWidget);
+      expect(find.text('Agent monitor'), findsOneWidget);
+      expect(repository.queries.last['sort'], 'monitor');
       expect(find.textContaining('Codex · NexusLink'), findsOneWidget);
       await tester.tap(find.text('Folders'));
       await tester.pumpAndSettle();

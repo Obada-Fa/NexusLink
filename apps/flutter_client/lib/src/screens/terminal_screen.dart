@@ -289,6 +289,7 @@ class _EmbeddedTerminalState extends ConsumerState<EmbeddedTerminal>
     with WidgetsBindingObserver {
   RemoteTerminal? _remote;
   TerminalInputController? _input;
+  final _terminalViewKey = GlobalKey<TerminalViewState>();
   bool _more = false, _swipe = false;
   String? _reportedTerminalId;
   double _fontSize = 14;
@@ -344,6 +345,15 @@ class _EmbeddedTerminalState extends ConsumerState<EmbeddedTerminal>
     super.dispose();
   }
 
+  void _showKeyboard() {
+    if (!mounted ||
+        _remote?.ready != true ||
+        !TickerMode.valuesOf(context).enabled ||
+        ModalRoute.of(context)?.isCurrent == false)
+      return;
+    _terminalViewKey.currentState?.requestKeyboard();
+  }
+
   void _tap(ExtraKey key) {
     final input = _input;
     if (input == null) return;
@@ -374,7 +384,16 @@ class _EmbeddedTerminalState extends ConsumerState<EmbeddedTerminal>
         final available = remote.ready && TickerMode.valuesOf(context).enabled;
         if (input.available != available) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) input.setAvailable(available);
+            if (!mounted || !identical(input, _input)) return;
+            final enabled =
+                remote.ready && TickerMode.valuesOf(context).enabled;
+            input.setAvailable(enabled);
+            if (enabled) {
+              _showKeyboard();
+            } else {
+              input.focusNode.unfocus();
+              _terminalViewKey.currentState?.closeKeyboard();
+            }
           });
         }
         if (remote.ready &&
@@ -400,6 +419,11 @@ class _EmbeddedTerminalState extends ConsumerState<EmbeddedTerminal>
                           : 'Reconnecting shell…',
                       style: const TextStyle(fontSize: 12),
                     ),
+                  ),
+                  IconButton(
+                    tooltip: 'Show keyboard',
+                    onPressed: available ? _showKeyboard : null,
+                    icon: const Icon(Icons.keyboard),
                   ),
                   IconButton(
                     tooltip: 'Font size',
@@ -473,6 +497,8 @@ class _EmbeddedTerminalState extends ConsumerState<EmbeddedTerminal>
                 absorbing: !remote.ready,
                 child: TerminalView(
                   remote.terminal,
+                  key: _terminalViewKey,
+                  readOnly: !available,
                   focusNode: input.focusNode,
                   textStyle: TerminalStyle(fontSize: _fontSize),
                   autofocus: false,
