@@ -9,11 +9,10 @@ import '../state/connection.dart';
 import '../state/launcher.dart';
 import '../state/launcher_preferences.dart';
 import '../widgets/app_icon.dart';
-import 'agent_screen.dart';
-import '../workspace/files_screen.dart';
+
 import 'mirror_screen.dart';
-import 'system_screen.dart';
-import 'terminal_screen.dart';
+import '../workspace/workspace_shell.dart';
+import '../widgets/pc_charts.dart';
 
 class LauncherScreen extends ConsumerStatefulWidget {
   const LauncherScreen({super.key});
@@ -24,7 +23,7 @@ class LauncherScreen extends ConsumerStatefulWidget {
 
 class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   String _search = '';
-  int _menu = 0;
+  bool _expanded = false;
   bool _busy = false;
 
   LauncherPreferences? get _preferences => ref
@@ -51,13 +50,6 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     }
   }
 
-  AppInfo? _appForWindow(WindowInfo window, List<AppInfo> apps) {
-    for (final app in apps) {
-      if (windowMatchesApp(window, app)) return app;
-    }
-    return null;
-  }
-
   Future<void> _appMenu({
     required String name,
     AppInfo? app,
@@ -66,7 +58,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   }) async {
     if (_busy) return;
     final running = windows.isNotEmpty || sessions.isNotEmpty;
-    final favourite = _preferences?.favourites.contains(app?.appId) ?? false;
+    final favourite = app != null && (_preferences?.isFavourite(app) ?? false);
     final action = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
@@ -106,7 +98,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     if (action == null || !mounted) return;
     if (action == 'favourite') {
       try {
-        await _preferences?.toggleFavourite(app!.appId);
+        await _preferences?.toggleFavourite(app!);
         if (mounted) setState(() {});
       } catch (error) {
         _showError(error);
@@ -291,194 +283,144 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
         ? apps
         : apps.where((a) => a.name.toLowerCase().contains(q)).toList();
 
+    final recent =
+        preferences?.recentlyUsed(apps).take(4).toList() ?? <AppInfo>[];
     return Scaffold(
-      body: SafeArea(
-        child: Column(
+      appBar: AppBar(
+        title: const Text('Your PC'),
+        actions: [
+          IconButton(
+            tooltip: 'PC settings',
+            icon: const Icon(Icons.settings_outlined),
+            onPressed: () => Navigator.of(
+              context,
+            ).push(MaterialPageRoute(builder: (_) => const PcScreen())),
+          ),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: () async {
+          await Future.wait([
+            ref.read(appsProvider.notifier).refresh(),
+            ref.read(windowsProvider.notifier).refresh(),
+            ref.read(appSessionsProvider.notifier).refresh(),
+          ]);
+        },
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(16),
           children: [
             _header(context),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: ChoiceChip(
-                      label: const Text('1. Running apps'),
-                      selected: _menu == 0,
-                      onSelected: (_) => setState(() => _menu = 0),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: ChoiceChip(
-                      label: const Text(
-                        '2. Favourites / most used',
-                        maxLines: 2,
-                      ),
-                      selected: _menu == 1,
-                      onSelected: (_) => setState(() => _menu = 1),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (_busy) const LinearProgressIndicator(),
-            const Padding(
-              padding: EdgeInsets.all(8),
-              child: Text(
-                'Long-press an app for actions',
-                style: TextStyle(color: Colors.white54, fontSize: 12),
-              ),
-            ),
-            Expanded(
-              child: RefreshIndicator(
-                color: const Color(0xFF2A6AFF),
-                backgroundColor: const Color(0xFF161622),
-                onRefresh: () async {
-                  await Future.wait([
-                    ref.read(appsProvider.notifier).refresh(),
-                    ref.read(windowsProvider.notifier).refresh(),
-                    ref.read(appSessionsProvider.notifier).refresh(),
-                  ]);
-                },
-                child: ListView(
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  padding: const EdgeInsets.symmetric(horizontal: 14),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    if (_menu == 0) ...[
-                      _sectionTitle('Running apps'),
-                      if (windowsAsync.isLoading || sessionsAsync.isLoading)
-                        const Center(child: CircularProgressIndicator()),
-                      if (windowsAsync.hasError || sessionsAsync.hasError)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Apps'),
+                      subtitle: Text(
+                        _expanded ? 'Favourites' : 'Recently opened',
+                      ),
+                      trailing: Icon(
+                        _expanded ? Icons.expand_less : Icons.expand_more,
+                      ),
+                      onTap: () => setState(() {
+                        _expanded = !_expanded;
+                        _search = '';
+                      }),
+                    ),
+                    if (_busy) const LinearProgressIndicator(),
+                    if (preferences == null) const Text('Loading app menu…'),
+                    if (!_expanded) ...[
+                      if (recent.isEmpty)
                         const Text(
-                          'Could not load running apps. Pull down to retry.',
+                          'Apps you open will appear here. Expand to choose a favourite.',
                         ),
-                      if (windows.isEmpty && sessions.isEmpty)
-                        const Padding(
-                          padding: EdgeInsets.all(24),
-                          child: Text(
-                            'No running apps. Open Favourites / most used to launch an app.',
-                          ),
-                        ),
-                      for (final session in sessions)
-                        ListTile(
-                          leading: AppIconTile(
-                            icon: session.icon,
-                            name: session.name,
-                            size: 40,
-                          ),
-                          title: Text(session.name),
-                          subtitle: const Text('Phone session'),
-                          onTap: () {
-                            _recordUse(session.appId);
-                            _attachSession(session);
-                          },
-                          onLongPress: () => _appMenu(
-                            name: session.name,
-                            app: apps
-                                .where((a) => a.appId == session.appId)
-                                .firstOrNull,
-                            sessions: [session],
-                          ),
-                        ),
-                      for (final window in windows)
-                        ListTile(
-                          leading: AppIconTile(
-                            icon: window.icon,
-                            name: bestWindowName(window, apps),
-                            size: 40,
-                          ),
-                          title: Text(bestWindowName(window, apps)),
-                          subtitle: Text(
-                            window.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          onTap: () {
-                            _recordUse(_appForWindow(window, apps)?.appId);
-                            _openWindow(window, apps);
-                          },
-                          onLongPress: () => _appMenu(
-                            name: bestWindowName(window, apps),
-                            app: _appForWindow(window, apps),
-                            windows: [window],
-                          ),
-                        ),
+                      _appGrid(recent, windows, sessions),
                     ] else ...[
-                      _sectionTitle('Favourites'),
-                      if (preferences == null)
-                        const Text('Loading favourites…')
-                      else if (!apps.any(
-                        (a) => preferences.favourites.contains(a.appId),
-                      ))
-                        const Text(
-                          'Long-press an app below to add a favourite.',
-                        ),
                       _appGrid(
                         apps
-                            .where(
-                              (a) =>
-                                  preferences?.favourites.contains(a.appId) ??
-                                  false,
-                            )
+                            .where((a) => preferences?.isFavourite(a) ?? false)
                             .toList(),
                         windows,
                         sessions,
                       ),
-                      const SizedBox(height: 16),
-                      _sectionTitle('Most used'),
-                      if (preferences == null ||
-                          preferences.mostUsed(apps).isEmpty)
-                        const Text(
-                          'Apps you open from this phone will appear here.',
+                      for (final name in LauncherPreferences.defaultFavourites)
+                        if (!apps.any(
+                          (a) => LauncherPreferences.defaultName(a) == name,
+                        ))
+                          ListTile(
+                            dense: true,
+                            leading: const Icon(Icons.star_outline),
+                            title: Text(name),
+                            subtitle: const Text('Not available on this PC'),
+                          ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        onChanged: (value) => setState(() => _search = value),
+                        decoration: const InputDecoration(
+                          prefixIcon: Icon(Icons.search),
+                          hintText: 'Search apps to add…',
+                          border: OutlineInputBorder(),
                         ),
-                      _appGrid(
-                        preferences?.mostUsed(apps).take(8).toList() ?? [],
-                        windows,
-                        sessions,
                       ),
-                      const SizedBox(height: 16),
-                      _appsHeader(),
-                      if (appsAsync.isLoading && filteredApps.isEmpty)
+                      if (q.isNotEmpty && filteredApps.isEmpty)
                         const Padding(
-                          padding: EdgeInsets.only(top: 40),
-                          child: Center(child: CircularProgressIndicator()),
-                        )
-                      else if (filteredApps.isEmpty &&
-                          appsAsync.hasError &&
-                          q.isEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 32),
-                          child: Center(
-                            child: Column(
-                              children: [
-                                Text(
-                                  'Could not load apps: ${friendlyLaunchError(appsAsync.error!)}',
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.white54,
-                                  ),
-                                  textAlign: TextAlign.center,
-                                ),
-                                const SizedBox(height: 10),
-                                OutlinedButton.icon(
-                                  onPressed: () =>
-                                      ref.read(appsProvider.notifier).refresh(),
-                                  icon: const Icon(Icons.refresh, size: 16),
-                                  label: const Text('Retry'),
-                                ),
-                              ],
+                          padding: EdgeInsets.all(12),
+                          child: Text('No matching apps on this PC.'),
+                        ),
+                      if (q.isNotEmpty)
+                        for (final app in filteredApps)
+                          ListTile(
+                            leading: AppIconTile(
+                              icon: app.icon,
+                              name: app.name,
+                              size: 36,
+                            ),
+                            title: Text(app.name),
+                            onTap: () {
+                              if (!_busy) {
+                                _recordUse(app.appId);
+                                _launchApp(app, sessions, windows, apps);
+                              }
+                            },
+                            trailing: IconButton(
+                              tooltip: preferences?.isFavourite(app) == true
+                                  ? 'Remove from favourites'
+                                  : 'Add to favourites',
+                              icon: Icon(
+                                preferences?.isFavourite(app) == true
+                                    ? Icons.star
+                                    : Icons.star_border,
+                              ),
+                              onPressed: preferences == null
+                                  ? null
+                                  : () async {
+                                      try {
+                                        await preferences.toggleFavourite(app);
+                                        if (mounted) setState(() {});
+                                      } catch (error) {
+                                        _showError(error);
+                                      }
+                                    },
                             ),
                           ),
-                        )
-                      else
-                        _appGrid(filteredApps, windows, sessions),
+                      const Padding(
+                        padding: EdgeInsets.only(top: 8),
+                        child: Text('Long-press an app for actions'),
+                      ),
                     ],
-                    const SizedBox(height: 12),
+                    if (appsAsync.isLoading) const LinearProgressIndicator(),
+                    if (appsAsync.hasError)
+                      const Text('Could not load apps. Pull down to retry.'),
                   ],
                 ),
               ),
             ),
-            _dock(context),
+            const SizedBox(height: 16),
+            const PcCharts(),
           ],
         ),
       ),
@@ -512,75 +454,6 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
               ref.read(connectionProvider.notifier).disconnect();
               Navigator.of(context).popUntil((r) => r.isFirst);
             },
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _sectionTitle(String s, {bool isBeta = false}) => Padding(
-    padding: const EdgeInsets.fromLTRB(2, 4, 0, 8),
-    child: Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          s.toUpperCase(),
-          style: TextStyle(
-            fontSize: 11,
-            letterSpacing: 0.8,
-            fontWeight: FontWeight.w600,
-            color: Colors.white.withValues(alpha: 0.4),
-          ),
-        ),
-        if (isBeta) ...[
-          const SizedBox(width: 6),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
-            decoration: BoxDecoration(
-              color: const Color(0xFF2A6AFF).withValues(alpha: 0.2),
-              borderRadius: BorderRadius.circular(4),
-              border: Border.all(
-                color: const Color(0xFF2A6AFF).withValues(alpha: 0.5),
-                width: 0.8,
-              ),
-            ),
-            child: const Text(
-              'BETA',
-              style: TextStyle(
-                fontSize: 8.5,
-                fontWeight: FontWeight.w700,
-                letterSpacing: 0.5,
-                color: Color(0xFF7AA2FF),
-              ),
-            ),
-          ),
-        ],
-      ],
-    ),
-  );
-
-  Widget _appsHeader() {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        children: [
-          _sectionTitle('All apps'),
-          const Spacer(),
-          SizedBox(
-            width: 180,
-            height: 38,
-            child: TextField(
-              onChanged: (v) => setState(() => _search = v),
-              decoration: InputDecoration(
-                hintText: 'Search apps…',
-                prefixIcon: const Icon(Icons.search, size: 18),
-                isDense: true,
-                contentPadding: const EdgeInsets.symmetric(vertical: 4),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-              ),
-            ),
           ),
         ],
       ),
@@ -655,101 +528,6 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
           ),
         );
       },
-    );
-  }
-
-  Widget _dock(BuildContext context) {
-    void push(Widget screen) =>
-        Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen));
-    final items = <(IconData, String, VoidCallback?, bool)>[
-      (Icons.terminal, 'Terminal', () => push(const TerminalScreen()), false),
-      (Icons.folder, 'Files', () => push(const WorkspaceFilesScreen()), false),
-      (Icons.memory, 'System', () => push(const SystemScreen()), false),
-      (Icons.desktop_windows, 'Desktop', () => _openDesktop(context), true),
-      (Icons.auto_awesome, 'Agents', () => push(const AgentScreen()), false),
-    ];
-    return Container(
-      margin: const EdgeInsets.fromLTRB(14, 4, 14, 8),
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      decoration: BoxDecoration(
-        color: const Color(0xFF12121C),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: const Color(0xFF1E1E30)),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: items
-            .map(
-              (it) => InkWell(
-                onTap: it.$3,
-                borderRadius: BorderRadius.circular(10),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 4,
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Stack(
-                        clipBehavior: Clip.none,
-                        children: [
-                          Icon(
-                            it.$1,
-                            size: 20,
-                            color: it.$3 == null
-                                ? Colors.white.withValues(alpha: 0.25)
-                                : Colors.white.withValues(alpha: 0.75),
-                          ),
-                          if (it.$4)
-                            Positioned(
-                              top: -4,
-                              right: -12,
-                              child: Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 3,
-                                  vertical: 1,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF2A6AFF),
-                                  borderRadius: BorderRadius.circular(3),
-                                ),
-                                child: const Text(
-                                  'BETA',
-                                  style: TextStyle(
-                                    fontSize: 6.5,
-                                    fontWeight: FontWeight.w800,
-                                    color: Colors.white,
-                                    letterSpacing: 0.3,
-                                  ),
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        it.$4 ? '${it.$2} (Beta)' : it.$2,
-                        style: TextStyle(
-                          fontSize: 9.5,
-                          color: Colors.white.withValues(alpha: 0.4),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            )
-            .toList(),
-      ),
-    );
-  }
-
-  void _openDesktop(BuildContext context) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => const MirrorScreen(target: MirrorTarget()),
-      ),
     );
   }
 }

@@ -2,6 +2,7 @@
 // Connect (mDNS discovery / manual) → launcher → per-app mirror sessions.
 
 import 'dart:io';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'src/workspace/platform_bridge.dart';
 import 'src/workspace/project.dart';
@@ -14,6 +15,8 @@ import 'src/state/last_host.dart';
 import 'src/workspace/workspace_shell.dart';
 import 'src/widgets/connection_lifecycle.dart';
 import 'src/state/saved_devices.dart';
+import 'src/services/wake_service.dart';
+import 'src/screens/wake_settings_sheet.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -64,6 +67,9 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
   String? _connectingUrl;
   final _nameController = TextEditingController();
   String _newIcon = 'desktop';
+  String? _wakingUrl;
+  String? _wakeMessage;
+  int _wakeGeneration = 0;
 
   @override
   void initState() {
@@ -73,6 +79,7 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
 
   @override
   void dispose() {
+    _wakeGeneration++;
     _nameController.dispose();
     _urlController.dispose();
     _pairingController.dispose();
@@ -187,10 +194,13 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
         if (saved.url != device.url)
           saved
         else if (result == 'save')
-          SavedDevice(url: saved.url, name: name.trim(), icon: icon),
+          saved.copyWith(name: name.trim(), icon: icon),
     ];
     try {
       await SavedDevices.save(devices);
+      if (result == 'remove') {
+        await ref.read(wakeServiceProvider).removeToken(device.url);
+      }
       if (mounted) {
         setState(() {
           _devices = devices;
@@ -202,45 +212,179 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
     }
   }
 
+  Future<void> _wakeSettings(SavedDevice device) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => WakeSettingsSheet(
+        device: device,
+        service: ref.read(wakeServiceProvider),
+        onSave: (config) async {
+          final devices = [
+            for (final saved in _devices)
+              if (saved.url == device.url)
+                saved.copyWith(wake: config, clearWake: config == null)
+              else
+                saved,
+          ];
+          await SavedDevices.save(devices);
+          if (mounted) setState(() => _devices = devices);
+        },
+      ),
+    );
+  }
+
+  Future<void> _wakeDevice(SavedDevice device) async {
+    if (_wakingUrl != null || _connecting) return;
+    if (device.wake == null) {
+      await _wakeSettings(device);
+      return;
+    }
+    final generation = ++_wakeGeneration;
+    final service = ref.read(wakeServiceProvider);
+    setState(() {
+      _wakingUrl = device.url;
+      _wakeMessage = 'Sending wake request…';
+      _error = null;
+    });
+    try {
+      await service.wake(device.url, device.wake!);
+      if (!mounted || generation != _wakeGeneration) return;
+      setState(() => _wakeMessage = 'Wake sent · Waiting for the PC to start…');
+      final watch = Stopwatch()..start();
+      while (mounted &&
+          generation == _wakeGeneration &&
+          watch.elapsed < const Duration(minutes: 2)) {
+        final ready = await service.reachable(device.url);
+        if (!mounted || generation != _wakeGeneration) return;
+        if (ready) {
+          setState(() {
+            _wakingUrl = null;
+            _wakeMessage = null;
+          });
+          await _connect(device.url);
+          return;
+        }
+        await Future<void>.delayed(const Duration(seconds: 2));
+      }
+      if (mounted && generation == _wakeGeneration) {
+        setState(
+          () => _error =
+              'Wake was sent, but ${device.name} is not reachable yet. Check PC power and that NexusLink starts automatically, then tap Connect.',
+        );
+      }
+    } catch (e) {
+      if (mounted && generation == _wakeGeneration) {
+        setState(
+          () => _error = e is WakeException
+              ? e.message
+              : 'Couldn’t send the wake request. Check Wake settings and your network.',
+        );
+      }
+    } finally {
+      if (mounted && generation == _wakeGeneration) {
+        setState(() {
+          _wakingUrl = null;
+          _wakeMessage = null;
+        });
+      }
+    }
+  }
+
+  void _cancelWakeWait() {
+    _wakeGeneration++;
+    setState(() {
+      _wakingUrl = null;
+      _wakeMessage = null;
+    });
+  }
+
   Widget _deviceCard(SavedDevice device) {
     final connecting = _connectingUrl == device.url;
+    final waking = _wakingUrl == device.url;
+    final busy = _connecting || _wakingUrl != null;
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       clipBehavior: Clip.antiAlias,
-      child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 18,
-          vertical: 12,
-        ),
-        leading: Container(
-          width: 56,
-          height: 56,
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [Color(0xFF537FE7), Color(0xFF7756C9)],
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ListTile(
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 18,
+              vertical: 12,
             ),
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: Icon(_deviceIcon(device.icon), color: Colors.white, size: 30),
-        ),
-        title: Text(
-          device.name,
-          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 18),
-        ),
-        subtitle: Text(connecting ? 'Connecting…' : 'Tap to connect'),
-        trailing: connecting
-            ? const SizedBox(
-                width: 22,
-                height: 22,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            : IconButton(
-                tooltip: 'Edit device',
-                icon: const Icon(Icons.more_horiz),
-                onPressed: _connecting ? null : () => _editDevice(device),
+            leading: Container(
+              width: 50,
+              height: 50,
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF537FE7), Color(0xFF7756C9)],
+                ),
+                borderRadius: BorderRadius.circular(16),
               ),
-        onTap: _connecting ? null : () => _connect(device.url),
-        onLongPress: _connecting ? null : () => _editDevice(device),
+              child: Icon(
+                _deviceIcon(device.icon),
+                color: Colors.white,
+                size: 28,
+              ),
+            ),
+            title: Text(
+              device.name,
+              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 18),
+            ),
+            subtitle: Text(
+              connecting
+                  ? 'Connecting…'
+                  : waking
+                  ? _wakeMessage ?? 'Waking…'
+                  : 'Tap to connect',
+            ),
+            trailing: connecting || waking
+                ? const SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : IconButton(
+                    tooltip: 'Edit device',
+                    icon: const Icon(Icons.more_horiz),
+                    onPressed: busy ? null : () => _editDevice(device),
+                  ),
+            onTap: busy ? null : () => _connect(device.url),
+            onLongPress: busy ? null : () => _editDevice(device),
+          ),
+          const Divider(height: 1),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Wrap(
+              spacing: 8,
+              alignment: WrapAlignment.spaceBetween,
+              children: [
+                if (waking)
+                  TextButton.icon(
+                    onPressed: _cancelWakeWait,
+                    icon: const Icon(Icons.close, size: 18),
+                    label: const Text('Stop waiting'),
+                  )
+                else
+                  TextButton.icon(
+                    onPressed: busy ? null : () => _wakeDevice(device),
+                    icon: const Icon(Icons.power_settings_new, size: 19),
+                    label: Text(
+                      device.wake == null ? 'Set up wake' : 'Wake PC',
+                    ),
+                  ),
+                TextButton.icon(
+                  onPressed: busy ? null : () => _wakeSettings(device),
+                  icon: const Icon(Icons.settings_outlined, size: 18),
+                  label: const Text('Wake settings'),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -263,6 +407,7 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
 
   Future<void> _connect(String wsUrl, {String? name, String? icon}) async {
     if (_connecting) return;
+    if (_wakingUrl != null) _cancelWakeWait();
     wsUrl = normalizeHostWsUrl(wsUrl);
     setState(() {
       _connecting = true;
@@ -282,10 +427,7 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
       if (icon != null) {
         devices = [
           for (final device in devices)
-            if (device.url == wsUrl)
-              SavedDevice(url: device.url, name: device.name, icon: icon)
-            else
-              device,
+            if (device.url == wsUrl) device.copyWith(icon: icon) else device,
         ];
         await SavedDevices.save(devices);
       }

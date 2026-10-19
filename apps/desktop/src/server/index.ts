@@ -1,8 +1,10 @@
+import { getCursorHint } from './handlers/cursor';
 import { initializeAgentStore, storedHistory, storedActivity, storedActivityV2, activityOperation, setActivityBroadcast, closeAgentStore, flushAgents } from './workspace/agent-store';
 import { archiveAgentSession, pendingAgentApprovals } from './handlers/agents';
 import { enroll, resume, accessToken, hostId, WorkspaceError, stringParam, isPrivatePeer } from './workspace/security';
 import { workspaceRequest, validateRequest, once } from './workspace/protocol';
 import { createChatLibrary } from './workspace/chat-library';
+import { petSummaries } from './workspace/pet-monitor';
 import { dataDirectory } from './workspace/security';
 import { closeSecurityStore } from './workspace/security';
 import { setChatLibraryReady } from './workspace/protocol';
@@ -184,7 +186,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
     }
 
     validateRequest(method, params);
-    if (session?.role === 'monitor' && !AUTH_METHODS.has(method) && !['session.subscribe','session.getCapabilities','session.heartbeat','agent.listSessions','activity.snapshot','activity.snapshotV2','activity.action','activity.actionStatus'].includes(method)) throw new WorkspaceError('PERMISSION_DENIED','Monitoring connections only receive task status and scoped notification actions.');
+    if (session?.role === 'monitor' && !AUTH_METHODS.has(method) && !['session.subscribe','session.getCapabilities','session.heartbeat','agent.listSessions','activity.snapshot','activity.snapshotV2','activity.monitor','activity.action','activity.actionStatus'].includes(method)) throw new WorkspaceError('PERMISSION_DENIED','Monitoring connections only receive task status and scoped notification actions.');
     if (method === 'session.hello') { send(ws, {type:'rpc-response',response:{id:req.id,result:{protocolVersion:2}}}); return; }
     if (method === 'session.enroll' || method === 'session.resume') {
       const result = method === 'session.enroll' ? enroll(stringParam(params,'code'),stringParam(params,'name')) : resume(stringParam(params,'credential'),params.role === 'monitor' ? 'monitor':'control');
@@ -200,6 +202,14 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         if(session.role === 'monitor') session.topics=new Set(['agents',...(topics.includes('activity')?['activity']:[])]);
       }
       send(ws,{type:'rpc-response',response:{id:req.id,result:{ok:true}}}); return;
+    }
+    if (method === 'activity.monitor') {
+      // Keep discovery alive while a background phone is connected. Expose only
+      // bounded summaries: monitor credentials still cannot read transcripts.
+      chats.subscribe(ws, true);
+      const pages = await Promise.all(['codex', 'antigravity'].map(source => chats.list({source, limit: 50, archived: false, sort: 'monitor'})));
+      const items = petSummaries(pages.flatMap(page => page.items));
+      send(ws, {type: 'rpc-response', response: {id: req.id, result: {items, sources: pages[0].sources}}}); return;
     }
     if (method.startsWith('chat.')) {
       const result = await chats.request(method, params, ws, accessToken(session?.token)?.deviceId || 'development');
@@ -261,6 +271,15 @@ export async function startRpcServer(port = 45678, hostname?: string) {
       case 'system.getPerf':
         result = await getPerfSnapshot();
         break;
+      case 'input.cursorHint': {
+        const requestedSession = params.sessionId === undefined ? undefined : stringParam(params, 'sessionId');
+        const display = requestedSession ? getSessionDisplay(requestedSession) : undefined;
+        if (requestedSession && !display) throw new WorkspaceError('INVALID_ARGUMENT', 'Stream session is unavailable.');
+        const windowId = params.windowId === undefined ? '' : stringParam(params, 'windowId');
+        if (windowId && !/^(0x[0-9a-fA-F]+|[0-9]+)$/.test(windowId)) throw new WorkspaceError('INVALID_ARGUMENT', 'Invalid stream window.');
+        result = await getCursorHint(display, windowId);
+        break;
+      }
       case 'input.mouseMove':
         result = mouseMove(params.dx as number, params.dy as number, inputDisplay);
         break;

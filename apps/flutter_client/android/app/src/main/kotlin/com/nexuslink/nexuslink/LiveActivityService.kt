@@ -53,6 +53,19 @@ class LiveActivityService:Service() {
     private val sessions=mutableMapOf<String,JSONObject>()
     private var overlay:View?=null
     private var panel:View?=null
+    private var panelRefresh:(()->Unit)?=null
+    private var guiMonitor=false
+    private var guiStatus=""
+    private var guiSyncedAt=0L
+    private val guiSessions=mutableMapOf<String,JSONObject>()
+    private val guiSettling=mutableMapOf<String,Pair<String,Long>>()
+    private val pollGui=object:Runnable {
+        override fun run(){
+            if(stopped || !online || !guiMonitor)return
+            request("guiMonitor","activity.monitor")
+            handler.postDelayed(this,15000)
+        }
+    }
     private val manager get()=getSystemService(NOTIFICATION_SERVICE) as NotificationManager
     private val windows get()=getSystemService(WINDOW_SERVICE) as WindowManager
     private val prefs get()=getSharedPreferences("live",0)
@@ -95,10 +108,10 @@ class LiveActivityService:Service() {
     }
     private fun builder(channel:String)=if(Build.VERSION.SDK_INT>=26)Notification.Builder(this,channel) else Notification.Builder(this)
     private fun notification():Notification {
-        val attention=sessions.values.filter{!it.optBoolean("archived")}
-        val working=attention.count{it.optBoolean("busy")}
-        val waiting=attention.count{it.optString("taskState")=="waiting"}
-        val failed=attention.count{it.optString("taskState")=="failed"}
+        val cards=sessionOverview()
+        val working=cards.count{it.running}
+        val waiting=cards.count{it.priority==0}
+        val failed=cards.count{it.priority==1}
         val stop=PendingIntent.getService(this,1,Intent(this,LiveActivityService::class.java).setAction("stop"),PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
         val iconRes:Int
@@ -113,13 +126,13 @@ class LiveActivityService:Service() {
             subText="offline"
         } else if(waiting>0){
             iconRes=android.R.drawable.stat_notify_error
-            titleText="NexusLink (needs approval)"
-            bodyText=if(working>0)"$waiting task(s) awaiting approval · $working working" else "$waiting task(s) awaiting approval"
-            subText="needs approval"
+            titleText="NexusLink (waiting for you)"
+            bodyText=if(working>0)"$waiting conversation(s) waiting for you · $working working" else "$waiting conversation(s) waiting for you"
+            subText="waiting for you"
         } else if(failed>0){
             iconRes=android.R.drawable.stat_notify_error
             titleText="NexusLink (needs attention)"
-            bodyText=if(working>0)"$failed task(s) failed · $working working" else "$failed task(s) need attention"
+            bodyText=if(working>0)"$failed conversation(s) need attention · $working working" else "$failed task(s) need attention"
             subText="attention"
         } else if(working>0){
             iconRes=android.R.drawable.stat_notify_sync
@@ -129,7 +142,7 @@ class LiveActivityService:Service() {
         } else {
             iconRes=R.mipmap.ic_launcher
             titleText="NexusLink (idle)"
-            bodyText="PC connected · All tasks done"
+            bodyText="PC connected · No agents currently running"
             subText="idle"
         }
 
@@ -143,7 +156,7 @@ class LiveActivityService:Service() {
             .setOnlyAlertOnce(true)
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .setContentIntent(openTask())
-            .addAction(Notification.Action.Builder(null,"Open tasks",openTask()).build())
+            .addAction(Notification.Action.Builder(null,"Open monitor",openTask()).build())
             .addAction(Notification.Action.Builder(null,"Stop live activity",stop).build()).build()
     }
     private fun request(id:String,method:String,params:JSONObject=JSONObject()) {socket?.send(JSONObject().put("type","rpc-request").put("request",JSONObject().put("id",id).put("method",method).put("params",params)).toString())}
@@ -167,6 +180,7 @@ class LiveActivityService:Service() {
     private fun connect(){
         if(stopped||host.isEmpty())return
         val credential=Credentials.get(this,host)?:run{stopSelf();return}
+        handler.removeCallbacks(pollGui);guiMonitor=false;guiSettling.clear();guiSessions.clear()
         val gen=++generation;online=false;connectionState="connecting";socket?.cancel()
         socket=http.newWebSocket(Request.Builder().url(host).build(),object:WebSocketListener(){
             override fun onOpen(ws:WebSocket,response:Response){handler.post{if(gen==generation)request("auth","session.resume",JSONObject().put("credential",credential).put("role","monitor"))}}
@@ -197,9 +211,12 @@ class LiveActivityService:Service() {
                 return
             }
             when(response.optString("id")){
+                "guiMonitor"->applyGuiMonitor(response.getJSONObject("result"))
                 "auth"->{online=true;connectionState="connected";lastError=null;attempts=0;hostId=response.getJSONObject("result").optString("hostId",host);request("capabilities","session.getCapabilities");val gen=generation;handler.postDelayed({if(gen==generation)connect()},45*60*1000L)}
                 "capabilities"->{
                     val features=response.optJSONObject("result")?.optJSONArray("features")?:JSONArray()
+                    guiMonitor=(0 until features.length()).any{features.optString(it)=="activity.monitor.v1"}
+                    if(guiMonitor){handler.removeCallbacks(pollGui);handler.post(pollGui)}
                     activityV2=(0 until features.length()).any{features.optString(it)=="activity.v2"}
                     request("sub","session.subscribe",JSONObject().put("topics",if(activityV2)JSONArray().put("agents").put("activity") else JSONArray().put("agents")))
                     if(activityV2){synchronizing=true;bufferedActivity.clear();snapshotThrough=0;request("snapshotV2","activity.snapshotV2",JSONObject().put("cursor",activityStore.cursor(hostId)))}
@@ -279,6 +296,9 @@ class LiveActivityService:Service() {
     private fun activityRecord(record:JSONObject,live:Boolean=false) {
         val cursor=record.optLong("cursor")
         if(cursor<=activityStore.cursor(hostId))return
+        if(record.optString("kind") in listOf("approval-requested","approval-resolved","completed","failed") && sessions[record.optString("agentSessionId")]?.optBoolean("archived")!=true){
+            activityStore.rememberUpdate(hostId,"activity:$cursor",record.toString())
+        }
         val task=record.optString("agentSessionId")
         val turn=record.optString("turnId")
         val kind=record.optString("kind")
@@ -360,6 +380,9 @@ class LiveActivityService:Service() {
                 iconRes=R.mipmap.ic_launcher
             }
         }
+        activityStore.rememberUpdate(hostId,key,JSONObject().put("agentSessionId",task)
+            .put("kind",when(kind){"result"->"completed";"error"->"failed";else->"approval-requested"})
+            .put("title",sessions[task]?.optString("title")?:title).put("preview",body).put("ts",e.optLong("ts")).toString())
         manager.notify((task+kind).hashCode(),builder("task_attention").setSmallIcon(iconRes)
             .setContentTitle(title).setContentText(body).setVisibility(Notification.VISIBILITY_PRIVATE)
             .setAutoCancel(true).setContentIntent(openTask(task)).build())
@@ -377,54 +400,48 @@ class LiveActivityService:Service() {
             else -> ""
         }
         if(bubbleHiddenReason.isNotEmpty()){removeOverlay();return}
-        val attention=sessions.values.filter{!it.optBoolean("archived")}
-        val states=attention.map{it.optString("taskState")}
-        val working=attention.count{it.optBoolean("busy")}
-        val waiting=attention.count{it.optString("taskState")=="waiting"}
-        val failed=attention.count{it.optString("taskState")=="failed"}
+        val cards=sessionOverview()
+        val justFinished=cards.any{it.status=="Finished" && System.currentTimeMillis()-it.updatedAt in 0..120000}
+        val working=cards.count{it.running}
+        val waiting=cards.count{it.priority==0}
+        val failed=cards.count{it.priority==1}
 
         val label:String
-        val strokeColor:Int
         val textColor:Int
 
         if(!online){
             label="×"
-            strokeColor=0xFF6B7280.toInt()
             textColor=0xFF9CA3AF.toInt()
         } else if(waiting>0){
             label=if(waiting>1)"$waiting" else "!"
-            strokeColor=0xFFF59E0B.toInt()
             textColor=0xFFFDE68A.toInt()
         } else if(failed>0){
             label=if(failed>1)"$failed" else "!"
-            strokeColor=0xFFEF4444.toInt()
             textColor=0xFFFCA5A5.toInt()
         } else if(working>0){
             label=if(working>1)"$working" else "•"
-            strokeColor=0xFF3B82F6.toInt()
             textColor=0xFF93C5FD.toInt()
-        } else if("completed" in states){
+        } else if(justFinished){
             label="✓"
-            strokeColor=0xFF10B981.toInt()
             textColor=0xFF6EE7B7.toInt()
         } else {
             label="•"
-            strokeColor=0xFF4B5563.toInt()
             textColor=0xFFD1D5DB.toInt()
         }
 
-        val density=resources.displayMetrics.density
-        fun makeBackground(stroke:Int)=GradientDrawable().apply{
-            shape=GradientDrawable.OVAL
-            setColor(0xF0141824.toInt())
-            setStroke((1.5f*density).toInt(),stroke)
+        val mood=when {
+            !online->PetMood.OFFLINE
+            waiting>0->PetMood.WAITING
+            failed>0->PetMood.ERROR
+            working>0->PetMood.WORKING
+            justFinished->PetMood.COMPLETE
+            else->PetMood.IDLE
         }
-
-        (overlay as? TextView)?.let{
-            it.text=label
-            it.setTextColor(textColor)
-            it.contentDescription="NexusLink: ${if(!online) "disconnected" else if(waiting>0) "$waiting approvals" else if(failed>0) "$failed failures" else if(working>0) "$working working" else "idle"}. Tap for tasks."
-            it.background=makeBackground(strokeColor)
+        val density=resources.displayMetrics.density
+        panelRefresh?.invoke()
+        (overlay as? MonitorPetView)?.let{
+            it.status(mood,label,textColor)
+            it.contentDescription="NexusLink: ${if(!online) "disconnected" else if(waiting>0) "$waiting waiting for you" else if(failed>0) "$failed need attention" else if(working>0) "$working working" else "idle"}. Tap for conversations."
             it.requestLayout()
             val params=it.layoutParams as? WindowManager.LayoutParams
             if(params!=null){
@@ -440,25 +457,22 @@ class LiveActivityService:Service() {
         }
 
         val params=WindowManager.LayoutParams(
-            (48*density).toInt(),
-            (48*density).toInt(),
+            (104*density).toInt(),
+            (104*density).toInt(),
             if(Build.VERSION.SDK_INT>=26)WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply{
             gravity=Gravity.TOP or Gravity.START
-            x=prefs.getInt("bubbleX",0).coerceIn(0,(resources.displayMetrics.widthPixels-(48*density).toInt()).coerceAtLeast(0))
-            y=prefs.getInt("bubbleY",(60*density).toInt()).coerceIn((24*density).toInt(),(resources.displayMetrics.heightPixels-(48*density).toInt()).coerceAtLeast((24*density).toInt()))
+            x=prefs.getInt("bubbleX",0).coerceIn(0,(resources.displayMetrics.widthPixels-(104*density).toInt()).coerceAtLeast(0))
+            y=prefs.getInt("bubbleY",(60*density).toInt()).coerceIn((24*density).toInt(),(resources.displayMetrics.heightPixels-(104*density).toInt()).coerceAtLeast((24*density).toInt()))
         }
 
-        val view=TextView(this).apply{
-            text=label
-            setTextColor(textColor)
-            textSize=18f
-            typeface=Typeface.DEFAULT_BOLD
-            gravity=Gravity.CENTER
-            contentDescription="NexusLink task status. Tap for tasks. Long press for options."
-            background=makeBackground(strokeColor)
+        val view=MonitorPetView(this).apply{
+            status(mood,label,textColor)
+            setReducedMotion(prefs.getBoolean("petReducedMotion",false))
+            faceInward(params.x>resources.displayMetrics.widthPixels/2)
+            contentDescription="NexusLink pet. Tap for important updates. Drag to move. Long press for options."
             elevation=10f*density
         }
 
@@ -467,6 +481,8 @@ class LiveActivityService:Service() {
         var originX=0
         var originY=0
         var downAt=0L
+        var lastTouchX=0f
+        var moved=false
 
         view.setOnTouchListener{_,event->
             when(event.action){
@@ -476,9 +492,13 @@ class LiveActivityService:Service() {
                     originX=params.x
                     originY=params.y
                     downAt=System.currentTimeMillis()
+                    lastTouchX=event.rawX;moved=false
                     true
                 }
                 MotionEvent.ACTION_MOVE->{
+                    if(abs(event.rawX-downX)>8*density || abs(event.rawY-downY)>8*density)moved=true
+                    if(moved)view.dragBy((event.rawX-lastTouchX)/density)
+                    lastTouchX=event.rawX
                     val maxW=(resources.displayMetrics.widthPixels-view.width).coerceAtLeast(0)
                     val maxH=(resources.displayMetrics.heightPixels-view.height).coerceAtLeast(20)
                     params.x=(originX+event.rawX-downX).toInt().coerceIn(0,maxW)
@@ -489,21 +509,24 @@ class LiveActivityService:Service() {
                 MotionEvent.ACTION_UP->{
                     val dx=abs(event.rawX-downX)
                     val dy=abs(event.rawY-downY)
-                    if(dx<15 && dy<15){
+                    view.release()
+                    if(!moved && dx<15*density && dy<15*density){
                         if(System.currentTimeMillis()-downAt>500){
                             showPanel(true)
                         } else {
-                            showPanel(false)
+                            view.performClick()
+                            if(panel!=null)closePanel() else showPanel(false)
                         }
                     } else {
                         val maxW=(resources.displayMetrics.widthPixels-view.width).coerceAtLeast(0)
                         params.x=if(params.x<maxW/2)0 else maxW
+                        view.faceInward(params.x>maxW/2)
                         windows.updateViewLayout(view,params)
                     }
                     prefs.edit().putInt("bubbleX",params.x).putInt("bubbleY",params.y).apply()
                     true
                 }
-                MotionEvent.ACTION_CANCEL->true
+                MotionEvent.ACTION_CANCEL->{view.release();true}
                 else->false
             }
         }
@@ -519,52 +542,192 @@ class LiveActivityService:Service() {
             lastError="Overlay creation failed: ${e.message ?: e.javaClass.simpleName}"
         }
     }
-    private fun showPanel(actions:Boolean){
-        panel?.let{try{windows.removeView(it)}catch(e:Exception){}};panel=null
-        val density=resources.displayMetrics.density
-        val list=LinearLayout(this).apply{
-            orientation=LinearLayout.VERTICAL
-            setPadding((16*density).toInt(),(16*density).toInt(),(16*density).toInt(),(16*density).toInt())
-            background=GradientDrawable().apply{
-                cornerRadius=16f*density
-                setColor(0xF5141824.toInt())
-                setStroke((1f*density).toInt(),0xFF2A344A.toInt())
+    private fun applyGuiMonitor(result:JSONObject){
+        guiSyncedAt=System.currentTimeMillis()
+        val rows=result.optJSONArray("items")?:JSONArray()
+        guiSessions.clear()
+        for(i in rows.length()-1 downTo 0){
+            val row=rows.getJSONObject(i)
+            guiSessions[row.getString("id")]=row
+            val state=row.optString("execution")
+            val id=row.getString("id")
+            // Running token streams stay quiet: retain state transitions and saved idle updates.
+            val signature=state+":"+if(state=="working") "running" else row.optLong("activityAt").toString()
+            val previous=activityStore.seenChat(hostId,id)
+            if(previous!=null && signature!=previous && state !in listOf("working","needsReply")){
+                val settling=guiSettling[id]
+                if(settling==null || settling.first!=signature){guiSettling[id]=signature to SystemClock.elapsedRealtime();continue}
+                if(SystemClock.elapsedRealtime()-settling.second<30000)continue
             }
-        }
-        fun button(text:String,action:()->Unit){list.addView(TextView(this).apply{
-            this.text=text;setTextColor(Color.WHITE);textSize=14f;gravity=Gravity.CENTER_VERTICAL
-            setPadding((14*density).toInt(),(10*density).toInt(),(14*density).toInt(),(10*density).toInt())
-            minHeight=(44*density).toInt();maxLines=2;ellipsize=android.text.TextUtils.TruncateAt.END
-            background=GradientDrawable().apply{cornerRadius=10f*density;setColor(0xFF1E2536.toInt())}
-            val margin=(6*density).toInt();layoutParams=LinearLayout.LayoutParams(-1,-2).apply{bottomMargin=margin}
-            setOnClickListener{action();panel?.let{try{windows.removeView(it)}catch(e:Exception){}};panel=null}
-        })}
-        if(actions){
-            button("Hide bubble"){bubbleEnabled=false;prefs.edit().putBoolean("bubble",false).apply();removeOverlay()}
-            button("Stop live activity"){stopSelf()}
-        } else {
-            val active=sessions.values.filter{!it.optBoolean("archived")}
-                .sortedWith(compareByDescending<JSONObject>{it.optString("taskState")=="waiting"}
-                    .thenByDescending{it.optString("taskState")=="failed"}
-                    .thenByDescending{it.optBoolean("busy")}
-                    .thenByDescending{it.optString("taskState")=="completed"}
-                    .thenByDescending{it.optLong("updatedAt")})
-            if(active.isEmpty())list.addView(TextView(this).apply{text="No active tasks";setTextColor(0xFFA7B0C0.toInt());textSize=14f;setPadding(12,12,12,16)})
-            active.forEach{s->
-                val state=s.optString("taskState",if(s.optBoolean("busy")) "working" else "idle")
-                val title=s.optString("title","Task")
-                button("$state · $title"){openTask(s.getString("agentSessionId")).send()}
+            guiSettling.remove(id)
+            if(signature!=previous && (previous!=null || i<5)){
+                val kind=when(state){"working"->"started";"needsReply"->"needs-reply";else->"updated"}
+                activityStore.rememberUpdate(hostId,"gui:$id:$signature:${row.optLong("activityAt")}",JSONObject()
+                    .put("agentSessionId","chat:$id").put("title",row.optString("title","Desktop chat")).put("provider",row.optString("provider"))
+                    .put("project",row.optString("project")).put("preview",row.optString("preview")).put("kind",kind).put("ts",row.optLong("activityAt"))
+                    .toString())
             }
-            button("Open NexusLink"){openTask().send()}
+            activityStore.rememberChat(hostId,id,signature)
         }
-        button("Close"){}
-        val scroll=ScrollView(this).apply{addView(list)}
-        val params=WindowManager.LayoutParams((300*density).toInt(),WindowManager.LayoutParams.WRAP_CONTENT,if(Build.VERSION.SDK_INT>=26)WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,PixelFormat.TRANSLUCENT).apply{
-            gravity=Gravity.CENTER
-        }
-        try{windows.addView(scroll,params);panel=scroll}catch(e:Exception){lastError="Task picker could not open: ${e.message ?: e.javaClass.simpleName}"}
+        val sources=result.optJSONArray("sources")?:JSONArray()
+        guiStatus=(0 until sources.length()).map{sources.getJSONObject(it)}
+            .filter{it.optString("source") in listOf("codex","antigravity") && it.optString("state")=="error"}
+            .joinToString("\n"){it.optString("source")+": "+it.optString("reason","History unavailable")}
     }
-    private fun removeOverlay(){overlay?.let{try{windows.removeView(it)}catch(e:Exception){}};overlay=null;bubbleVisible=false;panel?.let{try{windows.removeView(it)}catch(e:Exception){}};panel=null}
+
+    private fun closePanel(){
+        panel?.let{try{windows.removeView(it)}catch(e:Exception){}}
+        panel=null;panelRefresh=null
+    }
+
+    private fun sessionOverview():List<PetSessionSummary>{
+        val linked=guiSessions.values.map{it.optString("sessionId")}.filter{it.isNotEmpty()}.toSet()
+        val managed=sessions.values.filter{!it.optBoolean("archived") && !(it.optBoolean("imported") && it.optString("agentSessionId") in linked)}.map{
+            petSessionSummary(it.optString("agentSessionId"),it.optString("title"),it.optString("cwd"),
+                it.optString("agent"),it.optString("taskState"),it.optBoolean("busy"),
+                it.optString("activity"),it.optLong("updatedAt",it.optLong("createdAt"))).copy(preview=it.optString("preview"))
+        }
+        val gui=guiSessions.values.map{
+            petSessionSummary("chat:"+it.optString("id"),it.optString("title"),it.optString("project"),
+                it.optString("provider"),it.optString("execution"),it.optString("execution")=="working",
+                "",it.optLong("activityAt"),true).copy(preview=it.optString("preview"))
+        }
+        return (managed+gui).sortedWith(compareBy<PetSessionSummary>{it.priority}.thenByDescending{it.updatedAt})
+    }
+
+    private fun showPanel(actions:Boolean){
+        closePanel()
+        val density=resources.displayMetrics.density
+        fun dp(value:Int)=(value*density).toInt()
+        val list=LinearLayout(this).apply{
+            orientation=LinearLayout.VERTICAL;setPadding(dp(16),dp(12),dp(16),dp(12))
+            background=GradientDrawable().apply{cornerRadius=dp(16).toFloat();setColor(0xF5141824.toInt())}
+        }
+        fun close(){closePanel()}
+        fun label(text:String)=TextView(this).apply{
+            this.text=text;setTextColor(Color.WHITE);textSize=14f
+            setPadding(dp(10),dp(10),dp(10),dp(10));minHeight=dp(44)
+        }
+        fun button(text:String,action:()->Unit){list.addView(label(text).apply{setOnClickListener{action()}})}
+        var loadOlder:(()->Unit)?=null
+        val scroll=object:ScrollView(this){
+            private var downY=0f
+            override fun dispatchTouchEvent(event:MotionEvent):Boolean {
+                if(event.action==MotionEvent.ACTION_DOWN)downY=event.y
+                val handled=super.dispatchTouchEvent(event)
+                if(event.action==MotionEvent.ACTION_UP && downY-event.y>dp(40) && !canScrollVertically(1))loadOlder?.invoke()
+                return handled
+            }
+        }
+        if(actions){
+            button("Play with fox"){(overlay as? MonitorPetView)?.play();close()}
+            button(if(prefs.getBoolean("petReducedMotion",false))"Turn animations on" else "Reduce motion"){
+                val reduce=!prefs.getBoolean("petReducedMotion",false)
+                prefs.edit().putBoolean("petReducedMotion",reduce).apply()
+                (overlay as? MonitorPetView)?.setReducedMotion(reduce);close()
+            }
+            button("Fox artwork · credits"){
+                list.removeAllViews()
+                list.addView(label(assets.open("pets/fox/CREDITS.txt").bufferedReader().use{it.readText()}))
+                list.addView(label(assets.open("pets/fox/LICENSE.txt").bufferedReader().use{it.readText()}))
+                button("Close"){close()}
+            }
+            button("Hide pet"){bubbleEnabled=false;prefs.edit().putBoolean("bubble",false).apply();removeOverlay()}
+            button("Stop live activity"){stopSelf()}
+        }else{
+            val heading=label("Agent monitor").apply{textSize=21f;typeface=Typeface.DEFAULT_BOLD}
+            list.addView(heading)
+            val status=label("").apply{minHeight=0;textSize=12f;setTextColor(0xFF94A3B8.toInt())}
+            list.addView(status)
+            val overview=LinearLayout(this).apply{orientation=LinearLayout.VERTICAL}
+            list.addView(overview)
+            var recentLimit=5
+            var activeLimit=5
+            var attentionLimit=5
+            var previousOverview=""
+            fun refreshOverview(){
+                val groups=petConversationGroups(sessionOverview())
+                val fingerprint=groups.toString()+online+recentLimit+activeLimit+attentionLimit+(System.currentTimeMillis()/60000)
+                if(fingerprint==previousOverview)return
+                previousOverview=fingerprint
+                overview.removeAllViews()
+                fun card(row:PetSessionSummary){
+                    val accent=when {row.priority==0->0xFFFBBF24.toInt();row.priority==1->0xFFFCA5A5.toInt();row.running->0xFF6EE7B7.toInt();else->0xFF94A3B8.toInt()}
+                    val container=LinearLayout(this).apply{
+                        orientation=LinearLayout.VERTICAL
+                        setPadding(dp(2),dp(4),dp(2),dp(6))
+                        background=GradientDrawable().apply{
+                            cornerRadius=dp(14).toFloat();setColor(0xFF1B2432.toInt())
+                            setStroke(dp(1),0xFF2B3748.toInt())
+                        }
+                        layoutParams=LinearLayout.LayoutParams(-1,-2).apply{bottomMargin=dp(8)}
+                        setOnClickListener{openTask(row.id).send();close()}
+                    }
+                    container.addView(label(row.title).apply{
+                        typeface=Typeface.DEFAULT_BOLD;textSize=15f;minHeight=0
+                        maxLines=2;ellipsize=android.text.TextUtils.TruncateAt.END
+                        setPadding(dp(12),dp(8),dp(12),dp(4))
+                    })
+                    container.addView(label("${row.agent} · ${row.project}").apply{
+                        textSize=12f;minHeight=0;setTextColor(0xFFCBD5E1.toInt())
+                        setPadding(dp(12),0,dp(12),dp(8));maxLines=1;ellipsize=android.text.TextUtils.TruncateAt.END
+                    })
+                    if(row.preview.isNotBlank())container.addView(label(row.preview.replace(Regex("\\s+")," ")).apply{
+                        textSize=13f;minHeight=0;setTextColor(0xFFCBD5E1.toInt())
+                        setPadding(dp(12),0,dp(12),dp(8));maxLines=2;ellipsize=android.text.TextUtils.TruncateAt.END
+                    })
+                    val state=if(row.running)row.detail else row.status
+                    val age=if(row.updatedAt>0)android.text.format.DateUtils.getRelativeTimeSpanString(row.updatedAt).toString() else ""
+                    container.addView(label("${if(online && row.running) "● " else ""}$state${if(!online) " · last known" else ""} · $age").apply{
+                        textSize=11f;minHeight=0;setTextColor(accent)
+                        setPadding(dp(12),0,dp(12),dp(6));maxLines=2;ellipsize=android.text.TextUtils.TruncateAt.END
+                    })
+                    container.contentDescription="${row.title}, ${row.agent}, ${row.project}, $state. Open conversation"
+                    overview.addView(container)
+                }
+                fun section(title:String,rows:List<PetSessionSummary>,limit:Int,more:()->Unit){
+                    overview.addView(label("$title  ·  ${rows.size}").apply{
+                        typeface=Typeface.DEFAULT_BOLD;textSize=12f;setTextColor(0xFF94A3B8.toInt())
+                    })
+                    rows.take(limit).forEach{card(it)}
+                    if(rows.size>limit)overview.addView(label("Show more · ${rows.size-limit} remaining").apply{setOnClickListener{more()}})
+                }
+                if(groups.attention.isNotEmpty())section("NEEDS ATTENTION",groups.attention,attentionLimit){attentionLimit+=5;refreshOverview()}
+                section("RUNNING",groups.running,activeLimit){activeLimit+=5;refreshOverview()}
+                if(groups.running.isEmpty())overview.addView(label(if(online)"No agents running right now" else "Reconnect to check running agents").apply{
+                    textSize=13f;setTextColor(0xFF94A3B8.toInt())
+                })
+                section("RECENT",groups.recent,recentLimit){recentLimit+=5;refreshOverview()}
+                if(groups.recent.isEmpty())overview.addView(label("Recent conversations will appear here").apply{textSize=13f;setTextColor(0xFF94A3B8.toInt())})
+            }
+            loadOlder={recentLimit+=5;refreshOverview()}
+            panelRefresh={
+                refreshOverview()
+                status.text=when {
+                    !online->"Offline · showing last known conversations"
+                    guiStatus.isNotEmpty()->"Connected · some agent sources are unavailable"
+                    guiMonitor && guiSyncedAt>0->"● Connected · desktop chats refresh every 15s"
+                    !guiMonitor->"Connected · update PC host for desktop chats"
+                    else->"Connected · syncing conversations…"
+                }
+            }
+            panelRefresh?.invoke()
+            button("Open full monitor  →"){openTask().send();close()}
+
+        }
+        button("Close"){close()}
+        scroll.addView(list)
+        val params=WindowManager.LayoutParams(
+            minOf(dp(380),resources.displayMetrics.widthPixels-dp(24)),
+            minOf(dp(600),resources.displayMetrics.heightPixels-dp(100)),
+            if(Build.VERSION.SDK_INT>=26)WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY else WindowManager.LayoutParams.TYPE_PHONE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,PixelFormat.TRANSLUCENT).apply{gravity=Gravity.CENTER}
+        try{
+            windows.addView(scroll,params);panel=scroll
+            overlay?.let{pet->val placement=pet.layoutParams;windows.removeView(pet);windows.addView(pet,placement)}
+        }catch(e:Exception){panelRefresh=null;lastError="Pet feed could not open: ${e.message ?: e.javaClass.simpleName}"}
+    }
+    private fun removeOverlay(){panelRefresh=null;overlay?.let{try{windows.removeView(it)}catch(e:Exception){}};overlay=null;bubbleVisible=false;panel?.let{try{windows.removeView(it)}catch(e:Exception){}};panel=null}
     override fun onDestroy(){
         stopped=true;running=false;connectionState="stopped";generation++;socket?.cancel()
         prefs.edit().putBoolean("requested",false).apply()

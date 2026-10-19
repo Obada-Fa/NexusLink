@@ -19,6 +19,7 @@ import '../util/mjpeg_sink.dart';
 import '../widgets/mirror_frame_painter.dart';
 import '../widgets/not_connected_view.dart';
 import 'mirror_fit.dart';
+import 'cursor_keyboard_policy.dart';
 
 /// What to show: a virtual app session (sessionAppId launches a new one,
 /// sessionId re-attaches), an existing window (windowId), an app to launch on
@@ -63,7 +64,7 @@ class MirrorScreen extends ConsumerStatefulWidget {
 }
 
 class _MirrorScreenState extends ConsumerState<MirrorScreen>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   MirrorPhase _phase = MirrorPhase.launching;
   String _errorMsg = '';
   final _decoded = ValueNotifier<ui.Image?>(null);
@@ -103,6 +104,71 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   Timer? _fpsTimer;
   Timer? _chromeHideTimer;
   bool _started = false;
+  Timer? _cursorTimer;
+  bool _cursorPending = false;
+  final _cursorKeyboard = CursorKeyboardPolicy();
+
+  bool get _canPollCursor =>
+      mounted &&
+      WidgetsBinding.instance.lifecycleState != AppLifecycleState.paused &&
+      WidgetsBinding.instance.lifecycleState != AppLifecycleState.inactive &&
+      WidgetsBinding.instance.lifecycleState != AppLifecycleState.hidden &&
+      TickerMode.valuesOf(context).enabled &&
+      (ModalRoute.of(context)?.isCurrent ?? true) &&
+      _phase == MirrorPhase.streaming;
+
+  Future<void> _pollCursor() async {
+    final client = _captureClient;
+    if (!_canPollCursor ||
+        _cursorPending ||
+        client == null ||
+        !client.supports('input.cursor.v1')) {
+      return;
+    }
+    _cursorPending = true;
+    try {
+      final hint = await client.requestMap(
+        'input.cursorHint',
+        _sid({if (_windowId != null) 'windowId': _windowId}),
+        const Duration(seconds: 2),
+      );
+      if (!_canPollCursor) return;
+      final r = _region;
+      final x = hint['x'];
+      final y = hint['y'];
+      final inside =
+          r != null &&
+          x is num &&
+          y is num &&
+          x >= r.x &&
+          x < r.x + r.width &&
+          y >= r.y &&
+          y < r.y + r.height;
+      if (_cursorKeyboard.observe(
+        active: hint['textCursor'] == true && inside,
+        focus: hint['focus'] as String?,
+      )) {
+        _showKeyboard();
+      }
+    } catch (_) {
+      // A missed hint must never interrupt the stream or manual keyboard.
+    } finally {
+      _cursorPending = false;
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _pollCursor();
+  }
+
+  void _cursorTapped() {
+    _cursorKeyboard.rearm();
+    // Give the host time to apply the click before inspecting its cursor.
+    Future.delayed(const Duration(milliseconds: 250), () {
+      if (mounted) _pollCursor();
+    });
+  }
 
   // Gesture engine + a single monotonic clock shared by touch events and the
   // inertia ticker (they must agree on "now" or velocity math is wrong).
@@ -111,6 +177,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   final _clock = Stopwatch();
   final _activePointers = <int, Offset>{};
 
+  RpcClient? _captureClient;
   RpcClient? get _client => ref.read(activeClientProvider);
 
   double get _nowMs => _clock.elapsedMicroseconds / 1000.0;
@@ -127,6 +194,11 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _cursorTimer = Timer.periodic(
+      const Duration(milliseconds: 750),
+      (_) => _pollCursor(),
+    );
     _clock.start();
     _engine = GestureEngine(onGesture: _onGesture);
     _ticker = createTicker((_) {
@@ -143,11 +215,11 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     if (_started) return;
     _started = true;
     final client = _client;
+    _captureClient = client;
     if (client == null) {
       setState(() {
         _phase = MirrorPhase.error;
         _errorMsg = 'Not connected to the PC.';
-        _chromeVisible = true;
       });
       return;
     }
@@ -250,7 +322,6 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         setState(() {
           _phase = MirrorPhase.error;
           _errorMsg = friendlyLaunchError(e);
-          _chromeVisible = true;
         });
       }
     }
@@ -323,7 +394,6 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           setState(() {
             _phase = MirrorPhase.error;
             _errorMsg = 'The app has exited.';
-            _chromeVisible = true;
           });
         }
       }),
@@ -537,6 +607,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _cursorTimer?.cancel();
     _ticker.dispose();
     _frameSub?.cancel();
     _fpsTimer?.cancel();
@@ -554,7 +626,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     _unsubs.clear();
     _kbController.dispose();
     _kbFocus.dispose();
-    final client = _client;
+    // Dispose cannot read Riverpod; release resources on their owning client.
+    final client = _captureClient;
     final id = _streamId;
     final win = _windowId;
     final webrtcId = _webrtcId;
@@ -591,6 +664,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
 
     switch (e) {
       case TapEvent():
+        _cursorTapped();
         _cursorHost = Offset(e.x, e.y);
         _syncPointerFromHost();
         client.notify(
@@ -598,6 +672,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           _sid({'button': 'left', 'x': hx(e.x), 'y': hy(e.y)}),
         );
       case DoubleTapEvent():
+        _cursorTapped();
         _cursorHost = Offset(e.x, e.y);
         _syncPointerFromHost();
         final x = hx(e.x), y = hy(e.y);
@@ -768,13 +843,33 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   void _sendKeyMods(String key, List<String> mods) =>
       _client?.notify('input.keyEvent', _sid({'key': key, 'modifiers': mods}));
 
-  void _toggleKeyboard() {
-    setState(() => _keyboardOpen = !_keyboardOpen);
-    if (_keyboardOpen) {
+  void _showKeyboard() {
+    setState(() {
+      _keyboardOpen = true;
+    });
+    _chromeHideTimer?.cancel();
+    // The TextField is conditional: wait until it exists before attaching IME.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_keyboardOpen) return;
       _kbFocus.requestFocus();
-      _chromeHideTimer?.cancel();
+      FocusManager.instance.applyFocusChangesIfNeeded();
+      // Also reopen after Android Back hides the IME but retains field focus.
+      SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+    });
+  }
+
+  void _hideKeyboard() {
+    _kbFocus.unfocus();
+    SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+    setState(() => _keyboardOpen = false);
+    _scheduleHideChrome();
+  }
+
+  void _toggleKeyboard() {
+    if (_keyboardOpen && MediaQuery.viewInsetsOf(context).bottom > 0) {
+      _hideKeyboard();
     } else {
-      _scheduleHideChrome();
+      _showKeyboard();
     }
   }
 
@@ -786,9 +881,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         'modifiers': ['ctrl'],
       }),
     );
-    setState(() => _keyboardOpen = true);
-    _kbFocus.requestFocus();
-    _chromeHideTimer?.cancel();
+    _showKeyboard();
   }
 
   void _onKbChanged(String value) {
@@ -820,6 +913,17 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                 },
               ),
             ),
+          Positioned(
+            right: 12,
+            bottom: _keyboardOpen ? 76 : 12,
+            child: SafeArea(
+              child: IconButton.filled(
+                tooltip: 'Show or hide keyboard',
+                onPressed: _toggleKeyboard,
+                icon: const Icon(Icons.keyboard),
+              ),
+            ),
+          ),
           if (_keyboardOpen)
             Positioned(left: 0, right: 0, bottom: 0, child: _keyboardBar()),
         ],
@@ -891,13 +995,6 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                   _syncCanvasTransform();
                   _scheduleHideChrome();
                 },
-              ),
-              IconButton(
-                icon: Icon(
-                  Icons.keyboard,
-                  color: _keyboardOpen ? const Color(0xFF2A6AFF) : Colors.white,
-                ),
-                onPressed: _toggleKeyboard,
               ),
               if (_session != null)
                 IconButton(
@@ -1050,13 +1147,6 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                   _syncCanvasTransform();
                   _scheduleHideChrome();
                 },
-              ),
-              IconButton(
-                icon: Icon(
-                  Icons.keyboard,
-                  color: _keyboardOpen ? const Color(0xFF2A6AFF) : Colors.white,
-                ),
-                onPressed: _toggleKeyboard,
               ),
               if (_session != null)
                 IconButton(
@@ -1239,12 +1329,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   Widget _keyboardBar() {
     return Container(
       color: const Color(0xFF0F0F1A),
-      padding: EdgeInsets.only(
-        left: 10,
-        right: 10,
-        top: 8,
-        bottom: 8 + MediaQuery.of(context).viewInsets.bottom,
-      ),
+      // Scaffold already resizes above the IME; do not add its inset twice.
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       child: Row(
         children: [
           Expanded(
@@ -1254,7 +1340,12 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
               autocorrect: false,
               enableSuggestions: false,
               onChanged: _onKbChanged,
-              onSubmitted: (_) => _sendKey('Return'),
+              textInputAction: TextInputAction.send,
+              onEditingComplete: () {},
+              onSubmitted: (_) {
+                _sendKey('Return');
+                _showKeyboard();
+              },
               decoration: InputDecoration(
                 isDense: true,
                 hintText: 'Type — sent to the PC',
@@ -1267,6 +1358,11 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           _kbKey('⌫', () => _sendKey('BackSpace')),
           _kbKey('⏎', () => _sendKey('Return')),
           _kbKey('Esc', () => _sendKey('Escape')),
+          IconButton(
+            tooltip: 'Hide keyboard',
+            onPressed: _hideKeyboard,
+            icon: const Icon(Icons.keyboard_hide),
+          ),
         ],
       ),
     );

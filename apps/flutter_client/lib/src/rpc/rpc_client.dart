@@ -110,7 +110,8 @@ class RpcClient {
   Future<void>? _connecting;
   final Map<String, int> _demands = {};
   bool supports(String feature) =>
-      (capabilities['features'] as List?)?.contains(feature) == true;
+      (capabilities['features'] as List?)?.contains(feature) == true ||
+      (capabilities['methods'] as List?)?.contains(feature) == true;
 
   final String wsUrl;
 

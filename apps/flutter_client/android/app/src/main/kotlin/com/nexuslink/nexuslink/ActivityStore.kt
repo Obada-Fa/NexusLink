@@ -9,15 +9,40 @@ data class PendingNotificationAction(val operation:String,val hostId:String,val 
 
 data class PendingCard(val tag:String,val id:Int,val payload:String)
 
-class ActivityStore(context:Context):SQLiteOpenHelper(context,"live_activity.sqlite",null,3) {
+class ActivityStore(context:Context):SQLiteOpenHelper(context,"live_activity.sqlite",null,4) {
+    private fun createFeed(db:SQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS pet_updates(id INTEGER PRIMARY KEY AUTOINCREMENT, host TEXT NOT NULL, identity TEXT NOT NULL, payload TEXT NOT NULL, UNIQUE(host,identity))")
+        db.execSQL("CREATE INDEX IF NOT EXISTS pet_updates_host ON pet_updates(host,id)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS pet_seen(host TEXT NOT NULL, chat TEXT NOT NULL, signature TEXT NOT NULL, PRIMARY KEY(host,chat))")
+    }
     override fun onCreate(db:SQLiteDatabase) {
+        createFeed(db)
         db.execSQL("CREATE TABLE cursor_state(host TEXT PRIMARY KEY, cursor INTEGER NOT NULL)")
         db.execSQL("CREATE TABLE notifications(tag TEXT PRIMARY KEY, id INTEGER NOT NULL UNIQUE, pending_payload TEXT)")
         db.execSQL("CREATE TABLE operations(operation TEXT PRIMARY KEY, host TEXT NOT NULL, url TEXT NOT NULL, task TEXT NOT NULL, turn TEXT NOT NULL, source INTEGER NOT NULL, action TEXT NOT NULL, request TEXT, text TEXT, state TEXT NOT NULL, created INTEGER NOT NULL, reason TEXT)")
     }
     override fun onUpgrade(db:SQLiteDatabase,oldVersion:Int,newVersion:Int) {
+        if(oldVersion<4)createFeed(db)
         if(oldVersion<2)db.execSQL("ALTER TABLE operations ADD COLUMN url TEXT NOT NULL DEFAULT ''")
         if(oldVersion<3)db.execSQL("ALTER TABLE notifications ADD COLUMN pending_payload TEXT")
+    }
+
+    /** Keyset pages stay stable when newer updates arrive while reading older ones. */
+    fun updates(host:String,before:Long=Long.MAX_VALUE):List<Pair<Long,String>> = readableDatabase.rawQuery(
+        "SELECT id,payload FROM pet_updates WHERE host=? AND id<? ORDER BY id DESC LIMIT 5",arrayOf(host,before.toString())
+    ).use { cursor -> buildList { while(cursor.moveToNext())add(cursor.getLong(0) to cursor.getString(1)) } }
+
+    fun rememberUpdate(host:String,identity:String,payload:String) {
+        writableDatabase.execSQL("INSERT OR IGNORE INTO pet_updates(host,identity,payload) VALUES (?,?,?)",arrayOf(host,identity,payload))
+        writableDatabase.execSQL("DELETE FROM pet_updates WHERE host=? AND id NOT IN (SELECT id FROM pet_updates WHERE host=? ORDER BY id DESC LIMIT 1000)",arrayOf(host,host))
+    }
+
+    fun seenChat(host:String,chat:String):String? = readableDatabase.rawQuery(
+        "SELECT signature FROM pet_seen WHERE host=? AND chat=?",arrayOf(host,chat)
+    ).use { if(it.moveToFirst())it.getString(0) else null }
+
+    fun rememberChat(host:String,chat:String,signature:String) {
+        writableDatabase.execSQL("INSERT OR REPLACE INTO pet_seen(host,chat,signature) VALUES (?,?,?)",arrayOf(host,chat,signature))
     }
 
     fun cursor(host:String):Long = readableDatabase.rawQuery("SELECT cursor FROM cursor_state WHERE host=?",arrayOf(host)).use {

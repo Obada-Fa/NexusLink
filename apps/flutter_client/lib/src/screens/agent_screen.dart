@@ -131,7 +131,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       (_chatSummary.canReply &&
           !_savedCopy &&
           _client?.status == RpcStatus.connected &&
-          !_busy &&
           _deliveryOperation == null);
 
   RpcClient? get _client => ref.read(activeClientProvider);
@@ -529,6 +528,35 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   Future<void> _sendLibrary() async {
     if (!_replyAllowed || _sending || _input.text.trim().isEmpty) return;
     final chat = _chatSummary;
+    final isWorking = _busy ||
+        chat.execution == 'working' ||
+        (chat.json['capabilities'] as Map?)?['safety'] == 'busy';
+    bool interrupt = false;
+    if (isWorking) {
+      final choice = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Chat is working on PC'),
+          content: const Text(
+            'This conversation is currently running on your PC.\n\n'
+            'Do you want to interrupt it and send your message, or let it finish running?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('let_run'),
+              child: const Text('Let it run'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop('interrupt'),
+              child: const Text('Interrupt & Send'),
+            ),
+          ],
+        ),
+      );
+      if (choice != 'interrupt') return;
+      interrupt = true;
+      if (mounted) setState(() => _setBusy(false));
+    }
     final text = _input.text;
     final operation = 'chat-${DateTime.now().microsecondsSinceEpoch}';
     await ref.read(chatCacheProvider).saveDraft(chat.hostId, chat.id, text);
@@ -549,6 +577,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             model: _model,
             thinking: _modelSupportsEffort ? _thinking : null,
             mode: _mode,
+            interrupt: interrupt,
             images: [
               for (final photo in _photos)
                 {
@@ -1269,7 +1298,32 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       await _sendLibrary();
       return;
     }
-    if (_busy || _sending) return;
+    if (_sending) return;
+    if (_busy) {
+      final choice = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Chat is working'),
+          content: const Text(
+            'This conversation is currently running a task.\n\n'
+            'Do you want to interrupt it and send your message, or let it finish running?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('let_run'),
+              child: const Text('Let it run'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(ctx).pop('interrupt'),
+              child: const Text('Interrupt & Send'),
+            ),
+          ],
+        ),
+      );
+      if (choice != 'interrupt') return;
+      await _cancel();
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+    }
     final text = _input.text.trim();
     final session = _active;
     final client = _client;
@@ -1358,10 +1412,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   bool get _canStop => _busy || transcriptHasOpenTools(_events);
 
   Future<void> _cancel() async {
-    if (_isLibrary) return;
     final session = _active;
     final client = _client;
-    if (session == null) return;
     if (mounted) {
       setState(() {
         _setBusy(false);
@@ -1371,7 +1423,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           ..addAll(settled);
       });
     }
-    if (client != null) {
+    if (_isLibrary) {
+      try {
+        await ref.read(chatRepositoryProvider).cancel(_chatSummary);
+      } catch (_) {}
+    }
+    if (session != null && client != null && !session.agentSessionId.startsWith('library:')) {
       try {
         await client.request('agent.cancel', {
           'agentSessionId': session.agentSessionId,
@@ -4323,12 +4380,22 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                         ),
                       ),
                       IconButton.filled(
-                        tooltip: !_isLibrary && _canStop ? 'Stop' : 'Send',
-                        onPressed: _isLibrary
-                            ? (_replyAllowed ? _send : null)
-                            : (_canStop ? _cancel : _send),
+                        tooltip:
+                            (_canStop &&
+                                    _input.text.trim().isEmpty &&
+                                    _photos.isEmpty)
+                                ? 'Stop'
+                                : 'Send',
+                        onPressed:
+                            (_canStop &&
+                                    _input.text.trim().isEmpty &&
+                                    _photos.isEmpty)
+                                ? _cancel
+                                : (_replyAllowed ? _send : null),
                         icon: Icon(
-                          !_isLibrary && _canStop
+                          (_canStop &&
+                                  _input.text.trim().isEmpty &&
+                                  _photos.isEmpty)
                               ? Icons.stop
                               : Icons.arrow_upward,
                         ),

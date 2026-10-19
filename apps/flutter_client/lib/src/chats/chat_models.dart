@@ -62,3 +62,56 @@ String chatRelativeTime(DateTime? activity) {
   if (age.inDays < 1) return '${age.inHours} hr ago';
   return '${age.inDays} days ago';
 }
+
+extension AgentMonitorSummary on ChatSummary {
+  bool get needsAttention =>
+      execution == 'needsReply' ||
+      ['failed', 'interrupted'].contains(json['taskState']);
+  bool get running => execution == 'working' && !needsAttention;
+  int get monitorPriority => needsAttention
+      ? 0
+      : running
+      ? 1
+      : 2;
+  String get monitorSection => needsAttention
+      ? 'Needs attention'
+      : running
+      ? 'Running'
+      : 'Recent';
+  String get monitorStatus {
+    if (execution == 'needsReply') return 'Waiting for you';
+    if (json['taskState'] == 'failed') return 'Failed';
+    if (json['taskState'] == 'interrupted') return 'Interrupted';
+    if (running) {
+      return switch (json['activity']) {
+        'editing' => 'Editing files',
+        'reading' => 'Reading / searching',
+        'running-command' => 'Running a command',
+        'thinking' => 'Thinking',
+        'responding' => 'Writing a response',
+        _ => 'Working',
+      };
+    }
+    return switch (json['taskState']) {
+      'completed' => 'Finished',
+      'canceled' => 'Canceled',
+      _ => execution == 'unknown' ? 'Status unavailable' : 'Idle',
+    };
+  }
+
+  bool matchesMonitor(String filter) => switch (filter) {
+    'running' => running,
+    'attention' => needsAttention,
+    'recent' => !running && !needsAttention,
+    _ => true,
+  };
+}
+
+int compareMonitorChats(ChatSummary a, ChatSummary b) {
+  final priority = a.monitorPriority.compareTo(b.monitorPriority);
+  if (priority != 0) return priority;
+  final time = (b.activity?.millisecondsSinceEpoch ?? 0).compareTo(
+    a.activity?.millisecondsSinceEpoch ?? 0,
+  );
+  return time != 0 ? time : a.id.compareTo(b.id);
+}

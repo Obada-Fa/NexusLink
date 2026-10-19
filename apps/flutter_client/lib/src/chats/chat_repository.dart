@@ -103,6 +103,13 @@ class ChatRepository {
       }
       return {'items': items, 'nextCursor': null, 'sources': [], 'saved': true};
     }
+    rows = rows
+        .where(
+          (row) =>
+              row.matchesMonitor(query['monitorFilter'] as String? ?? 'all'),
+        )
+        .toList();
+    if (query['sort'] == 'monitor') rows.sort(compareMonitorChats);
     return {
       'items': rows.map((row) => row.json).toList(),
       'nextCursor': null,
@@ -147,6 +154,7 @@ class ChatRepository {
     String? model,
     String? thinking,
     String? mode,
+    bool interrupt = false,
   }) async {
     if (!online) {
       throw RpcException(
@@ -161,7 +169,16 @@ class ChatRepository {
       'model': ?model,
       'thinking': ?thinking,
       'mode': ?mode,
+      if (interrupt) 'interrupt': true,
     });
+  }
+
+  Future<void> cancel(ChatSummary chat) async {
+    if (online && supported) {
+      try {
+        await client!.requestMap('chat.cancel', {'chatId': chat.id});
+      } catch (_) {}
+    }
   }
 
   Future<void> refresh() async {

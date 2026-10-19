@@ -11,7 +11,7 @@ import '../workspace/project.dart';
 import '../workspace/files_screen.dart';
 import 'chat_models.dart';
 import 'chat_repository.dart';
-import '../widgets/agent_activity_icon.dart';
+import 'monitor_conversation_card.dart';
 
 class ChatLibraryScreen extends ConsumerStatefulWidget {
   final ChatFolder? folder;
@@ -27,6 +27,9 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
   List<Map<String, dynamic>> _items = [];
   List<Map<String, dynamic>> _health = [];
   Timer? _debounce;
+  Timer? _liveRefresh;
+  bool _liveLoading = false;
+  bool _liveDirty = false;
   void Function()? _unsubscribe;
   RpcClient? _bound;
   bool _folders = false;
@@ -38,6 +41,8 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
   String? _cursor;
   String? _error;
   String _sort = 'activity';
+  String _monitorFilter = 'all';
+  DateTime? _receivedAt;
   int _generation = 0;
   int? _lastSync;
 
@@ -63,7 +68,9 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
     if (!mounted) return;
     _sort = prefs.getString('chat-folder-sort:$host') ?? 'activity';
     await _load();
+    if (!mounted) return;
     _bind();
+    if (mounted) await _openPending(ref.read(pendingTaskProvider));
   }
 
   void _bind() {
@@ -72,13 +79,10 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
     _unsubscribe?.call();
     _bound = client;
     if (client?.supports('chat.library.v1') == true) {
-      _unsubscribe = client!.subscribe('chat-library-update', (_) {
-        _debounce?.cancel();
-        _debounce = Timer(
-          const Duration(milliseconds: 250),
-          () => unawaited(_load(quiet: true)),
-        );
-      });
+      _unsubscribe = client!.subscribe(
+        'chat-library-update',
+        (_) => _scheduleLiveRefresh(),
+      );
       unawaited(
         client
             .requestMap('chat.subscribe', {'enabled': true})
@@ -87,13 +91,31 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
     }
   }
 
+  // Throttle bursts, rather than delaying forever while tokens keep arriving.
+  void _scheduleLiveRefresh() {
+    _liveDirty = true;
+    if (_liveLoading || _liveRefresh?.isActive == true) return;
+    _liveRefresh = Timer(const Duration(milliseconds: 250), () async {
+      if (!mounted) return;
+      _liveLoading = true;
+      _liveDirty = false;
+      try {
+        await _load(quiet: true);
+      } finally {
+        _liveLoading = false;
+        if (mounted && _liveDirty) _scheduleLiveRefresh();
+      }
+    });
+  }
+
   Map<String, dynamic> get _query => {
     'query': _search.text.trim(),
     'archived': _archived,
     'limit': 50,
     if (_source != null) 'source': _source,
     if (widget.folder != null) 'folderId': widget.folder!.id,
-    if (_folders) 'sort': _sort,
+    'sort': _folders ? _sort : 'monitor',
+    if (!_folders) 'monitorFilter': _monitorFilter,
   };
   Future<void> _load({
     bool more = false,
@@ -198,6 +220,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
         _loading = false;
         _moreLoading = false;
         _error = null;
+        _receivedAt = DateTime.now();
       });
     } catch (error) {
       if (mounted && generation == _generation) {
@@ -339,6 +362,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
     WidgetsBinding.instance.removeObserver(this);
     _unsubscribe?.call();
     _debounce?.cancel();
+    _liveRefresh?.cancel();
     _scroll.dispose();
     _search.dispose();
     super.dispose();
@@ -351,25 +375,45 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
     if (mounted) await _load(quiet: true);
   }
 
-  @override
-  Widget build(BuildContext context) {
-    ref.listen<String?>(pendingTaskProvider, (_, task) {
-      if (task == null) return;
-      ref.read(pendingTaskProvider.notifier).select(null);
-      final chat = _items
-          .where((row) => row['agentSessionId'] == task)
-          .firstOrNull;
-      if (chat != null) {
-        unawaited(_open(ChatSummary(chat)));
+  Future<void> _openPending(String? task) async {
+    if (task == null || !_repo.online || !mounted) return;
+    ref.read(pendingTaskProvider.notifier).select(null);
+    try {
+      if (task.startsWith('chat:')) {
+        final page = await _repo.client!.requestMap('chat.historyPage', {
+          'chatId': task.substring(5),
+          'limit': 5,
+        });
+        if (!mounted) return;
+        final chat = page['chat'];
+        if (chat is! Map) throw StateError('This chat is no longer available');
+        await _open(ChatSummary(Map<String, dynamic>.from(chat)));
       } else {
-        unawaited(
-          Navigator.of(context).push(
+        final chat = _items
+            .where((row) => row['agentSessionId'] == task)
+            .firstOrNull;
+        if (chat != null) {
+          await _open(ChatSummary(chat));
+        } else {
+          await Navigator.of(context).push(
             MaterialPageRoute<void>(
               builder: (_) => AgentScreen(initialTaskId: task),
             ),
-          ),
-        );
+          );
+        }
       }
+    } catch (error) {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not open this update: $error')),
+        );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    ref.listen<String?>(pendingTaskProvider, (_, task) {
+      unawaited(_openPending(task));
     });
     final status = ref.watch(connectionStatusProvider);
     ref.listen(chatRepositoryProvider, (_, _) {
@@ -384,17 +428,20 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
       _bind();
       unawaited(_initialize());
     });
-    final needsReply = _folders
-        ? <ChatSummary>[]
-        : _items
-              .map(ChatSummary.new)
-              .where((row) => row.execution == 'needsReply')
-              .toList();
+    final conversations =
+        (_folders ? <Map<String, dynamic>>[] : _items)
+            .map(ChatSummary.new)
+            .where((chat) => chat.matchesMonitor(_monitorFilter))
+            .toList()
+          ..sort(compareMonitorChats);
+    final visibleItems = _folders
+        ? _items
+        : conversations.map((chat) => chat.json).toList();
     final scanning = _health.any((row) => row['state'] == 'scanning');
     final offline = status != RpcStatus.connected;
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.folder?.name ?? 'Chats'),
+        title: Text(widget.folder?.name ?? 'Agent monitor'),
         actions: [
           if (widget.folder?.path != null && !offline)
             IconButton(
@@ -433,8 +480,17 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
       ),
       body: RefreshIndicator(
         onRefresh: () async {
-          await _repo.refresh();
-          await _load(quiet: true);
+          try {
+            await _repo.refresh();
+            await _load(quiet: true);
+          } catch (_) {
+            if (mounted) {
+              setState(
+                () => _error =
+                    'Couldn’t refresh agents. Check the PC connection and retry.',
+              );
+            }
+          }
         },
         child: CustomScrollView(
           key: PageStorageKey('chat-library:${widget.folder?.id}:$_folders'),
@@ -451,8 +507,12 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
                         Expanded(
                           child: Text(
                             offline
-                                ? 'PC offline · Showing saved chats'
-                                : 'My PC · Connected',
+                                ? 'Offline · Last known activity'
+                                : _saved
+                                ? 'Connected · Showing saved activity'
+                                : _receivedAt == null
+                                ? 'Connecting to your agents…'
+                                : 'Connected · Synced ${TimeOfDay.fromDateTime(_receivedAt!).format(context)}',
                           ),
                         ),
                         TextButton.icon(
@@ -502,7 +562,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
                     child: TextField(
                       controller: _search,
                       decoration: const InputDecoration(
-                        hintText: 'Search chats…',
+                        hintText: 'Search conversations, projects, agents…',
                         prefixIcon: Icon(Icons.search),
                       ),
                       onChanged: (_) {
@@ -518,7 +578,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
                   if (widget.folder == null)
                     SegmentedButton<bool>(
                       segments: const [
-                        ButtonSegment(value: false, label: Text('Recent')),
+                        ButtonSegment(value: false, label: Text('Monitor')),
                         ButtonSegment(value: true, label: Text('Folders')),
                       ],
                       selected: {_folders},
@@ -558,13 +618,35 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
                       padding: const EdgeInsets.all(12),
                       child: SelectableText(widget.folder!.path!),
                     ),
-                  if (needsReply.isNotEmpty)
-                    ListTile(
-                      leading: const Icon(Icons.pending_actions),
-                      title: Text(
-                        'Needs your attention · ${needsReply.length}',
+                  if (!_folders)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Wrap(
+                          spacing: 8,
+                          runSpacing: 4,
+                          children: [
+                            for (final filter in const {
+                              'all': 'All',
+                              'running': 'Running',
+                              'attention': 'Attention',
+                              'recent': 'Recent',
+                            }.entries)
+                              ChoiceChip(
+                                label: Text(filter.value),
+                                selected: _monitorFilter == filter.key,
+                                onSelected: (_) {
+                                  setState(() {
+                                    _monitorFilter = filter.key;
+                                    _cursor = null;
+                                  });
+                                  unawaited(_load());
+                                },
+                              ),
+                          ],
+                        ),
                       ),
-                      onTap: () => _open(needsReply.first),
                     ),
                   for (final health in _health.where(
                     (row) => row['state'] == 'error',
@@ -604,7 +686,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
               SliverList(
                 delegate: SliverChildBuilderDelegate(
                   (ctx, index) {
-                    if (_items.isEmpty) {
+                    if (visibleItems.isEmpty) {
                       return Padding(
                         padding: const EdgeInsets.all(32),
                         child: Text(
@@ -614,16 +696,20 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
                               ? 'Still finding chats…'
                               : offline
                               ? 'No saved chats on this phone yet'
-                              : 'No chats yet',
+                              : _monitorFilter == 'running'
+                              ? 'No agents running right now'
+                              : _monitorFilter == 'attention'
+                              ? 'You’re all caught up — no conversations need attention'
+                              : 'No conversations yet',
                           textAlign: TextAlign.center,
                         ),
                       );
                     }
-                    if (index == _items.length) {
+                    if (index == visibleItems.length) {
                       return const Center(child: CircularProgressIndicator());
                     }
                     if (_folders) {
-                      final folder = ChatFolder(_items[index]);
+                      final folder = ChatFolder(visibleItems[index]);
                       return ListTile(
                         minVerticalPadding: 12,
                         leading: const Icon(Icons.folder_outlined),
@@ -640,63 +726,34 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
                         ),
                       );
                     }
-                    final chat = ChatSummary(_items[index]);
-                    final group = chatDateGroup(chat.activity);
+                    final chat = ChatSummary(visibleItems[index]);
+                    final group = chat.monitorSection;
                     final first =
                         index == 0 ||
                         group !=
-                            chatDateGroup(
-                              ChatSummary(_items[index - 1]).activity,
-                            );
+                            ChatSummary(visibleItems[index - 1]).monitorSection;
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         if (first)
                           Padding(
-                            padding: const EdgeInsets.fromLTRB(16, 20, 16, 4),
+                            padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
                             child: Text(
                               group,
                               style: Theme.of(context).textTheme.titleSmall,
                             ),
                           ),
-                        ListTile(
-                          minVerticalPadding: 12,
-                          leading: AgentMark(agentId: chat.source, size: 24),
-                          title: Text(
-                            chat.title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text(
-                            [
-                              if (chat.preview.isNotEmpty)
-                                chat.preview.replaceAll('\n', ' '),
-                              '${chat.sourceName} · ${chat.folderName}',
-                              if (_saved)
-                                'Saved copy'
-                              else if (chat.status != null)
-                                chat.status!,
-                            ].join('\n'),
-                            maxLines: 3,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          trailing: SizedBox(
-                            width: 72,
-                            child: Text(
-                              chatRelativeTime(chat.activity),
-                              textAlign: TextAlign.end,
-                              style: Theme.of(context).textTheme.bodySmall,
-                            ),
-                          ),
-                          onTap: () => _open(chat),
+                        MonitorConversationCard(
+                          chat: chat,
+                          offline: offline || _saved,
+                          onOpen: () => _open(chat),
                         ),
-                        const Divider(height: 1, indent: 16, endIndent: 16),
                       ],
                     );
                   },
-                  childCount: _items.isEmpty
+                  childCount: visibleItems.isEmpty
                       ? 1
-                      : _items.length + (_moreLoading ? 1 : 0),
+                      : visibleItems.length + (_moreLoading ? 1 : 0),
                 ),
               ),
           ],

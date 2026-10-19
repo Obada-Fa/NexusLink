@@ -1,3 +1,4 @@
+import { sessionActivity } from '../workspace/session-activity';
 import { persistAgent, loadedAgentRows } from '../workspace/agent-store';
 import { CodexAppServer } from '../../../../../packages/chat-core/src/providers/codex';
 // Agent gateway: run AI coding agents (Claude Code, Cursor CLI, OpenCode,
@@ -1039,6 +1040,12 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
   if (isRedundantToolStart(session.history, event)) return;
   const full: AgentEvent = { ...event, seq: ++session.seq, ts: Date.now(), turnId: session.info.turnId };
   session.info.updatedAt=full.ts;
+  const activity=sessionActivity(full);
+  const activityChanged=activity!==undefined && activity!==session.info.activity;
+  if(activityChanged){session.info.activity=activity;session.info.activityAt=full.ts;}
+  if(['result','error','permission-request'].includes(full.kind) || (full.kind==='status' && full.text==='cancelled')){
+    delete session.info.activity;delete session.info.activityAt;
+  }
   if(full.kind==='user') { session.info.taskState='running'; session.info.preview=full.text?.slice(0,160); }
   if(full.kind==='permission-request' && full.refId) {
     session.info.taskState='waiting';
@@ -1054,7 +1061,7 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
   const savedInfo={...session.info};
   void persistAgent({info:savedInfo,events:[full]}).then(()=>{
     broadcast({ type:'agent-event', agentSessionId:savedInfo.agentSessionId,event:full });
-    if(['result','error','permission-request','user','status'].includes(full.kind)) broadcast({type:'agent-session-update',session:savedInfo});
+    if(activityChanged || ['result','error','permission-request','user','status'].includes(full.kind)) broadcast({type:'agent-session-update',session:savedInfo});
   }).catch(error=>{
     session.info.taskState='failed';
     broadcast({type:'agent-event',agentSessionId:session.info.agentSessionId,event:{kind:'error',seq:++session.seq,ts:Date.now(),text:'Task history could not be saved. Check host storage.'}});
@@ -1236,6 +1243,63 @@ export function listHostChats(agent?: string): AgentHostChat[] {
     .slice(0, 80);
 }
 
+export function findHostChatProcesses(agent: string, hostChatId: string): number[] {
+  const pids: number[] = [];
+  if (!hostChatId) return pids;
+  if (process.platform === 'linux') {
+    try {
+      const entries = readdirSync('/proc');
+      for (const entry of entries) {
+        if (!/^[0-9]+$/.test(entry)) continue;
+        const pid = Number(entry);
+        if (pid === process.pid) continue;
+        try {
+          const cmd = readFileSync(`/proc/${entry}/cmdline`, 'utf8');
+          if (cmd.includes(hostChatId)) {
+            pids.push(pid);
+          }
+        } catch {}
+      }
+    } catch {}
+  } else if (process.platform === 'win32') {
+    try {
+      const proc = Bun.spawnSync(
+        ['powershell.exe', '-NoProfile', '-Command', `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*${hostChatId}*" } | Select-Object -ExpandProperty ProcessId`],
+        { stdout: 'pipe' },
+      );
+      const text = proc.stdout.toString('utf8');
+      for (const line of text.split('\n')) {
+        const num = Number(line.trim());
+        if (num > 0 && num !== process.pid) pids.push(num);
+      }
+    } catch {}
+  }
+  return pids;
+}
+
+export function isHostChatBusy(agent: string, hostChatId: string, cwd?: string): boolean {
+  loadAgentSessionsFromDisk();
+  const managed = [...agentSessions.values()].find(
+    (s) => (s.info.hostChatId === hostChatId || s.info.agentSessionId === hostChatId) && s.info.status === 'running',
+  );
+  if (managed && managed.info.busy) return true;
+
+  const pids = findHostChatProcesses(agent, hostChatId);
+  return pids.length > 0;
+}
+
+export function killHostChatProcesses(agent: string, hostChatId: string): boolean {
+  const pids = findHostChatProcesses(agent, hostChatId);
+  let killed = false;
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGINT');
+      killed = true;
+    } catch {}
+  }
+  return killed;
+}
+
 export function openHostChat(params: {
   agent: string;
   hostChatId: string;
@@ -1254,6 +1318,11 @@ export function openHostChat(params: {
     if (params.cwd?.trim()) {
       existing.info.cwd = resolveAgentCwd(params.cwd);
     }
+    const busy = isHostChatBusy(agent, hostChatId, existing.info.cwd);
+    if (busy !== existing.info.busy) {
+      existing.info.busy = busy;
+    }
+    existing.info.imported = false;
     saveAgentSessionsToDisk();
     broadcast({ type: 'agent-session-update', session: { ...existing.info } });
     return { ...existing.info };
@@ -1272,7 +1341,11 @@ export function openHostChat(params: {
   const info = createAgentSession(agent, cwd, title, { hostChatId });
   const session = agentSessions.get(info.agentSessionId);
   if (!session) return info;
-  session.info.imported = true;
+  session.info.imported = false;
+  const busy = isHostChatBusy(agent, hostChatId, cwd);
+  if (busy) {
+    session.info.busy = true;
+  }
   const def = AGENT_DEFS.find((d) => d.id === agent);
   const bin = def?.bin ? which(def.bin) : null;
   const history = loadHostChatHistory(agent, hostChatId, bin);
@@ -1327,7 +1400,6 @@ export function promptAgent(
   const session = agentSessions.get(agentSessionId);
   if (!session || session.info.status !== 'running') return { ok: false };
   if (session.info.hostChatId?.startsWith('ide:')) throw new Error('Cursor IDE chats are read only. Start a new chat to use Cursor CLI.');
-  if (session.info.imported) throw new Error('Replying is unavailable until this app confirms the original PC chat is safe to continue. Start a new chat to reply.');
   if(session.info.busy) throw new Error('This task is already working. Stop it before sending another prompt.');
   if (session.info.agent === 'codex' && opts.mode === 'plan') throw new Error('Codex Plan mode is unavailable. Select Agent mode.');
   session.info.turnId=crypto.randomUUID();
@@ -1394,6 +1466,9 @@ export function cancelAgent(agentSessionId: string): { ok: boolean } {
   const session = agentSessions.get(agentSessionId);
   if (!session) return { ok: false };
   session.adapter.cancel();
+  if (session.info.hostChatId) {
+    killHostChatProcesses(session.info.agent, session.info.hostChatId);
+  }
   const settled = closeDanglingToolStarts(session.history, 'Stopped.');
   if (settled.length !== session.history.length) {
     session.history = settled;

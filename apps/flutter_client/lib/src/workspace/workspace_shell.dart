@@ -36,10 +36,10 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
         if (call.method == 'openTask' && call.arguments is Map) {
           final args = Map<String, dynamic>.from(call.arguments);
           final host = args['host'] as String?;
-          ref
-              .read(pendingTaskProvider.notifier)
-              .select(args['taskId'] as String?);
           ref.read(workspaceTabProvider.notifier).select(0);
+          if (args['taskId'] == null) {
+            _keys[0].currentState?.popUntil((route) => route.isFirst);
+          }
           if (host != null && host != ref.read(connectionProvider).hostUrl) {
             try {
               await ref.read(connectionProvider.notifier).connect(host);
@@ -51,6 +51,9 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
               }
             }
           }
+          ref
+              .read(pendingTaskProvider.notifier)
+              .select(args['taskId'] as String?);
         }
       });
     }
@@ -62,7 +65,7 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
     if (!mounted) return;
     ref
         .read(workspaceSettingsProvider.notifier)
-        .set('stats', prefs.getBool('workspace.stats') ?? true);
+        .set('stats', prefs.getBool('workspace.stats') ?? false);
   }
 
   @override
@@ -76,10 +79,12 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
     final client = ref.read(activeClientProvider);
     if (!identical(client, _metricsClient)) {
       _metricsClient?.demand('shell', 0);
+      _metricsClient?.demand('windows', 0);
       _metricsClient = client;
     }
     final tab = ref.read(workspaceTabProvider);
     final show = ref.read(workspaceSettingsProvider)['stats'] == true;
+    client?.demand('windows', _foreground && tab == 3 ? 5000 : 0);
     client?.demand(
       'shell',
       _foreground && (show || tab == 3) ? (tab == 3 ? 2000 : 5000) : 0,
@@ -90,6 +95,7 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _metricsClient?.demand('shell', 0);
+    _metricsClient?.demand('windows', 0);
     super.dispose();
   }
 
@@ -131,7 +137,7 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
                               0 => const ChatLibraryScreen(),
                               1 => const WorkspaceFilesScreen(),
                               2 => const TerminalScreen(),
-                              _ => const PcScreen(),
+                              _ => const LauncherScreen(),
                             },
                           ),
                         ),
@@ -152,8 +158,8 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
                         ref.read(workspaceTabProvider.notifier).select(index),
                     destinations: const [
                       NavigationDestination(
-                        icon: Icon(Icons.auto_awesome_outlined),
-                        label: 'Chats',
+                        icon: Icon(Icons.radar),
+                        label: 'Monitor',
                       ),
                       NavigationDestination(
                         icon: Icon(Icons.folder_outlined),
@@ -250,6 +256,7 @@ class _PcScreenState extends ConsumerState<PcScreen>
   Map<String, dynamic> _liveStatus = {};
   String? _error;
   bool _awaitingOverlayPermission = false;
+  bool _resuming = false;
 
   @override
   void initState() {
@@ -266,35 +273,55 @@ class _PcScreenState extends ConsumerState<PcScreen>
   }
 
   Future<void> _handleResume() async {
-    await _load();
-    if (_awaitingOverlayPermission && Platform.isAndroid) {
-      _awaitingOverlayPermission = false;
-      final status = await PlatformBridge.call('live.status');
-      if (status['overlay'] == true) {
+    if (_resuming) return;
+    _resuming = true;
+    try {
+      await _loadLiveStatus();
+      if (!mounted || !_awaitingOverlayPermission || !Platform.isAndroid) {
+        return;
+      }
+      if (_liveStatus['overlay'] == true) {
+        _awaitingOverlayPermission = false;
         await _setLive(true, bubble: true);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'Bubble requested. It appears while NexusLink is in the background.',
-              ),
-            ),
-          );
-        }
-      } else if (mounted) {
+      } else {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: const Text(
-              'Overlay access is still unavailable. In App info, allow restricted settings if shown, then allow display over other apps.',
+              'Choose NexusLink in Display over other apps and allow access. If Android explicitly shows Restricted setting, check App info for Allow restricted settings, then return to overlay settings.',
             ),
             action: SnackBarAction(
               label: 'App info',
-              onPressed: () => PlatformBridge.call('live.appInfo'),
+              onPressed: () => _openLiveSettings('live.appInfo'),
             ),
           ),
         );
       }
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    } finally {
+      _resuming = false;
     }
+  }
+
+  Future<void> _openLiveSettings(String method) async {
+    try {
+      await PlatformBridge.call(method);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _error = 'Could not open Android settings: $e');
+      }
+    }
+  }
+
+  Future<void> _loadLiveStatus() async {
+    if (!Platform.isAndroid) return;
+    final live = await PlatformBridge.call('live.status');
+    if (!mounted) return;
+    setState(() {
+      _liveStatus = Map<String, dynamic>.from(live as Map);
+      _live = _liveStatus['monitoringRequested'] == true;
+      _bubble = _liveStatus['bubbleRequested'] == true;
+    });
   }
 
   @override
@@ -304,22 +331,17 @@ class _PcScreenState extends ConsumerState<PcScreen>
   }
 
   Future<void> _load() async {
+    // Phone permissions must remain readable even when the PC is offline.
+    try {
+      await _loadLiveStatus();
+    } catch (e) {
+      if (mounted) setState(() => _error = '$e');
+    }
     try {
       final info = await ref
           .read(activeClientProvider)
           ?.requestMap('system.getInfo');
-      dynamic live;
-      if (Platform.isAndroid) live = await PlatformBridge.call('live.status');
-      if (mounted) {
-        setState(() {
-          _info = info;
-          _liveStatus = live == null
-              ? {}
-              : Map<String, dynamic>.from(live as Map);
-          _live = _liveStatus['monitoringRequested'] == true;
-          _bubble = _liveStatus['bubbleRequested'] == true;
-        });
-      }
+      if (mounted) setState(() => _info = info);
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
     }
@@ -336,7 +358,7 @@ class _PcScreenState extends ConsumerState<PcScreen>
       } else {
         await PlatformBridge.call('live.stop');
       }
-      await _load();
+      await _loadLiveStatus();
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
     }
@@ -348,7 +370,7 @@ class _PcScreenState extends ConsumerState<PcScreen>
     final settings = ref.watch(workspaceSettingsProvider);
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Your PC'),
+        title: const Text('PC settings'),
         actions: [
           IconButton(
             tooltip: 'Refresh',
@@ -425,11 +447,15 @@ class _PcScreenState extends ConsumerState<PcScreen>
               onChanged: (v) => _setLive(v),
             ),
             SwitchListTile(
-              title: const Text('Floating status bubble'),
+              title: const Text('Floating pet monitor'),
               subtitle: Text(
                 _liveStatus['bubbleVisible'] == true
-                    ? 'Visible'
-                    : '${_liveStatus['bubbleHiddenReason'] ?? 'Hidden'} · Notifications remain available',
+                    ? 'Visible · Running and recent conversations, updated live'
+                    : (_liveStatus['overlay'] != true
+                          ? 'Display over other apps permission needed'
+                          : _bubble
+                          ? 'Ready in the background · Hidden while this app is open or the phone is locked'
+                          : 'Off · Follow important PC updates with your pet'),
               ),
               value: _bubble,
               onChanged: (value) async {
@@ -440,9 +466,9 @@ class _PcScreenState extends ConsumerState<PcScreen>
                     final proceed = await showDialog<bool>(
                       context: context,
                       builder: (ctx) => AlertDialog(
-                        title: const Text('Allow floating bubble'),
+                        title: const Text('Allow floating pet'),
                         content: const Text(
-                          'NexusLink needs display-over-other-apps access to show a small task bubble while you use other apps. Notifications still work without it.',
+                          'In Android Settings, choose NexusLink (or NexusLink Test) and enable Display over other apps. This is separate from notification bubbles. Return here, then go to your home screen to see the bubble.',
                         ),
                         actions: [
                           TextButton(
@@ -458,10 +484,11 @@ class _PcScreenState extends ConsumerState<PcScreen>
                     );
                     if (proceed != true) return;
                     _awaitingOverlayPermission = true;
-                    await PlatformBridge.call('live.permission');
+                    await _openLiveSettings('live.permission');
                     return;
                   }
                 }
+                _awaitingOverlayPermission = false;
                 await _setLive(value || _live, bubble: value);
               },
             ),
@@ -539,26 +566,6 @@ class _PcScreenState extends ConsumerState<PcScreen>
             ),
           ],
           const Divider(),
-          SwitchListTile(
-            title: const Text('Experimental streaming'),
-            subtitle: const Text(
-              'Optional desktop viewer; not needed for coding',
-            ),
-            value: settings['experimental'] == true,
-            onChanged: (v) => ref
-                .read(workspaceSettingsProvider.notifier)
-                .set('experimental', v),
-          ),
-          if (settings['experimental'] == true)
-            ListTile(
-              leading: const Icon(Icons.science_outlined),
-              title: const Text('Open experimental desktop tools'),
-              onTap: () => Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const _ExperimentalScreen()),
-              ),
-            ),
-          const Divider(),
           ListTile(
             leading: const Icon(Icons.link_off),
             title: const Text('Disconnect PC'),
@@ -578,30 +585,4 @@ class _PcScreenState extends ConsumerState<PcScreen>
       ),
     );
   }
-}
-
-class _ExperimentalScreen extends ConsumerStatefulWidget {
-  const _ExperimentalScreen();
-  @override
-  ConsumerState<_ExperimentalScreen> createState() =>
-      _ExperimentalScreenState();
-}
-
-class _ExperimentalScreenState extends ConsumerState<_ExperimentalScreen> {
-  RpcClient? _client;
-  @override
-  void initState() {
-    super.initState();
-    _client = ref.read(activeClientProvider);
-    _client?.demand('windows', 5000);
-  }
-
-  @override
-  void dispose() {
-    _client?.demand('windows', 0);
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => const LauncherScreen();
 }
