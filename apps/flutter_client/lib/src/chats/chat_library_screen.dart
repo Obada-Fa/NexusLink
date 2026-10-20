@@ -11,7 +11,11 @@ import '../workspace/project.dart';
 import '../workspace/files_screen.dart';
 import 'chat_models.dart';
 import 'chat_repository.dart';
-import 'monitor_conversation_card.dart';
+import '../arena/arena_view.dart';
+import '../monitor/mission_control.dart';
+import '../monitor/monitor_provider.dart';
+import '../theme/nexus_theme.dart';
+import '../theme/nx_widgets.dart';
 
 class ChatLibraryScreen extends ConsumerStatefulWidget {
   final ChatFolder? folder;
@@ -33,6 +37,8 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
   void Function()? _unsubscribe;
   RpcClient? _bound;
   bool _folders = false;
+  bool _arena = false;
+  bool _showSearch = false;
   bool _archived = false;
   bool _loading = true;
   bool _moreLoading = false;
@@ -67,6 +73,11 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
     _sort = prefs.getString('chat-folder-sort:$host') ?? 'activity';
+    if (widget.folder == null) {
+      final view = prefs.getString('monitor-view') ?? 'list';
+      _arena = view == 'arena';
+      _folders = view == 'folders';
+    }
     await _load();
     if (!mounted) return;
     _bind();
@@ -115,7 +126,8 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
     if (_source != null) 'source': _source,
     if (widget.folder != null) 'folderId': widget.folder!.id,
     'sort': _folders ? _sort : 'monitor',
-    if (!_folders) 'monitorFilter': _monitorFilter,
+    // Counters need every state; the filter is applied on the phone.
+    if (!_folders) 'monitorFilter': 'all',
   };
   Future<void> _load({
     bool more = false,
@@ -298,7 +310,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
                 ),
               ),
               SwitchListTile(
-                title: const Text('Archived chats'),
+                title: const Text('Hidden chats'),
                 value: _archived,
                 onChanged: (value) => update(() => _archived = value),
               ),
@@ -310,7 +322,49 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
     await _load();
   }
 
+  Future<bool> _confirm(String title, String body, String action) async =>
+      await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(title),
+          content: Text(body),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text(action),
+            ),
+          ],
+        ),
+      ) ==
+      true;
+
+  Future<void> _setView(String view) async {
+    final folders = view == 'folders';
+    setState(() {
+      _arena = view == 'arena';
+      if (folders != _folders) {
+        _folders = folders;
+        _items = [];
+        _cursor = null;
+      }
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('monitor-view', view);
+    if (mounted && _items.isEmpty) unawaited(_load());
+  }
+
   Future<void> _clearSaved() async {
+    if (!await _confirm(
+      'Clear saved chats?',
+      'Saved copies on this phone are removed. Conversations on the PC are not touched.',
+      'Clear',
+    )) {
+      return;
+    }
     final host = await _repo.host();
     if (host == null) return;
     await _repo.cache.clear(host);
@@ -327,6 +381,14 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
   }
 
   Future<void> _forgetPc() async {
+    if (!await _confirm(
+      'Forget this PC?',
+      'You will need a new pairing code from the PC to reconnect. Saved chats and drafts on this phone are removed.',
+      'Forget',
+    )) {
+      return;
+    }
+    if (!mounted) return;
     final repository = _repo;
     final host = await repository.host();
     final address = repository.address;
@@ -403,10 +465,189 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
         }
       }
     } catch (error) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Could not open this update: $error')),
         );
+      }
+    }
+  }
+
+  String _syncLine(bool offline) => offline
+      ? (_lastSync == null
+            ? 'PC offline'
+            : 'PC offline · synced ${chatRelativeTime(DateTime.fromMillisecondsSinceEpoch(_lastSync!))}')
+      : _saved
+      ? 'Connected · showing saved activity'
+      : _receivedAt == null
+      ? 'Connecting to your agents…'
+      : 'Live · ${ref.read(activeClientProvider)?.hostId == null ? 'PC' : 'synced ${TimeOfDay.fromDateTime(_receivedAt!).format(context)}'}';
+
+  void _newChat() => Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      builder: (_) =>
+          AgentScreen(startNew: true, initialFolder: widget.folder?.path),
+    ),
+  );
+
+  bool get _canEditState =>
+      _repo.online && _repo.client?.supports('chat.state.v1') == true;
+
+  /// Optimistically mark done / hide on the phone, then confirm with the PC.
+  Future<void> _setChatState(
+    ChatSummary chat, {
+    bool? acknowledged,
+    bool? hidden,
+    bool offerUndo = true,
+  }) async {
+    final client = _repo.client;
+    if (client == null) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final before = List<Map<String, dynamic>>.of(_items);
+    setState(() {
+      final index = _items.indexWhere((row) => row['id'] == chat.id);
+      if (index < 0) return;
+      if (hidden != null && hidden != _archived) {
+        _items.removeAt(index);
+        return;
+      }
+      final row = Map<String, dynamic>.of(_items[index]);
+      if (acknowledged == true) {
+        row['attentionCleared'] = 'acknowledged';
+        if (row['execution'] == 'needsReply') row['execution'] = 'idle';
+        if (row['live'] is Map) {
+          row['live'] = {
+            ...Map<String, dynamic>.from(row['live'] as Map),
+            'state': 'idle',
+          }..remove('waitingFor');
+        }
+      } else if (acknowledged == false) {
+        row.remove('attentionCleared');
+      }
+      _items[index] = row;
+    });
+    try {
+      final result = await client.requestMap('chat.setState', {
+        'chatId': chat.id,
+        'acknowledged': ?acknowledged,
+        'hidden': ?hidden,
+      });
+      final updated = result['chat'];
+      if (mounted &&
+          updated is Map &&
+          (hidden == null || hidden == _archived)) {
+        setState(() {
+          final index = _items.indexWhere((row) => row['id'] == chat.id);
+          if (index >= 0) _items[index] = Map<String, dynamic>.from(updated);
+        });
+      }
+      if (!offerUndo || !mounted) return;
+      messenger
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              acknowledged == true
+                  ? 'Marked done: ${chat.title}'
+                  : hidden == true
+                  ? 'Hidden from Monitor'
+                  : acknowledged == false
+                  ? 'Flagged as needing you'
+                  : 'Back in Monitor',
+            ),
+            action: SnackBarAction(
+              label: 'Undo',
+              onPressed: () => unawaited(
+                _setChatState(
+                  ChatSummary(
+                    Map<String, dynamic>.from(
+                      (updated is Map ? updated : chat.json),
+                    ),
+                  ),
+                  acknowledged: acknowledged == null ? null : !acknowledged,
+                  hidden: hidden == null ? null : !hidden,
+                  offerUndo: false,
+                ),
+              ),
+            ),
+          ),
+        );
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _items = before);
+      messenger.showSnackBar(
+        SnackBar(content: Text('Couldn’t update the PC: $error')),
+      );
+    }
+  }
+
+  Future<void> _chatActions(ChatSummary chat) async {
+    final action = await showChatActions(context, chat, canEdit: _canEditState);
+    if (action == null || !mounted) return;
+    switch (action) {
+      case ChatAction.open:
+        await _open(chat);
+      case ChatAction.markDone:
+        await _setChatState(chat, acknowledged: true);
+      case ChatAction.flagAgain:
+        await _setChatState(chat, acknowledged: false);
+      case ChatAction.hide:
+        await _setChatState(chat, hidden: true);
+      case ChatAction.unhide:
+        await _setChatState(chat, hidden: false);
+      case ChatAction.files:
+        ref.read(projectProvider.notifier).select(chat.folderPath!);
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(builder: (_) => const WorkspaceFilesScreen()),
+        );
+    }
+  }
+
+  /// Needs-you cards swipe away to "done".
+  Widget _dismissible(ChatSummary chat, Widget child) {
+    if (!_canEditState) return child;
+    Widget background(Alignment align) => Container(
+      margin: const EdgeInsets.fromLTRB(NX.pad, 0, NX.pad, 10),
+      padding: const EdgeInsets.symmetric(horizontal: 22),
+      alignment: align,
+      decoration: BoxDecoration(
+        color: NX.working.withValues(alpha: .16),
+        borderRadius: BorderRadius.circular(NX.radius),
+        border: Border.all(color: NX.working.withValues(alpha: .5)),
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.check_circle_rounded, color: NX.working),
+          SizedBox(width: 8),
+          Text(
+            'Mark as done',
+            style: TextStyle(color: NX.working, fontWeight: FontWeight.w800),
+          ),
+        ],
+      ),
+    );
+    return Dismissible(
+      key: ValueKey('done-${chat.id}'),
+      background: background(Alignment.centerLeft),
+      secondaryBackground: background(Alignment.centerRight),
+      onDismissed: (_) => unawaited(_setChatState(chat, acknowledged: true)),
+      child: child,
+    );
+  }
+
+  Future<void> _retrySource(Map<String, dynamic> health) async {
+    try {
+      await _repo.client?.requestMap('chat.refresh', {
+        'source': health['source'],
+      });
+      await _load(quiet: true);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Retry failed: $error')));
+      }
     }
   }
 
@@ -428,20 +669,326 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
       _bind();
       unawaited(_initialize());
     });
-    final conversations =
+    final offline = status != RpcStatus.connected;
+    final top = widget.folder == null;
+    final monitorHost = hostSupportsMonitor(ref.watch(activeClientProvider));
+    final tabVisible = ref.watch(workspaceTabProvider) == 0;
+    final all =
         (_folders ? <Map<String, dynamic>>[] : _items)
             .map(ChatSummary.new)
-            .where((chat) => chat.matchesMonitor(_monitorFilter))
             .toList()
           ..sort(compareMonitorChats);
-    final visibleItems = _folders
-        ? _items
-        : conversations.map((chat) => chat.json).toList();
+    final attention = all.where((c) => c.needsAttention).toList();
+    final running = all.where((c) => c.running).toList();
+    final rest = all.where((c) => !c.needsAttention && !c.running).toList();
+    final now = DateTime.now();
+    final doneToday = rest.where((c) {
+      final t = c.activity?.toLocal();
+      return t != null &&
+          t.year == now.year &&
+          t.month == now.month &&
+          t.day == now.day;
+    }).length;
     final scanning = _health.any((row) => row['state'] == 'scanning');
-    final offline = status != RpcStatus.connected;
+    final showAttention =
+        _monitorFilter == 'all' || _monitorFilter == 'attention';
+    final showRunning = _monitorFilter == 'all' || _monitorFilter == 'running';
+    final showRecent = _monitorFilter == 'all' || _monitorFilter == 'recent';
+    final emptyText = _search.text.isNotEmpty || _source != null
+        ? 'No matching chats'
+        : scanning
+        ? 'Still finding chats on your PC…'
+        : offline
+        ? 'No saved chats on this phone yet'
+        : _monitorFilter == 'running'
+        ? 'No agents working right now'
+        : _monitorFilter == 'attention'
+        ? 'All caught up — nothing needs you'
+        : 'No conversations yet';
+
+    final slivers = <Widget>[
+      if (_showSearch || _search.text.isNotEmpty)
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(NX.pad, 4, NX.pad, 4),
+            child: TextField(
+              controller: _search,
+              autofocus: _search.text.isEmpty,
+              decoration: InputDecoration(
+                hintText: 'Search chats, projects, agents…',
+                prefixIcon: const Icon(Icons.search),
+                filled: true,
+                fillColor: NX.surface2,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(NX.radiusSm),
+                  borderSide: BorderSide.none,
+                ),
+                suffixIcon: IconButton(
+                  tooltip: 'Close search',
+                  icon: const Icon(Icons.close),
+                  onPressed: () {
+                    _search.clear();
+                    setState(() => _showSearch = false);
+                    unawaited(_load());
+                  },
+                ),
+              ),
+              onChanged: (_) {
+                ++_generation;
+                _debounce?.cancel();
+                _debounce = Timer(
+                  const Duration(milliseconds: 250),
+                  () => unawaited(_load()),
+                );
+              },
+            ),
+          ),
+        ),
+      if (top)
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(NX.pad, 4, NX.pad, 4),
+            child: SegmentedButton<String>(
+              showSelectedIcon: false,
+              style: const ButtonStyle(visualDensity: VisualDensity.compact),
+              segments: const [
+                ButtonSegment(
+                  value: 'list',
+                  icon: Icon(Icons.view_agenda_outlined, size: 18),
+                  label: Text('Live'),
+                ),
+                ButtonSegment(
+                  value: 'arena',
+                  icon: Icon(Icons.apartment_rounded, size: 18),
+                  label: Text('Arena'),
+                ),
+                ButtonSegment(
+                  value: 'folders',
+                  icon: Icon(Icons.folder_outlined, size: 18),
+                  label: Text('Projects'),
+                ),
+              ],
+              selected: {
+                _folders
+                    ? 'folders'
+                    : _arena
+                    ? 'arena'
+                    : 'list',
+              },
+              onSelectionChanged: (value) => unawaited(_setView(value.first)),
+            ),
+          ),
+        ),
+      if (!_folders && monitorHost && top && !_arena)
+        const SliverToBoxAdapter(child: VitalsPulseStrip()),
+      if (monitorHost && top && !offline)
+        const SliverToBoxAdapter(child: RemoteAccessAlert()),
+      if (!_folders)
+        SliverToBoxAdapter(
+          child: StatusCounters(
+            working: offline ? 0 : running.length,
+            waiting: offline ? 0 : attention.length,
+            done: doneToday,
+            filter: _monitorFilter,
+            onFilter: (f) => setState(() => _monitorFilter = f),
+          ),
+        ),
+      if (widget.folder?.path != null)
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(NX.pad, 10, NX.pad, 0),
+            child: SelectableText(
+              widget.folder!.path!,
+              style: const TextStyle(color: NX.textFaint, fontSize: 12),
+            ),
+          ),
+        ),
+      if (!offline && !_repo.supported)
+        SliverToBoxAdapter(
+          child: ListTile(
+            title: const Text('Update your PC host to see all PC chats'),
+            trailing: TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(builder: (_) => const AgentScreen()),
+              ),
+              child: const Text('NexusLink chats'),
+            ),
+          ),
+        ),
+      for (final health in _health.where((row) => row['state'] == 'error'))
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(NX.pad, 8, NX.pad, 0),
+            child: NxCard(
+              accent: NX.waiting,
+              padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.warning_amber_rounded,
+                    color: NX.waiting,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      health['reason'] as String? ??
+                          'This app could not be read.',
+                      style: const TextStyle(fontSize: 12.5, color: NX.textDim),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () => _retrySource(health),
+                    child: const Text('Retry'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      if (_error != null)
+        SliverToBoxAdapter(
+          child: ListTile(
+            title: Text(_error!),
+            trailing: TextButton(
+              onPressed: () => _load(),
+              child: const Text('Retry'),
+            ),
+          ),
+        ),
+      if (_loading)
+        const SliverFillRemaining(
+          hasScrollBody: false,
+          child: Center(child: CircularProgressIndicator()),
+        )
+      else if (_folders)
+        ..._folderSlivers(emptyText)
+      else if (_arena)
+        SliverToBoxAdapter(
+          child: ArenaView(
+            chats: _arenaChats(
+              _monitorFilter == 'all'
+                  ? [...attention, ...running, ...rest]
+                  : all.where((c) => c.matchesMonitor(_monitorFilter)).toList(),
+            ),
+            offline: offline || _saved,
+            onOpen: _open,
+            onLongPress: _chatActions,
+          ),
+        )
+      else ...[
+        if (showAttention && attention.isNotEmpty) ...[
+          SliverToBoxAdapter(
+            child: NxSectionHeader(
+              'Needs you',
+              count: attention.length,
+              color: NX.waiting,
+            ),
+          ),
+          SliverList.list(
+            children: [
+              for (final chat in attention)
+                _dismissible(
+                  chat,
+                  LiveAgentCard(
+                    key: ValueKey(chat.id),
+                    chat: chat,
+                    offline: offline || _saved,
+                    onOpen: () => _open(chat),
+                    onLongPress: () => _chatActions(chat),
+                  ),
+                ),
+            ],
+          ),
+        ],
+        if (showRunning && running.isNotEmpty) ...[
+          SliverToBoxAdapter(
+            child: NxSectionHeader(
+              'Live now',
+              count: running.length,
+              color: NX.working,
+            ),
+          ),
+          SliverList.list(
+            children: [
+              for (final chat in running)
+                LiveAgentCard(
+                  key: ValueKey(chat.id),
+                  chat: chat,
+                  offline: offline || _saved,
+                  onOpen: () => _open(chat),
+                  onLongPress: () => _chatActions(chat),
+                ),
+            ],
+          ),
+        ],
+        if (top && monitorHost && _monitorFilter == 'all' && !offline)
+          const SliverToBoxAdapter(child: AgentAppsStrip()),
+        if (showRecent && rest.isNotEmpty) ..._recentSlivers(rest),
+        if ((showAttention ? attention.length : 0) +
+                (showRunning ? running.length : 0) +
+                (showRecent ? rest.length : 0) ==
+            0)
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.all(32),
+              child: Text(
+                emptyText,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: NX.textDim),
+              ),
+            ),
+          ),
+      ],
+      if (_moreLoading)
+        const SliverToBoxAdapter(
+          child: Padding(
+            padding: EdgeInsets.all(16),
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        ),
+      const SliverToBoxAdapter(child: SizedBox(height: 32)),
+    ];
+
+    Widget body = RefreshIndicator(
+      onRefresh: () async {
+        try {
+          await _repo.refresh();
+          await _load(quiet: true);
+          if (monitorHost) await ref.read(monitorProvider.notifier).refresh();
+        } catch (_) {
+          if (mounted) {
+            setState(
+              () => _error =
+                  'Couldn’t refresh agents. Check the PC connection and retry.',
+            );
+          }
+        }
+      },
+      child: CustomScrollView(
+        key: PageStorageKey('chat-library:${widget.folder?.id}:$_folders'),
+        controller: _scroll,
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: slivers,
+      ),
+    );
+    if (top) {
+      body = MonitorDemand(
+        owner: 'home',
+        intervalMs: 2000,
+        active: tabVisible && !offline && monitorHost && !_folders,
+        child: body,
+      );
+    }
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.folder?.name ?? 'Agent monitor'),
+        toolbarHeight: top ? 64 : kToolbarHeight,
+        title: top
+            ? MissionTitle(
+                subtitle: _syncLine(offline),
+                online: !offline && !_saved,
+              )
+            : Text(widget.folder!.name),
         actions: [
           if (widget.folder?.path != null && !offline)
             IconButton(
@@ -457,308 +1004,211 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
               },
             ),
           IconButton(
-            tooltip: 'Filter chats',
-            icon: const Icon(Icons.filter_list),
+            tooltip: 'Search chats',
+            icon: const Icon(Icons.search),
+            onPressed: () => setState(() => _showSearch = !_showSearch),
+          ),
+          IconButton(
+            tooltip: 'Filter by app',
+            icon: Icon(
+              Icons.tune,
+              color: _source != null || _archived ? NX.accent : null,
+            ),
             onPressed: _filters,
+          ),
+          IconButton(
+            tooltip: 'New chat',
+            icon: const Icon(Icons.add_comment_outlined),
+            onPressed: offline ? null : _newChat,
           ),
           PopupMenuButton<String>(
             tooltip: 'Chat library options',
             onSelected: (value) =>
                 value == 'forget' ? _forgetPc() : _clearSaved(),
-            itemBuilder: (_) => [
-              const PopupMenuItem(
+            itemBuilder: (_) => const [
+              PopupMenuItem(
                 value: 'clear',
                 child: Text('Clear saved chats on this phone'),
               ),
-              const PopupMenuItem(
-                value: 'forget',
-                child: Text('Forget this PC'),
-              ),
+              PopupMenuItem(value: 'forget', child: Text('Forget this PC')),
             ],
           ),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: () async {
-          try {
-            await _repo.refresh();
-            await _load(quiet: true);
-          } catch (_) {
-            if (mounted) {
-              setState(
-                () => _error =
-                    'Couldn’t refresh agents. Check the PC connection and retry.',
-              );
-            }
-          }
-        },
-        child: CustomScrollView(
-          key: PageStorageKey('chat-library:${widget.folder?.id}:$_folders'),
-          controller: _scroll,
-          physics: const AlwaysScrollableScrollPhysics(),
-          slivers: [
-            SliverToBoxAdapter(
-              child: Column(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            offline
-                                ? 'Offline · Last known activity'
-                                : _saved
-                                ? 'Connected · Showing saved activity'
-                                : _receivedAt == null
-                                ? 'Connecting to your agents…'
-                                : 'Connected · Synced ${TimeOfDay.fromDateTime(_receivedAt!).format(context)}',
-                          ),
-                        ),
-                        TextButton.icon(
-                          onPressed: offline
-                              ? null
-                              : () => Navigator.of(context).push(
-                                  MaterialPageRoute<void>(
-                                    builder: (_) => AgentScreen(
-                                      startNew: true,
-                                      initialFolder: widget.folder?.path,
-                                    ),
-                                  ),
-                                ),
-                          icon: const Icon(Icons.add),
-                          label: const Text('New chat'),
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (offline && _lastSync != null)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          'Last synced ${chatRelativeTime(DateTime.fromMillisecondsSinceEpoch(_lastSync!))}',
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ),
-                    ),
-                  if (!offline && !_repo.supported)
-                    ListTile(
-                      title: const Text(
-                        'Update your PC host to see all PC chats',
-                      ),
-                      trailing: TextButton(
-                        onPressed: () => Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => const AgentScreen(),
-                          ),
-                        ),
-                        child: const Text('NexusLink chats'),
-                      ),
-                    ),
-                  Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: TextField(
-                      controller: _search,
-                      decoration: const InputDecoration(
-                        hintText: 'Search conversations, projects, agents…',
-                        prefixIcon: Icon(Icons.search),
-                      ),
-                      onChanged: (_) {
-                        ++_generation;
-                        _debounce?.cancel();
-                        _debounce = Timer(
-                          const Duration(milliseconds: 250),
-                          () => unawaited(_load()),
-                        );
-                      },
-                    ),
-                  ),
-                  if (widget.folder == null)
-                    SegmentedButton<bool>(
-                      segments: const [
-                        ButtonSegment(value: false, label: Text('Monitor')),
-                        ButtonSegment(value: true, label: Text('Folders')),
-                      ],
-                      selected: {_folders},
-                      onSelectionChanged: (value) {
-                        setState(() {
-                          _folders = value.first;
-                          _items = [];
-                          _cursor = null;
-                        });
-                        unawaited(_load());
-                      },
-                    ),
-                  if (_folders)
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton.icon(
-                        icon: const Icon(Icons.sort),
-                        label: Text(
-                          _sort == 'name' ? 'Name A–Z' : 'Latest activity',
-                        ),
-                        onPressed: () async {
-                          setState(
-                            () => _sort = _sort == 'name' ? 'activity' : 'name',
-                          );
-                          final host = await _repo.host();
-                          final prefs = await SharedPreferences.getInstance();
-                          await prefs.setString(
-                            'chat-folder-sort:$host',
-                            _sort,
-                          );
-                          await _load();
-                        },
-                      ),
-                    ),
-                  if (widget.folder?.path != null)
-                    Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: SelectableText(widget.folder!.path!),
-                    ),
-                  if (!_folders)
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Wrap(
-                          spacing: 8,
-                          runSpacing: 4,
-                          children: [
-                            for (final filter in const {
-                              'all': 'All',
-                              'running': 'Running',
-                              'attention': 'Attention',
-                              'recent': 'Recent',
-                            }.entries)
-                              ChoiceChip(
-                                label: Text(filter.value),
-                                selected: _monitorFilter == filter.key,
-                                onSelected: (_) {
-                                  setState(() {
-                                    _monitorFilter = filter.key;
-                                    _cursor = null;
-                                  });
-                                  unawaited(_load());
-                                },
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  for (final health in _health.where(
-                    (row) => row['state'] == 'error',
-                  ))
-                    ListTile(
-                      dense: true,
-                      title: Text(
-                        health['reason'] as String? ??
-                            'This app could not be read.',
-                      ),
-                      trailing: TextButton(
-                        onPressed: () async {
-                          await _repo.client?.requestMap('chat.refresh', {
-                            'source': health['source'],
-                          });
-                          await _load(quiet: true);
-                        },
-                        child: const Text('Retry'),
-                      ),
-                    ),
-                  if (_error != null)
-                    ListTile(
-                      title: Text(_error!),
-                      trailing: TextButton(
-                        onPressed: () => _load(),
-                        child: const Text('Retry'),
-                      ),
-                    ),
-                ],
+      body: body,
+    );
+  }
+
+  /// Keep all active agents visible; include recent work and a few quiet desks.
+  List<ChatSummary> _arenaChats(List<ChatSummary> chats) {
+    final active = chats.where((c) => c.needsAttention || c.running).toList();
+    final cutoff = DateTime.now().subtract(const Duration(hours: 24));
+    final recent = chats
+        .where((c) => !c.needsAttention && !c.running)
+        .where((c) => c.activity?.isAfter(cutoff) == true)
+        .toList();
+    final others = chats.where(
+      (c) => !active.contains(c) && !recent.contains(c),
+    );
+    final office = [...active, ...recent];
+    if (office.length < 4) office.addAll(others.take(4 - office.length));
+    return office;
+  }
+
+  List<Widget> _recentSlivers(List<ChatSummary> rest) {
+    final out = <Widget>[];
+    String? group;
+    final rows = <Widget>[];
+    void flush() {
+      if (group == null || rows.isEmpty) return;
+      out.add(SliverToBoxAdapter(child: NxSectionHeader(group)));
+      out.add(
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: NX.pad),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: NX.surface,
+                borderRadius: BorderRadius.circular(NX.radius),
+                border: Border.all(color: NX.line.withValues(alpha: .6)),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(NX.radius),
+                child: Column(children: List.of(rows)),
               ),
             ),
-            if (_loading)
-              const SliverFillRemaining(
-                child: Center(child: CircularProgressIndicator()),
-              )
-            else
-              SliverList(
-                delegate: SliverChildBuilderDelegate(
-                  (ctx, index) {
-                    if (visibleItems.isEmpty) {
-                      return Padding(
-                        padding: const EdgeInsets.all(32),
-                        child: Text(
-                          _search.text.isNotEmpty || _source != null
-                              ? 'No search results'
-                              : scanning
-                              ? 'Still finding chats…'
-                              : offline
-                              ? 'No saved chats on this phone yet'
-                              : _monitorFilter == 'running'
-                              ? 'No agents running right now'
-                              : _monitorFilter == 'attention'
-                              ? 'You’re all caught up — no conversations need attention'
-                              : 'No conversations yet',
-                          textAlign: TextAlign.center,
-                        ),
-                      );
-                    }
-                    if (index == visibleItems.length) {
-                      return const Center(child: CircularProgressIndicator());
-                    }
-                    if (_folders) {
-                      final folder = ChatFolder(visibleItems[index]);
-                      return ListTile(
-                        minVerticalPadding: 12,
-                        leading: const Icon(Icons.folder_outlined),
-                        title: Text(folder.name),
-                        subtitle: Text(
-                          '${folder.path ?? 'No recorded folder'}\nLatest: ${folder.latestTitle}',
-                        ),
-                        isThreeLine: true,
-                        trailing: Text('${folder.count} chats'),
-                        onTap: () => Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => ChatLibraryScreen(folder: folder),
-                          ),
-                        ),
-                      );
-                    }
-                    final chat = ChatSummary(visibleItems[index]);
-                    final group = chat.monitorSection;
-                    final first =
-                        index == 0 ||
-                        group !=
-                            ChatSummary(visibleItems[index - 1]).monitorSection;
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (first)
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
-                            child: Text(
-                              group,
-                              style: Theme.of(context).textTheme.titleSmall,
-                            ),
-                          ),
-                        MonitorConversationCard(
-                          chat: chat,
-                          offline: offline || _saved,
-                          onOpen: () => _open(chat),
-                        ),
-                      ],
-                    );
-                  },
-                  childCount: visibleItems.isEmpty
-                      ? 1
-                      : visibleItems.length + (_moreLoading ? 1 : 0),
-                ),
+          ),
+        ),
+      );
+      rows.clear();
+    }
+
+    for (final chat in rest) {
+      final g = chatDateGroup(chat.activity);
+      if (g != group) {
+        flush();
+        group = g;
+      }
+      if (rows.isNotEmpty) {
+        rows.add(
+          Divider(height: 1, indent: 58, color: NX.line.withValues(alpha: .5)),
+        );
+      }
+      rows.add(
+        RecentChatRow(
+          key: ValueKey(chat.id),
+          chat: chat,
+          onOpen: () => _open(chat),
+          onLongPress: () => _chatActions(chat),
+        ),
+      );
+    }
+    flush();
+    return out;
+  }
+
+  List<Widget> _folderSlivers(String emptyText) {
+    final folders = _items.map(ChatFolder.new).toList();
+    return [
+      SliverToBoxAdapter(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(NX.pad, 8, 8, 0),
+          child: Row(
+            children: [
+              Text(
+                '${folders.length}${_cursor != null ? '+' : ''} projects',
+                style: const TextStyle(color: NX.textFaint, fontSize: 12),
               ),
-          ],
+              const Spacer(),
+              TextButton.icon(
+                icon: const Icon(Icons.sort, size: 18),
+                label: Text(_sort == 'name' ? 'Name A–Z' : 'Latest activity'),
+                onPressed: () async {
+                  setState(() => _sort = _sort == 'name' ? 'activity' : 'name');
+                  final host = await _repo.host();
+                  final prefs = await SharedPreferences.getInstance();
+                  await prefs.setString('chat-folder-sort:$host', _sort);
+                  await _load();
+                },
+              ),
+            ],
+          ),
         ),
       ),
-    );
+      if (folders.isEmpty)
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Text(
+              emptyText,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: NX.textDim),
+            ),
+          ),
+        ),
+      SliverList.list(
+        children: [
+          for (final folder in folders)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(NX.pad, 0, NX.pad, 8),
+              child: NxCard(
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => ChatLibraryScreen(folder: folder),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: NX.accent.withValues(alpha: .12),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(
+                        Icons.folder_rounded,
+                        color: NX.accent,
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            folder.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 15,
+                            ),
+                          ),
+                          Text(
+                            folder.latestTitle.isEmpty
+                                ? (folder.path ?? 'No recorded folder')
+                                : folder.latestTitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: NX.textFaint,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    NxPill('${folder.count}', color: NX.textDim, dense: true),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    ];
   }
 }

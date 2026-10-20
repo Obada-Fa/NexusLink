@@ -7,11 +7,18 @@ import 'chat_cache.dart';
 import 'chat_models.dart';
 
 final chatCacheProvider = Provider((ref) => ChatCache());
+
+/// Rebuilt only when the client object or PC address changes. Status flips
+/// (connecting / connected / reconnecting on the same client) keep the same
+/// repository, so lists bound to it do not reset or flicker; `online` reads
+/// the live client status on every call.
 final chatRepositoryProvider = Provider<ChatRepository>((ref) {
-  final connection = ref.watch(connectionProvider);
+  final (client, address) = ref.watch(
+    connectionProvider.select((s) => (s.client, s.hostUrl)),
+  );
   final repository = ChatRepository(
-    connection.client,
-    connection.hostUrl,
+    client,
+    address,
     ref.read(chatCacheProvider),
   );
   ref.onDispose(repository.dispose);
@@ -173,12 +180,17 @@ class ChatRepository {
     });
   }
 
-  Future<void> cancel(ChatSummary chat) async {
-    if (online && supported) {
-      try {
-        await client!.requestMap('chat.cancel', {'chatId': chat.id});
-      } catch (_) {}
+  /// Asks the PC to stop this conversation's current turn. Returns true when
+  /// the PC stopped it, false when it cannot be stopped from the phone (for
+  /// example a chat started outside NexusLink). Throws when the PC is
+  /// unreachable, so callers never report a stop that did not happen.
+  Future<bool> cancel(ChatSummary chat) async {
+    if (!online) {
+      throw RpcException('PC offline. Reconnect to stop this conversation.');
     }
+    if (!supported) return false;
+    final result = await client!.requestMap('chat.cancel', {'chatId': chat.id});
+    return result['ok'] != false;
   }
 
   Future<void> refresh() async {
