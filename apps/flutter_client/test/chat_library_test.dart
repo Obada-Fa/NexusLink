@@ -91,12 +91,14 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Search chats'));
+    await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'old');
     await tester.pump(const Duration(milliseconds: 260));
     await tester.enterText(find.byType(TextField), 'missing');
     await tester.pump(const Duration(milliseconds: 260));
     await tester.pumpAndSettle();
-    expect(find.text('No search results'), findsOneWidget);
+    expect(find.text('No matching chats'), findsOneWidget);
     repository.oldSearch.complete({
       'items': [
         {
@@ -112,7 +114,7 @@ void main() {
     });
     await tester.pumpAndSettle();
     expect(find.text('Expired search'), findsNothing);
-    expect(find.text('No search results'), findsOneWidget);
+    expect(find.text('No matching chats'), findsOneWidget);
   });
   test(
     'date groups use local calendar boundaries including daylight saving',
@@ -139,23 +141,24 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('Fix login'), findsOneWidget);
-      expect(find.text('Agent monitor'), findsOneWidget);
+      expect(find.text('Mission Control'), findsOneWidget);
       expect(repository.queries.last['sort'], 'monitor');
-      expect(find.textContaining('Codex · NexusLink'), findsOneWidget);
-      await tester.tap(find.text('Folders'));
+      expect(find.textContaining('NexusLink · Ready for review'), findsOneWidget);
+      await tester.tap(find.text('Projects'));
       await tester.pumpAndSettle();
-      expect(find.text('2 chats'), findsOneWidget);
+      expect(find.text('NexusLink'), findsWidgets);
+      expect(find.text('Fix login'), findsOneWidget);
+      await tester.tap(find.text('NexusLink').first);
+      await tester.pumpAndSettle();
+      expect(repository.queries.last['folderId'], 'folder');
       expect(
         find.textContaining(r'D:\projects\mobile\NexusLink'),
         findsOneWidget,
       );
-      await tester.tap(find.text('NexusLink'));
-      await tester.pumpAndSettle();
-      expect(repository.queries.last['folderId'], 'folder');
       expect(find.text('Fix login'), findsOneWidget);
       await tester.pageBack();
       await tester.pumpAndSettle();
-      expect(find.text('2 chats'), findsOneWidget);
+      expect(find.text('Projects'), findsOneWidget);
     },
   );
   testWidgets('search debounces and distinguishes no search results', (
@@ -169,13 +172,15 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Search chats'));
+    await tester.pumpAndSettle();
     final before = repository.queries.length;
     await tester.enterText(find.byType(TextField), 'missing');
     await tester.pump(const Duration(milliseconds: 200));
     expect(repository.queries.length, before);
     await tester.pump(const Duration(milliseconds: 60));
     await tester.pumpAndSettle();
-    expect(find.text('No search results'), findsOneWidget);
+    expect(find.text('No matching chats'), findsOneWidget);
   });
   testWidgets('chat rows fit at 320 dp with large accessible text', (
     tester,

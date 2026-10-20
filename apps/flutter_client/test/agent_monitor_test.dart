@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:nexuslink/src/chats/chat_models.dart';
 import 'package:nexuslink/src/chats/chat_library_screen.dart';
 import 'package:nexuslink/src/chats/chat_repository.dart';
-import 'package:nexuslink/src/chats/monitor_conversation_card.dart';
+import 'package:nexuslink/src/monitor/mission_control.dart';
 import 'package:nexuslink/src/state/connection.dart';
 import 'package:nexuslink/src/rpc/rpc_client.dart';
 import 'chat_library_test.dart' show FakeRepository;
@@ -66,13 +66,19 @@ void main() {
             activeClientProvider.overrideWithValue(host),
             connectionStatusProvider.overrideWithValue(RpcStatus.connected),
           ],
-          child: const MaterialApp(home: ChatLibraryScreen()),
+          child: MaterialApp(
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context).copyWith(disableAnimations: true),
+              child: child!,
+            ),
+            home: const ChatLibraryScreen(),
+          ),
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('Needs attention'), findsOneWidget);
+      expect(find.text('NEEDS YOU'), findsOneWidget);
       expect(find.text('Review deployment'), findsOneWidget);
-      await tester.tap(find.widgetWithText(ChoiceChip, 'Running'));
+      await tester.tap(find.text('Working').first);
       await tester.pumpAndSettle();
       expect(find.text('Fix authentication'), findsOneWidget);
       expect(find.text('Review deployment'), findsNothing);
@@ -86,11 +92,12 @@ void main() {
       host.emit('chat-library-update', {});
       await tester.pump(const Duration(milliseconds: 300));
       await tester.pumpAndSettle();
-      expect(find.text('No agents running right now'), findsOneWidget);
-      await tester.tap(find.widgetWithText(ChoiceChip, 'Recent'));
+      expect(find.text('No agents working right now'), findsOneWidget);
+      await tester.tap(find.text('Working').first);
       await tester.pumpAndSettle();
+      expect(find.text('LIVE NOW'), findsNothing);
       expect(find.text('Fix authentication'), findsOneWidget);
-      expect(find.text('Finished'), findsOneWidget);
+      expect(ChatSummary(repository.rows.first).liveState, 'done');
       await tester.pumpWidget(const SizedBox());
       host.dispose();
     },
@@ -103,7 +110,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(
-      MaterialApp(
+      ProviderScope(child: MaterialApp(
         builder: (context, child) => MediaQuery(
           data: MediaQuery.of(
             context,
@@ -112,7 +119,7 @@ void main() {
         ),
         home: Scaffold(
           body: SingleChildScrollView(
-            child: MonitorConversationCard(
+            child: LiveAgentCard(
               chat: ChatSummary(
                 conversation(
                   'Long conversation title about deployment and monitoring',
@@ -125,7 +132,7 @@ void main() {
             ),
           ),
         ),
-      ),
+      )),
     );
     expect(find.text('Working · last known'), findsOneWidget);
     expect(tester.takeException(), isNull);
