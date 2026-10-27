@@ -1,4 +1,15 @@
-## NexusLink Test 1.0.38+44 — Mission Control
+## NexusLink Test 1.0.39+45 — Phone mic
+
+**Phone mic (PC tab)**
+- Use your phone as a microphone on the PC. PC apps (AI voice chats, Discord, recorders) see a new input device called **NexusLink Phone Mic**.
+- Tap the mic to talk live and tap again to mute, or turn on **Hold to talk** for walkie-talkie style.
+- **Make it the PC's default mic** (on by default) switches the PC's default input while the phone mic is on, then switches back to your usual mic when you stop.
+- Keeps streaming while you switch to Mirror or other tabs. Turns itself off if the connection drops.
+- Needs the updated Linux PC host (`bash scripts/deploy-host.sh`) with PulseAudio or PipeWire. Works while NexusLink is open on the phone.
+
+This release also includes everything from 1.0.38+44 below, which was not published separately.
+
+## 1.0.38+44 — Mission Control
 
 NexusLink is now an agent monitor first. The previous version is saved as the git branch `stable` (tag `stable-1.0.36+42`, APK in `dist/stable/`).
 
