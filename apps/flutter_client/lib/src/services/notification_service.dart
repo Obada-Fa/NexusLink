@@ -29,11 +29,7 @@ class NotificationService {
         return;
       }
 
-      final deviceName = Platform.isAndroid
-          ? 'Android Device'
-          : Platform.isIOS
-          ? 'iOS Device'
-          : 'Desktop/Web Device';
+      final deviceName = pairedDeviceName();
 
       await client.request('push.registerToken', {
         'token': token,
@@ -113,13 +109,17 @@ class NotificationService {
     }
   }
 
+  /// Whether this service posts agent alerts itself. On Android the native
+  /// live activity owns task notifications, so feeding events here (and
+  /// fetching history to do so) is wasted work.
+  bool get showsAgentAlerts => !kIsWeb && !Platform.isAndroid;
+
   void handleAgentEvent(
     String? sessionId,
     AgentEvent event, {
     String? sessionTitle,
   }) {
-    // Android live activity owns all task notifications and deduplication.
-    if (Platform.isAndroid) return;
+    if (!showsAgentAlerts) return;
     if (sessionId != null) {
       final key = '${sessionId}_${event.seq}_${event.kind}';
       if (_processedEvents.contains(key)) return;

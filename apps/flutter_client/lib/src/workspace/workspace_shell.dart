@@ -11,6 +11,9 @@ import '../state/connection.dart';
 import '../rpc/rpc_client.dart';
 import 'files_screen.dart';
 import 'metrics.dart';
+import '../monitor/monitor_provider.dart';
+import '../theme/nexus_theme.dart';
+import '../theme/nx_widgets.dart';
 import 'project.dart';
 import 'platform_bridge.dart';
 import 'documents.dart';
@@ -80,15 +83,22 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
     if (!identical(client, _metricsClient)) {
       _metricsClient?.demand('shell', 0);
       _metricsClient?.demand('windows', 0);
+      _metricsClient?.demand('monitor:strip', 0);
       _metricsClient = client;
     }
     final tab = ref.read(workspaceTabProvider);
     final show = ref.read(workspaceSettingsProvider)['stats'] == true;
     client?.demand('windows', _foreground && tab == 3 ? 5000 : 0);
-    client?.demand(
-      'shell',
-      _foreground && (show || tab == 3) ? (tab == 3 ? 2000 : 5000) : 0,
-    );
+    if (hostSupportsMonitor(client)) {
+      // Rich vitals for the strip; the PC tab drives its own faster demand.
+      client?.demand('shell', 0);
+      client?.demand('monitor:strip', _foreground && show && tab != 3 ? 5000 : 0);
+    } else {
+      client?.demand(
+        'shell',
+        _foreground && (show || tab == 3) ? (tab == 3 ? 2000 : 5000) : 0,
+      );
+    }
   }
 
   @override
@@ -96,6 +106,7 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
     WidgetsBinding.instance.removeObserver(this);
     _metricsClient?.demand('shell', 0);
     _metricsClient?.demand('windows', 0);
+    _metricsClient?.demand('monitor:strip', 0);
     super.dispose();
   }
 
@@ -188,12 +199,47 @@ class PcStatsStrip extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final status = ref.watch(connectionStatusProvider);
     final data = ref.watch(metricsProvider);
+    final vitals = ref.watch(monitorProvider.select((s) => s.snapshot?.vitals));
+    final now = DateTime.now().millisecondsSinceEpoch;
     final fresh =
-        data != null &&
-        DateTime.now().millisecondsSinceEpoch -
-                (data['timestamp'] as num? ?? 0) <
-            15000;
+        data != null && now - (data['timestamp'] as num? ?? 0) < 15000;
     final connected = status == RpcStatus.connected;
+    if (connected && vitals != null && now - vitals.timestamp < 15000) {
+      Widget stat(String label, double? pct, {String? extra}) => Padding(
+        padding: const EdgeInsets.only(left: 12),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(width: 6, height: 6, decoration: BoxDecoration(shape: BoxShape.circle, color: NX.heat(pct ?? 0))),
+            const SizedBox(width: 4),
+            Text('$label ${pct == null ? '—' : '${pct.round()}%'}${extra ?? ''}',
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFeatures: NX.tabular)),
+          ],
+        ),
+      );
+      return Semantics(
+        button: true,
+        label: 'Open PC statistics',
+        child: InkWell(
+          onTap: () => ref.read(workspaceTabProvider.notifier).select(3),
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 36),
+            color: NX.surface,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: Row(
+              children: [
+                const LiveDot(color: NX.working, size: 6, pulse: false),
+                const SizedBox(width: 4),
+                Expanded(child: Text(vitals.hostname, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, color: NX.textDim))),
+                stat('CPU', vitals.cpu, extra: vitals.cpuTempC == null ? null : ' ${vitals.cpuTempC!.round()}°'),
+                stat('GPU', vitals.mainGpu?.busy),
+                stat('RAM', vitals.ramPercent),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
     return Semantics(
       button: true,
       label: 'Open PC statistics',

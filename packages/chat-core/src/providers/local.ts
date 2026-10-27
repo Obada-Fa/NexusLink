@@ -2,11 +2,11 @@
 // Antigravity) so the phone can open them instead of starting a blank chat.
 
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync, openSync, readSync, closeSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { basename, join, isAbsolute } from 'node:path';
 import { Database } from 'bun:sqlite';
 import type { AgentEvent, AgentHostChat } from '@nexuslink/rpc-types';
 import { listCodexLocal, loadCodexLocal } from './codex';
+import { roots } from '../paths';
 
 export type HostChatDelta = Omit<AgentEvent, 'seq'>;
 
@@ -14,11 +14,17 @@ let LIST_CAP = 40;
 let readIssue = false;
 function noteReadIssue() { readIssue = true; }
 export function takeReadIssue() { const issue = readIssue;readIssue=false;return issue; }
-function toolText(text:string) { return EVENT_CAP === Number.MAX_SAFE_INTEGER ? text : text.slice(0,4000); }
+// History pages cap fields at 64 KiB anyway; never hold more than that per tool call.
+function toolText(text:string) { return text.slice(0, EVENT_CAP === Number.MAX_SAFE_INTEGER ? 65536 : 4000); }
 export function setDiscoveryLimit(limit: number) { LIST_CAP = limit; EVENT_CAP = limit; }
 function metadataHead(path: string): string {
   const handle=openSync(path,'r');
-  try { const buffer=Buffer.alloc(32768);const size=readSync(handle,buffer,0,buffer.length,0);return buffer.subarray(0,size).toString('utf8').split('\n').slice(0,30).join('\n'); }
+  try {
+    const buffer=Buffer.alloc(65536);const size=readSync(handle,buffer,0,buffer.length,0);
+    // A bounded read always cuts the last line; that is expected, not a read issue.
+    const end=size<buffer.length?size:buffer.subarray(0,size).lastIndexOf(0x0a);
+    return buffer.subarray(0,Math.max(0,end)).toString('utf8').split('\n').slice(0,60).join('\n');
+  }
   finally { closeSync(handle); }
 }
 function recordedCwd(head: string): string {
@@ -257,7 +263,7 @@ export function cwdFromAgyCliHistory(
 export function agyProjectIdForCwd(cwd: string): string | undefined {
   const want = canonicalDir(cwd);
   if (!want) return undefined;
-  const dir = join(homedir(), '.gemini', 'config', 'projects');
+  const dir = join(roots().gemini, 'config', 'projects');
   if (!existsSync(dir)) return undefined;
   try {
     for (const name of readdirSync(dir)) {
@@ -276,7 +282,7 @@ export function agyProjectIdForCwd(cwd: string): string | undefined {
 
 function agyCwdForProjectId(projectId: string): string {
   if (!projectId || projectId === 'default-cli-project') return '';
-  const path = join(homedir(), '.gemini', 'config', 'projects', `${projectId}.json`);
+  const path = join(roots().gemini, 'config', 'projects', `${projectId}.json`);
   if (!existsSync(path)) return '';
   try {
     return cwdFromAgyProjectResources(JSON.parse(readFileSync(path, 'utf8')));
@@ -288,7 +294,7 @@ function agyCwdForProjectId(projectId: string): string {
 type AgySummary = { title: string; preview: string; cwd: string; source: string };
 
 function loadAgyCliHistory(): AgyCliHistoryEntry[] {
-  const path = join(homedir(), '.gemini', 'antigravity-cli', 'history.jsonl');
+  const path = join(roots().gemini, 'antigravity-cli', 'history.jsonl');
   if (!existsSync(path)) return [];
   try {
     return readFileSync(path, 'utf8').split('\n').flatMap((line) => {
@@ -307,7 +313,11 @@ function loadAgyCliHistory(): AgyCliHistoryEntry[] {
 
 function loadAgySummaries(): Map<string, AgySummary> {
   const out = new Map<string, AgySummary>();
-  const dbPath = join(homedir(), '.gemini', 'antigravity-cli', 'conversation_summaries.db');
+  // The IDE (~/.gemini/antigravity) and the agy CLI keep separate summary stores.
+  for (const app of ['antigravity-cli', 'antigravity']) loadAgySummaryDb(join(roots().gemini, app, 'conversation_summaries.db'), out);
+  return out;
+}
+function loadAgySummaryDb(dbPath: string, out: Map<string, AgySummary>): Map<string, AgySummary> {
   if (!existsSync(dbPath)) return out;
   const db = openReadonlyDb(dbPath);
   if (!db) return out;
@@ -328,7 +338,7 @@ function loadAgySummaries(): Map<string, AgySummary> {
         title: row.title ?? '',
         preview: row.preview ?? '',
         cwd: parseAgyWorkspaceUris(row.workspace_uris) || agyCwdForProjectId(row.project_id ?? ''),
-        source: agySourceLabel(row.app_data_dir),
+        source: agySourceLabel(row.app_data_dir || (dbPath.includes('antigravity-cli') ? 'antigravity-cli' : 'antigravity')),
       });
     }
   } catch {
@@ -342,7 +352,7 @@ function loadAgySummaries(): Map<string, AgySummary> {
           title: row.title ?? '',
           preview: row.preview ?? '',
           cwd: '',
-          source: 'Antigravity',
+          source: dbPath.includes('antigravity-cli') ? 'Antigravity CLI' : 'Antigravity',
         });
       }
     } catch {
@@ -666,7 +676,7 @@ function openReadonlyDb(path: string): Database | null {
 }
 
 export function listCursorCliHostChats(cursorBinInstalled: boolean): AgentHostChat[] {
-  const root = join(homedir(), '.cursor', 'chats');
+  const root = join(roots().cursor, 'chats');
   if (!existsSync(root)) return [];
   const out: AgentHostChat[] = [];
   try {
@@ -710,7 +720,7 @@ export function listCursorCliHostChats(cursorBinInstalled: boolean): AgentHostCh
 }
 
 export function loadCursorCliHistory(hostChatId: string): HostChatDelta[] {
-  const root = join(homedir(), '.cursor', 'chats');
+  const root = join(roots().cursor, 'chats');
   if (!existsSync(root)) return [];
   try {
     for (const workspace of readdirSync(root)) {
@@ -746,7 +756,7 @@ export function loadCursorCliHistory(hostChatId: string): HostChatDelta[] {
 }
 
 export function listCursorIdeHostChats(): AgentHostChat[] {
-  const root = join(homedir(), '.cursor', 'projects');
+  const root = join(roots().cursor, 'projects');
   if (!existsSync(root)) return [];
   const out: AgentHostChat[] = [];
   const seen = new Set<string>();
@@ -761,7 +771,8 @@ export function listCursorIdeHostChats(): AgentHostChat[] {
         continue;
       }
 
-      const cwd = '';
+      // IDE transcripts carry no cwd; the project slug is the dashed folder path.
+      const cwd = /^\d+$/.test(slug) || slug === 'empty-window' ? '' : cwdFromDashedSlug(slug);
 
       for (const id of chats) {
         if (seen.has(id)) {
@@ -810,7 +821,7 @@ export function listCursorIdeHostChats(): AgentHostChat[] {
 
 export function loadCursorIdeHistory(hostChatId: string): HostChatDelta[] {
   const id = hostChatId.replace(/^ide:/, '');
-  const root = join(homedir(), '.cursor', 'projects');
+  const root = join(roots().cursor, 'projects');
   if (!existsSync(root)) return [];
   try {
     for (const slug of readdirSync(root)) {
@@ -826,7 +837,7 @@ export function loadCursorIdeHistory(hostChatId: string): HostChatDelta[] {
 
 export function getAgyChatTitle(hostChatId: string): string | null {
   if (!hostChatId) return null;
-  const summariesDbPath = join(homedir(), '.gemini', 'antigravity-cli', 'conversation_summaries.db');
+  for (const summariesDbPath of ['antigravity-cli', 'antigravity'].map(app => join(roots().gemini, app, 'conversation_summaries.db'))) {
   if (existsSync(summariesDbPath)) {
     const db = openReadonlyDb(summariesDbPath);
     if (db) {
@@ -850,9 +861,10 @@ export function getAgyChatTitle(hostChatId: string): string | null {
       }
     }
   }
+  }
 
-  const transcriptPath = join(homedir(), '.gemini', 'antigravity-cli', 'brain', hostChatId, '.system_generated', 'logs', 'transcript.jsonl');
-  if (existsSync(transcriptPath)) {
+  const transcriptPath = agyTranscriptPath(hostChatId);
+  if (transcriptPath) {
     try {
       const head = metadataHead(transcriptPath);
       const events = parseAgyJsonl(head);
@@ -889,12 +901,12 @@ function agyListMeta(id: string, summary: AgySummary | undefined, history: AgyCl
 
 export function listAgyHostChats(): AgentHostChat[] {
   const brainDirs = [
-    join(homedir(), '.gemini', 'antigravity-cli', 'brain'),
-    join(homedir(), '.gemini', 'antigravity', 'brain'),
+    join(roots().gemini, 'antigravity-cli', 'brain'),
+    join(roots().gemini, 'antigravity', 'brain'),
   ];
   const convDirs = [
-    join(homedir(), '.gemini', 'antigravity-cli', 'conversations'),
-    join(homedir(), '.gemini', 'antigravity', 'conversations'),
+    join(roots().gemini, 'antigravity-cli', 'conversations'),
+    join(roots().gemini, 'antigravity', 'conversations'),
   ];
   const out: AgentHostChat[] = [];
   const seen = new Set<string>();
@@ -969,17 +981,27 @@ export function listAgyHostChats(): AgentHostChat[] {
     .slice(0, LIST_CAP);
 }
 
+/** IDE chats live under ~/.gemini/antigravity, CLI chats under ~/.gemini/antigravity-cli. */
+export function agyTranscriptPath(hostChatId: string): string | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(hostChatId)) return null;
+  for (const app of ['antigravity-cli', 'antigravity']) {
+    const path = join(roots().gemini, app, 'brain', hostChatId, '.system_generated', 'logs', 'transcript.jsonl');
+    if (existsSync(path)) return path;
+  }
+  return null;
+}
+
 export function loadAgyHistory(hostChatId: string): HostChatDelta[] {
-  const transcriptPath = join(homedir(), '.gemini', 'antigravity-cli', 'brain', hostChatId, '.system_generated', 'logs', 'transcript.jsonl');
-  if (existsSync(transcriptPath)) {
+  const transcriptPath = agyTranscriptPath(hostChatId);
+  if (transcriptPath) {
     try {
       return parseAgyJsonl(readFileSync(transcriptPath, 'utf8'));
     } catch { noteReadIssue();
       // fallback to sqlite
     }
   }
-  const path = join(homedir(), '.gemini', 'antigravity-cli', 'conversations', `${hostChatId}.db`);
-  if (!existsSync(path)) return [];
+  const path = ['antigravity-cli', 'antigravity'].map(app => join(roots().gemini, app, 'conversations', `${hostChatId}.db`)).find(existsSync);
+  if (!path) return [];
   const db = openReadonlyDb(path);
   if (!db) return [];
   try {
@@ -1071,7 +1093,7 @@ export function parseClaudeJsonl(text: string): HostChatDelta[] {
 }
 
 export function listClaudeHostChats(): AgentHostChat[] {
-  const root = join(homedir(), '.claude', 'projects');
+  const root = join(roots().claude, 'projects');
   if (!existsSync(root)) return [];
   const out: AgentHostChat[] = [];
   const seen = new Set<string>();
@@ -1087,6 +1109,7 @@ export function listClaudeHostChats(): AgentHostChat[] {
       if (!isDir) continue;
 
       const cwd = '';
+      let slugFolder: string | undefined;
 
       for (const name of readdirSync(projectDir)) {
         if (!name.endsWith('.jsonl') || name.startsWith('journal') || name.startsWith('agent-')) continue;
@@ -1103,7 +1126,7 @@ export function listClaudeHostChats(): AgentHostChat[] {
         let recordedFolder = cwd;
         try {
           const head = metadataHead(file);
-          recordedFolder = recordedCwd(head) || cwd;
+          recordedFolder = recordedCwd(head) || (slugFolder ??= cwdFromDashedSlug(slug));
           title = titleFromEvents(parseClaudeJsonl(head), title);
         } catch { noteReadIssue();
           // keep fallback
@@ -1129,7 +1152,7 @@ export function listClaudeHostChats(): AgentHostChat[] {
 }
 
 export function loadClaudeHistory(hostChatId: string): HostChatDelta[] {
-  const root = join(homedir(), '.claude', 'projects');
+  const root = join(roots().claude, 'projects');
   if (!existsSync(root)) return [];
   try {
     for (const slug of readdirSync(root)) {

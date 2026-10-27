@@ -13,3 +13,7 @@ out/
 .kotlin/
 .gradle/
 *.iml
+
+# Local tool scratch
+.codex-remote-attachments/
+__pycache__/

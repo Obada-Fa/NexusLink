@@ -9,8 +9,18 @@ describe('protocol registry', () => {
   it('advertises implemented workspace methods without duplicates', () => {
     for(const method of WORKSPACE_METHODS) expect(SUPPORTED_METHODS).toContain(method);
     expect(new Set(SUPPORTED_METHODS).size).toBe(SUPPORTED_METHODS.length);
-    expect(SUPPORTED_METHODS).not.toContain('process.kill');
-    expect(SUPPORTED_METHODS).not.toContain('fs.delete');
+    // Implemented with guards: kill (own processes only, never session-critical), delete (to Trash).
+    for (const method of ['process.kill', 'fs.delete', 'fs.move', 'monitor.snapshot', 'system.getVitals']) expect(SUPPORTED_METHODS).toContain(method as any);
+  });
+  it('validates kill, delete, move and monitor parameters', () => {
+    expect(()=>validateRequest('process.kill',{pid:'12'})).toThrow();
+    expect(()=>validateRequest('process.kill',{pid:4242})).not.toThrow();
+    expect(()=>validateRequest('fs.delete',{})).toThrow();
+    expect(()=>validateRequest('fs.move',{from:'/a'})).toThrow();
+    expect(()=>validateRequest('screen.startCapture',{monitor:'../x'})).toThrow();
+    expect(()=>validateRequest('screen.startCapture',{monitor:'DP-1'})).not.toThrow();
+    expect(()=>validateRequest('session.subscribe',{topics:['monitor'],monitorInterval:3000})).toThrow();
+    expect(()=>validateRequest('session.subscribe',{topics:['monitor'],monitorInterval:1000})).not.toThrow();
   });
   it('rejects malformed parameters before dispatch', () => {
     expect(()=>validateRequest('terminal.create',{cols:-1,rows:24})).toThrow();

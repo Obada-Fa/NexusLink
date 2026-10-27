@@ -3,6 +3,8 @@
 // `activeClientProvider` and watch `connectionStatusProvider`; the connect
 // screen drives connect/disconnect.
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -18,11 +20,20 @@ class ConnectionState {
   final String? hostUrl;
   final String? httpBase; // e.g. http://192.168.2.30:45678 for file transfer
 
+  /// The PC no longer accepts this phone's pairing (credential revoked or
+  /// missing). Automatic reconnects stop until the user pairs again.
+  final bool authRequired;
+
+  /// Phone-facing reason for the last failed connection attempt.
+  final String? lastError;
+
   const ConnectionState({
     this.client,
     this.status = RpcStatus.disconnected,
     this.hostUrl,
     this.httpBase,
+    this.authRequired = false,
+    this.lastError,
   });
 
   ConnectionState copyWith({
@@ -30,12 +41,46 @@ class ConnectionState {
     RpcStatus? status,
     String? hostUrl,
     String? httpBase,
+    bool? authRequired,
+    String? lastError,
+    bool clearError = false,
   }) => ConnectionState(
     client: client ?? this.client,
     status: status ?? this.status,
     hostUrl: hostUrl ?? this.hostUrl,
     httpBase: httpBase ?? this.httpBase,
+    authRequired: authRequired ?? this.authRequired,
+    lastError: clearError ? null : lastError ?? this.lastError,
   );
+}
+
+/// True when [error] means the PC refused this phone's pairing.
+bool isAuthError(Object error) =>
+    error is RpcException && error.code == 'UNAUTHENTICATED';
+
+/// Short, phone-facing explanation of a failed connection attempt.
+String connectErrorMessage(Object error) {
+  if (isAuthError(error)) {
+    final message = (error as RpcException).message;
+    if (message.toLowerCase().contains('pairing code')) return message;
+    return 'This phone is no longer paired with that PC. Enter a new pairing '
+        'code to pair again.';
+  }
+  final raw = error is RpcException ? error.message : '$error';
+  final lower = raw.toLowerCase();
+  if (lower.contains('timed out') ||
+      lower.contains('connection refused') ||
+      lower.contains('network is unreachable') ||
+      lower.contains('no route to host') ||
+      lower.contains('failed host lookup') ||
+      lower.contains('socketexception') ||
+      lower.contains('websocketexception') ||
+      lower.contains('connection closed') ||
+      lower.contains('disconnected before')) {
+    return 'The PC didn’t answer. Check that it is on, NexusLink is running, '
+        'and both devices are on the same network or Tailscale.';
+  }
+  return friendlyLaunchError(error);
 }
 
 class ConnectionNotifier extends Notifier<ConnectionState> {
@@ -45,6 +90,10 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
   bool _explicitDisconnect = false;
   int _generation = 0;
   Future<void>? _inFlightConnect;
+
+  /// The user ended the connection in this app run (Disconnect, Forget, or
+  /// cancelling a connection). Cleared when the user connects again.
+  bool get userDisconnected => _explicitDisconnect;
 
   @override
   ConnectionState build() {
@@ -63,7 +112,8 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
     _explicitDisconnect = false;
     wsUrl = normalizeHostWsUrl(wsUrl);
     if (_inFlightConnect != null &&
-        state.hostUrl == normalizeHostWsUrl(wsUrl)) {
+        state.hostUrl == wsUrl &&
+        pairingCode == null) {
       return _inFlightConnect!;
     }
     final run = _connect(wsUrl, pairingCode);
@@ -81,12 +131,24 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
     final client = RpcClient(wsUrl, pairingCode: pairingCode);
     _currentClient = client;
     final sub = client.statusStream.listen((s) {
-      if (!_disposed && generation == _generation) {
-        state = state.copyWith(status: s);
+      if (_disposed || generation != _generation) return;
+      if (s == RpcStatus.disconnected && client.authRequired) {
+        // A background reconnect was refused: surface it instead of looking
+        // like an ordinary offline PC.
+        state = state.copyWith(
+          status: s,
+          authRequired: true,
+          lastError: connectErrorMessage(
+            RpcException('Pairing was removed on the PC', 'UNAUTHENTICATED'),
+          ),
+        );
+        if (client.credentialRevoked) unawaited(_forgetCredential(wsUrl));
+        return;
       }
+      state = state.copyWith(status: s);
     });
     _statusSub = sub.cancel;
-    state = state.copyWith(
+    state = ConnectionState(
       client: client,
       status: RpcStatus.connecting,
       hostUrl: wsUrl,
@@ -102,25 +164,38 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
         throw RpcException('PC disconnected before synchronization finished');
       }
       await saveLastHostUrl(wsUrl);
-      state = state.copyWith(status: RpcStatus.connected);
-    } catch (_) {
+      state = state.copyWith(
+        status: RpcStatus.connected,
+        authRequired: false,
+        clearError: true,
+      );
+    } catch (error) {
       client.dispose();
-      if (client.credentialRevoked) {
-        final prefs = await SharedPreferences.getInstance();
-        final host = prefs.getString('chat-host:$wsUrl');
-        if (host != null) await ChatCache().clear(host, includeDrafts: true);
-        await PlatformBridge.removeCredential(wsUrl);
-      }
+      final authRequired = client.credentialRevoked || isAuthError(error);
+      if (client.credentialRevoked) await _forgetCredential(wsUrl);
       if (generation == _generation) {
         _currentClient = null;
         if (!_disposed) {
           state = ConnectionState(
             hostUrl: wsUrl,
             httpBase: _httpBaseFromWs(wsUrl),
+            authRequired: authRequired,
+            lastError: connectErrorMessage(error),
           );
         }
       }
       rethrow;
+    }
+  }
+
+  Future<void> _forgetCredential(String wsUrl) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final host = prefs.getString('chat-host:$wsUrl');
+      if (host != null) await ChatCache().clear(host, includeDrafts: true);
+      await PlatformBridge.removeCredential(wsUrl);
+    } catch (error) {
+      debugPrint('Could not clear revoked pairing: $error');
     }
   }
 
@@ -149,22 +224,34 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
 
   /// Silent reconnect used when the app returns to the foreground. Only runs
   /// if this session already had a host (explicit disconnect clears it).
+  /// Failures are recorded in [ConnectionState.lastError] /
+  /// [ConnectionState.authRequired] rather than thrown.
   Future<void> ensureConnected() async {
-    if (_disposed || _explicitDisconnect) return;
-    if (state.status == RpcStatus.connected) {
-      final client = state.client;
-      if (client == null) return;
-      try {
-        // Foregrounding can leave a half-open socket that still reports
-        // "connected". Probe once so resume paths can recover and catch up.
-        await client.request(
-          'session.heartbeat',
-          const {},
-          const Duration(seconds: 3),
-        );
-        return;
-      } catch (_) {
-        // Force a clean reconnect below using the last known host URL.
+    if (_disposed || _explicitDisconnect || state.authRequired) return;
+    final client = state.client;
+    if (client != null) {
+      switch (client.status) {
+        case RpcStatus.connected:
+          try {
+            // Foregrounding can leave a half-open socket that still reports
+            // "connected". Probe once so resume paths can recover.
+            await client.request(
+              'session.heartbeat',
+              const {},
+              const Duration(seconds: 3),
+            );
+            return;
+          } catch (_) {
+            await _reconnectInPlace(client);
+            return;
+          }
+        case RpcStatus.connecting:
+          await _waitWhileConnecting();
+          return;
+        case RpcStatus.disconnected:
+          // The client is waiting out its backoff; retry right away.
+          await _reconnectInPlace(client);
+          return;
       }
     }
     final inflight = _inFlightConnect;
@@ -174,10 +261,6 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
       } catch (_) {}
       return;
     }
-    if (state.status == RpcStatus.connecting) {
-      await _waitWhileConnecting();
-      return;
-    }
     var url = state.hostUrl?.trim();
     if (url == null || url.isEmpty) {
       url = await loadLastHostUrl();
@@ -185,7 +268,28 @@ class ConnectionNotifier extends Notifier<ConnectionState> {
     if (url == null || url.isEmpty) return;
     try {
       await connect(url);
-    } catch (_) {}
+    } catch (_) {
+      // State already carries lastError / authRequired for the UI.
+    }
+  }
+
+  /// Re-dial the existing client so its topic listeners, demands and the
+  /// widgets bound to it (chat lists, terminals) survive the reconnect.
+  Future<void> _reconnectInPlace(RpcClient client) async {
+    final generation = _generation;
+    try {
+      await client.connect();
+      if (generation == _generation && !_disposed) {
+        state = state.copyWith(status: client.status, clearError: true);
+      }
+    } catch (error) {
+      if (generation != _generation || _disposed) return;
+      state = state.copyWith(
+        status: client.status,
+        authRequired: client.authRequired || isAuthError(error),
+        lastError: connectErrorMessage(error),
+      );
+    }
   }
 
   Future<void> _waitWhileConnecting() async {
@@ -229,4 +333,9 @@ final activeClientProvider = Provider<RpcClient?>(
 
 final connectionStatusProvider = Provider<RpcStatus>(
   (ref) => ref.watch(connectionProvider).status,
+);
+
+/// The PC refused this phone's pairing; show a "Pair again" path.
+final connectionAuthRequiredProvider = Provider<bool>(
+  (ref) => ref.watch(connectionProvider.select((s) => s.authRequired)),
 );

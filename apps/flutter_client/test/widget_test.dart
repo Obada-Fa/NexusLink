@@ -59,6 +59,17 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Remove saved device'));
     await tester.pumpAndSettle();
+    // Removing asks first; "Keep" leaves the device alone.
+    expect(find.text('Remove Work laptop?'), findsOneWidget);
+    await tester.tap(find.text('Keep'));
+    await tester.pumpAndSettle();
+    expect(find.text('Work laptop'), findsOneWidget);
+    await tester.longPress(find.text('Work laptop'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove saved device'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Remove'));
+    await tester.pumpAndSettle();
     expect(find.text('Work laptop'), findsNothing);
     expect(await SavedDevices.load(), isEmpty);
     expect(find.text('Device address'), findsOneWidget);

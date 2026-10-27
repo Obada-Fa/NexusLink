@@ -305,16 +305,16 @@ void main() {
   });
 
   group('GestureEngine — momentum', () {
-    test('fast two-finger flick produces decaying inertial scrolls until stop',
+    test('fast one-finger flick produces decaying inertial scrolls until stop',
         () {
       final (engine, events) = setupEngine();
-      engine.onTouchStart([tp(180, 600), tp(220, 600, 1)], 0);
+      engine.onTouchStart([tp(200, 600)], 0);
       var y = 600.0;
       var t = 0.0;
       for (var i = 0; i < 5; i++) {
         t += 16;
         y -= 40;
-        engine.onTouchMove([tp(180, y), tp(220, y, 1)], t);
+        engine.onTouchMove([tp(200, y)], t);
       }
       engine.onTouchEnd([], t);
       expect(engine.inertiaActive, isTrue);
@@ -345,13 +345,13 @@ void main() {
 
     test('a new touch finger-catches a running fling', () {
       final (engine, events) = setupEngine();
-      engine.onTouchStart([tp(180, 600), tp(220, 600, 1)], 0);
+      engine.onTouchStart([tp(200, 600)], 0);
       var y = 600.0;
       var t = 0.0;
       for (var i = 0; i < 5; i++) {
         t += 16;
         y -= 40;
-        engine.onTouchMove([tp(180, y), tp(220, y, 1)], t);
+        engine.onTouchMove([tp(200, y)], t);
       }
       engine.onTouchEnd([], t);
 
@@ -377,16 +377,16 @@ void main() {
       expect(events.length, countBefore);
     });
 
-    test('slow two-finger pan below the fling threshold does not start inertia',
+    test('slow one-finger pan below the fling threshold does not start inertia',
         () {
       final (engine, events) = setupEngine();
-      engine.onTouchStart([tp(180, 600), tp(220, 600, 1)], 0);
+      engine.onTouchStart([tp(200, 600)], 0);
       var y = 600.0;
       var t = 0.0;
       for (var i = 0; i < 4; i++) {
         t += 200; // very slow: large dt => low velocity
         y -= 5;
-        engine.onTouchMove([tp(180, y), tp(220, y, 1)], t);
+        engine.onTouchMove([tp(200, y)], t);
       }
       engine.onTouchEnd([], t);
 
@@ -453,25 +453,53 @@ void main() {
   });
 
   group('GestureEngine — multi-touch', () {
-    test('two-finger pinch outward emits positive ZoomEvent', () {
+    test('two-finger pinch outward zooms the local view in', () {
       final (engine, events) = setupEngine();
       engine.onTouchStart([tp(100, 300), tp(200, 300, 1)], 0);
       engine.onTouchMove([tp(70, 300), tp(230, 300, 1)], 16);
       engine.onTouchEnd([], 32);
 
-      final zooms = events.whereType<ZoomEvent>().toList();
-      expect(zooms, isNotEmpty);
-      expect(zooms.first.scale, greaterThan(0));
+      final steps = events.whereType<ViewTransformEvent>().toList();
+      expect(steps, isNotEmpty);
+      // Ratio of finger spread: 160 / 100.
+      expect(steps.first.scale, closeTo(1.6, 1e-9));
+      expect(steps.first.focalX, 150);
+      expect(events.whereType<ScrollEvent>(), isEmpty);
+      expect(events.whereType<TwoFingerTapEvent>(), isEmpty);
     });
 
-    test('two-finger pan emits ScrollEvents', () {
+    test('touch mode two-finger pan pans the view and never scrolls the PC',
+        () {
       final (engine, events) = setupEngine();
       engine.onTouchStart([tp(100, 200), tp(150, 250, 1)], 0);
       engine.onTouchMove([tp(100, 260), tp(150, 310, 1)], 16);
       engine.onTouchEnd([], 32);
 
-      expect(events.whereType<ScrollEvent>(), isNotEmpty);
-      expect(events.whereType<ZoomEvent>(), isEmpty);
+      final step = events.whereType<ViewTransformEvent>().single;
+      expect(step.scale, closeTo(1, 1e-9));
+      expect(step.dy, 60);
+      expect(events.whereType<ScrollEvent>(), isEmpty);
+    });
+
+    test('a finger left after a pinch does not ghost-scroll', () {
+      final (engine, events) = setupEngine();
+      engine.onTouchStart([tp(100, 300), tp(200, 300, 1)], 0);
+      engine.onTouchMove([tp(70, 300), tp(230, 300, 1)], 16);
+      engine.onTouchEnd([tp(70, 300)], 32);
+      engine.onTouchMove([tp(70, 400)], 48);
+      engine.onTouchEnd([], 64);
+
+      expect(events.whereType<ScrollEvent>(), isEmpty);
+      expect(events.whereType<TapEvent>(), isEmpty);
+    });
+
+    test('touch mode two-finger tap is a TwoFingerTapEvent (zoom reset)', () {
+      final (engine, events) = setupEngine();
+      engine.onTouchStart([tp(100, 200), tp(140, 200, 1)], 0);
+      engine.onTouchEnd([], 80);
+
+      expect(events.whereType<TwoFingerTapEvent>(), hasLength(1));
+      expect(events.whereType<ContextEvent>(), isEmpty);
     });
 
     test('three-finger tap does not emit a middle click', () {
@@ -522,15 +550,71 @@ void main() {
       expect(move.dy, closeTo(100 * (1920 / 667) / precisionDivisor, 1.0));
     });
 
-    test('mouse mode one-finger pan emits CanvasPanEvent, not host scroll', () {
+    test('mouse mode one-finger pan moves the pointer by the full delta', () {
       final (engine, events) = setupEngine(mode: GestureMode.mouse);
       engine.onTouchStart([tp(100, 200)], 0);
-      engine.onTouchMove([tp(100, 260)], 16);
+      engine.onTouchMove([tp(101, 201)], 8); // inside the slop
+      engine.onTouchMove([tp(100, 230)], 16);
+      engine.onTouchMove([tp(100, 260)], 24);
       engine.onTouchEnd([], 32);
 
-      expect(events.whereType<CanvasPanEvent>(), isNotEmpty);
+      final deltas = events.whereType<PointerDeltaEvent>().toList();
+      expect(deltas, isNotEmpty);
+      // Nothing lost to the tap slop: the sum is the whole finger travel.
+      expect(deltas.fold<double>(0, (a, d) => a + d.dy), 60);
+      expect(deltas.every((d) => !d.dragging), isTrue);
       expect(events.whereType<ScrollEvent>(), isEmpty);
       expect(events.whereType<DragStartEvent>(), isEmpty);
+      expect(events.whereType<TapEvent>(), isEmpty);
+    });
+
+    test('mouse mode tap with a few px of finger jitter is still a click', () {
+      // 1920-wide desktop: 1 view px is ~5 host px, past the host-px slop.
+      final (engine, events) =
+          setupEngine(mode: GestureMode.mouse, hostW: 1920, hostH: 1080);
+      engine.onTouchStart([tp(100, 200)], 0);
+      engine.onTouchMove([tp(103, 202)], 30);
+      engine.onTouchEnd([], 90);
+
+      expect(events.whereType<TapEvent>(), hasLength(1));
+      expect(events.whereType<PointerDeltaEvent>(), isEmpty);
+    });
+
+    test('mouse mode tap-then-hold-and-move drags', () {
+      final (engine, events) = setupEngine(mode: GestureMode.mouse);
+      engine.onTouchStart([tp(100, 200)], 0);
+      engine.onTouchEnd([], 60); // tap
+      engine.onTouchStart([tp(180, 400)], 160); // finger lands elsewhere
+      engine.onTouchMove([tp(180, 450)], 200);
+      engine.onTouchEnd([], 260);
+
+      expect(events.whereType<TapEvent>(), hasLength(1));
+      expect(events.whereType<DragStartEvent>(), hasLength(1));
+      expect(events.whereType<DragEndEvent>(), hasLength(1));
+      final deltas = events.whereType<PointerDeltaEvent>().toList();
+      expect(deltas, isNotEmpty);
+      expect(deltas.every((d) => d.dragging), isTrue);
+    });
+
+    test('mouse mode two-finger pan scrolls; a pinch zooms the view', () {
+      final (engine, events) = setupEngine(mode: GestureMode.mouse);
+      engine.onTouchStart([tp(100, 200), tp(150, 200, 1)], 0);
+      engine.onTouchMove([tp(100, 240), tp(150, 240, 1)], 16);
+      engine.onTouchMove([tp(100, 280), tp(150, 290, 1)], 32);
+      engine.onTouchEnd([], 48);
+      expect(events.whereType<ScrollEvent>(), isNotEmpty);
+      expect(events.whereType<ViewTransformEvent>(), isEmpty);
+      expect(events.whereType<ContextEvent>(), isEmpty);
+
+      events.clear();
+      engine.onTouchStart([tp(100, 300), tp(200, 300, 1)], 1000);
+      engine.onTouchMove([tp(80, 300), tp(220, 300, 1)], 1016);
+      engine.onTouchMove([tp(70, 300), tp(230, 300, 1)], 1032);
+      engine.onTouchEnd([], 1048);
+      expect(events.whereType<ViewTransformEvent>(), isNotEmpty);
+      expect(events.whereType<ScrollEvent>(), isEmpty);
+      // A quick pinch is not mistaken for a two-finger tap (right click).
+      expect(events.whereType<ContextEvent>(), isEmpty);
     });
 
     test('mouse mode two-finger tap is a right click', () {
@@ -539,6 +623,164 @@ void main() {
       engine.onTouchEnd([], 80);
 
       expect(events.whereType<ContextEvent>(), hasLength(1));
+    });
+
+    test('view mode: one finger pans the picture, nothing reaches the PC', () {
+      final (engine, events) = setupEngine(mode: GestureMode.view);
+      engine.onTouchStart([tp(100, 200)], 0);
+      engine.onTouchMove([tp(100, 260)], 16);
+      engine.onTouchEnd([], 32);
+      engine.onTouchStart([tp(100, 200)], 1000);
+      engine.tick(1000 + longPressThresholdMs + 50);
+      engine.onTouchEnd([], 1000 + longPressThresholdMs + 60);
+
+      expect(events.whereType<ViewTransformEvent>(), isNotEmpty);
+      expect(events.whereType<ScrollEvent>(), isEmpty);
+      expect(events.whereType<ContextEvent>(), isEmpty);
+    });
+  });
+
+  group('ViewZoom', () {
+    // Landscape 1920x1080 desktop on a 400x800 portrait phone: the picture
+    // is letterboxed to 400x225 at y=287.5.
+    const viewW = 400.0, viewH = 800.0;
+    final rect = fittedContentRect(viewW, viewH, 1920, 1080, ScaleFit.contain);
+
+    test('fittedContentRect letterboxes contain and fills fill', () {
+      expect(rect.w, 400);
+      expect(rect.h, 225);
+      expect(rect.y, 287.5);
+      final fill = fittedContentRect(viewW, viewH, 1920, 1080, ScaleFit.fill);
+      expect((fill.x, fill.y, fill.w, fill.h), (0.0, 0.0, viewW, viewH));
+    });
+
+    test('pinch keeps the content under the fingers in place', () {
+      final z = ViewZoom();
+      final before = z.toContent(250, 400);
+      z.applyStep(
+        ratio: 2,
+        focalX: 250,
+        focalY: 400,
+        dx: 0,
+        dy: 0,
+        rect: rect,
+        viewW: viewW,
+        viewH: viewH,
+      );
+      expect(z.scale, 2);
+      final after = z.toContent(250, 400);
+      expect(after.x, closeTo(before.x, 1e-9));
+      expect(after.y, closeTo(before.y, 1e-9));
+    });
+
+    test('zoom is clamped to [1, 8] and returning to 1 recentres', () {
+      final z = ViewZoom();
+      for (var i = 0; i < 10; i++) {
+        z.applyStep(
+          ratio: 2,
+          focalX: 10,
+          focalY: 300,
+          dx: 0,
+          dy: 0,
+          rect: rect,
+          viewW: viewW,
+          viewH: viewH,
+        );
+      }
+      expect(z.scale, maxViewScale);
+      z.applyStep(
+        ratio: 0.01,
+        focalX: 10,
+        focalY: 300,
+        dx: 0,
+        dy: 0,
+        rect: rect,
+        viewW: viewW,
+        viewH: viewH,
+      );
+      expect((z.scale, z.panX, z.panY), (1.0, 0.0, 0.0));
+    });
+
+    test('the picture cannot be dragged off screen', () {
+      final z = ViewZoom();
+      z.applyStep(
+        ratio: 3,
+        focalX: 200,
+        focalY: 400,
+        dx: 0,
+        dy: 0,
+        rect: rect,
+        viewW: viewW,
+        viewH: viewH,
+      );
+      // Fling far right/down: the picture's left edge stops at the screen's.
+      z.applyStep(
+        ratio: 1,
+        focalX: 5000,
+        focalY: 5000,
+        dx: 4800,
+        dy: 4600,
+        rect: rect,
+        viewW: viewW,
+        viewH: viewH,
+      );
+      expect(z.toView(rect.x, rect.y).x, closeTo(0, 1e-9));
+      // 225*3 = 675 tall < 800: vertically it stays centred.
+      final top = z.toView(rect.x, rect.y).y;
+      final bottom = z.toView(rect.x, rect.y + rect.h).y;
+      expect(top, closeTo(viewH - bottom, 1e-9));
+    });
+
+    test('follow pans just enough to keep a point inside the margin', () {
+      final z = ViewZoom();
+      z.applyStep(
+        ratio: 4,
+        focalX: 200,
+        focalY: 400,
+        dx: 0,
+        dy: 0,
+        rect: rect,
+        viewW: viewW,
+        viewH: viewH,
+      );
+      final panX = z.panX;
+      z.follow(395, 400, 40, rect, viewW, viewH);
+      expect(z.panX, closeTo(panX - 35, 1e-9));
+      // Unzoomed: follow never moves the picture.
+      final flat = ViewZoom()..follow(399, 799, 40, rect, viewW, viewH);
+      expect((flat.panX, flat.panY), (0.0, 0.0));
+    });
+  });
+
+  group('VirtualCursor', () {
+    test('pointerGain rises with speed and is bounded', () {
+      expect(pointerGain(0), closeTo(0.9, 1e-9));
+      expect(pointerGain(0.5), greaterThan(pointerGain(0.2)));
+      expect(pointerGain(10), closeTo(2.6, 1e-9));
+    });
+
+    test('slow strokes track ~1:1 (scaled to host px); edges clamp', () {
+      final c = VirtualCursor()..placeAt(100, 100);
+      // 1 view px per 16 ms is slow: gain ~0.9 * 4.8 host px per view px.
+      c.moveBy(1, 0, 0, 4.8, 1920, 1080);
+      expect(c.x, closeTo(100 + 0.9 * 4.8, 0.01));
+      c.endStroke();
+      c.moveBy(-10000, 10000, 100, 4.8, 1920, 1080);
+      expect((c.x, c.y), (0.0, 1079.0));
+    });
+
+    test('a fast flick travels further than a slow stroke of equal length',
+        () {
+      final slow = VirtualCursor()..placeAt(0, 0);
+      for (var i = 1; i <= 10; i++) {
+        slow.moveBy(2, 0, i * 16.0, 1, 5000, 5000);
+      }
+      final fast = VirtualCursor()..placeAt(0, 0);
+      for (var i = 1; i <= 10; i++) {
+        fast.moveBy(20, 0, i * 8.0, 0.1, 5000, 5000);
+      }
+      // Same 20 host px of raw travel each; the flick is accelerated.
+      expect(fast.x, greaterThan(slow.x * 2));
     });
   });
 }

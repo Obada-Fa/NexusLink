@@ -110,8 +110,9 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
     } on RpcException catch (e) {
       if (e.code == 'REVISION_CONFLICT' && mounted) {
         await _conflict();
-      } else if (mounted)
+      } else if (mounted) {
         _toast('$e');
+      }
     } catch (e) {
       if (mounted) _toast('$e');
     }

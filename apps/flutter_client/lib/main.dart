@@ -17,6 +17,8 @@ import 'src/widgets/connection_lifecycle.dart';
 import 'src/state/saved_devices.dart';
 import 'src/services/wake_service.dart';
 import 'src/screens/wake_settings_sheet.dart';
+import 'src/theme/nexus_theme.dart';
+import 'src/theme/nx_widgets.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -32,21 +34,22 @@ class NexusLinkApp extends StatelessWidget {
     return MaterialApp(
       title: 'NexusLink',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF6C9BFF),
-          brightness: Brightness.dark,
-        ),
-        scaffoldBackgroundColor: const Color(0xFF0B0D12),
-        useMaterial3: true,
-      ),
+      theme: nexusTheme(),
+      navigatorKey: appNavigatorKey,
       builder: (context, child) =>
           ConnectionLifecycle(child: child ?? const SizedBox.shrink()),
       home: const ConnectScreen(),
     );
   }
 }
+
+/// Auto-connect runs at most once per app run (cold start), never after the
+/// user came back to this screen.
+bool _autoConnectAttempted = false;
+
+/// Test hook: lets widget tests start from a fresh "cold start".
+@visibleForTesting
+void resetAutoConnectForTest() => _autoConnectAttempted = false;
 
 class ConnectScreen extends ConsumerStatefulWidget {
   const ConnectScreen({super.key});
@@ -58,6 +61,7 @@ class ConnectScreen extends ConsumerStatefulWidget {
 class _ConnectScreenState extends ConsumerState<ConnectScreen> {
   final _urlController = TextEditingController();
   final _pairingController = TextEditingController();
+  final _pairingFocus = FocusNode();
   List<DiscoveredHost> _hosts = [];
   bool _scanning = false;
   bool _connecting = false;
@@ -71,6 +75,12 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
   String? _wakeMessage;
   int _wakeGeneration = 0;
 
+  /// Bumped to abandon an in-flight connect (Cancel).
+  int _connectGeneration = 0;
+
+  /// Name shown on the "Connecting…" card for automatic connections.
+  String? _autoLabel;
+
   @override
   void initState() {
     super.initState();
@@ -83,6 +93,7 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
     _nameController.dispose();
     _urlController.dispose();
     _pairingController.dispose();
+    _pairingFocus.dispose();
     super.dispose();
   }
 
@@ -98,12 +109,20 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
         final deepLink = await PlatformBridge.call('live.pendingTask');
         if (!mounted) return;
         if (deepLink is Map && deepLink['host'] is String) {
+          _autoConnectAttempted = true;
           ref
               .read(pendingTaskProvider.notifier)
               .select(deepLink['taskId'] as String?);
-          await _connect(deepLink['host'] as String);
+          final url = normalizeHostWsUrl(deepLink['host'] as String);
+          await _connect(
+            url,
+            auto: true,
+            label: devices.where((d) => d.url == url).firstOrNull?.name,
+          );
+          return;
         }
       }
+      await _autoConnect(devices);
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -112,6 +131,53 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
         });
       }
     }
+  }
+
+  Future<void> _autoConnect(List<SavedDevice> devices) async {
+    final decision = await decideAutoConnect(
+      devices: devices,
+      lastHostUrl: await loadLastHostUrl(),
+      userDisconnected: ref.read(connectionProvider.notifier).userDisconnected,
+      alreadyAttempted: _autoConnectAttempted,
+      hasCredential: (url) async =>
+          (await PlatformBridge.credential(url))?.isNotEmpty == true,
+    );
+    _autoConnectAttempted = true;
+    final device = decision.device;
+    if (device == null || !mounted || _connecting) return;
+    await _connect(device.url, auto: true, label: device.name);
+  }
+
+  void _cancelConnect() {
+    ++_connectGeneration;
+    ref.read(connectionProvider.notifier).disconnect();
+    setState(() {
+      _connecting = false;
+      _connectingUrl = null;
+      _autoLabel = null;
+      _error = null;
+    });
+  }
+
+  /// The PC refused this phone's pairing: open the pairing form prefilled
+  /// with that PC so one code entry fixes it.
+  void _showPairAgain(String? hostUrl) {
+    final url = hostUrl == null ? null : normalizeHostWsUrl(hostUrl);
+    final device = _devices.where((d) => d.url == url).firstOrNull;
+    setState(() {
+      _showAddDevice = true;
+      if (url != null) _urlController.text = url;
+      if (device != null) _nameController.text = device.name;
+      _error =
+          'This phone is no longer paired with ${device?.name ?? 'that PC'}. '
+          'Enter a new pairing code from NexusLink on your PC, then tap Connect.';
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Never pull the keyboard up while another screen covers this one.
+      if (mounted && ModalRoute.of(context)?.isCurrent == true) {
+        _pairingFocus.requestFocus();
+      }
+    });
   }
 
   IconData _deviceIcon(String icon) => switch (icon) {
@@ -189,6 +255,31 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
       ),
     );
     if (result == null || !mounted) return;
+    if (result == 'remove') {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text('Remove ${device.name}?'),
+          content: const Text(
+            'It disappears from this phone’s device list and its wake '
+            'settings are deleted. The PC itself is not changed; you can add '
+            'it again later.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Keep'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: NX.failed),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Remove'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+    }
     final devices = [
       for (final saved in _devices)
         if (saved.url != device.url)
@@ -362,7 +453,13 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
               spacing: 8,
               alignment: WrapAlignment.spaceBetween,
               children: [
-                if (waking)
+                if (connecting)
+                  TextButton.icon(
+                    onPressed: _cancelConnect,
+                    icon: const Icon(Icons.close, size: 18),
+                    label: const Text('Cancel'),
+                  )
+                else if (waking)
                   TextButton.icon(
                     onPressed: _cancelWakeWait,
                     icon: const Icon(Icons.close, size: 18),
@@ -405,13 +502,22 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
     }
   }
 
-  Future<void> _connect(String wsUrl, {String? name, String? icon}) async {
+  Future<void> _connect(
+    String wsUrl, {
+    String? name,
+    String? icon,
+    bool auto = false,
+    String? label,
+  }) async {
     if (_connecting) return;
     if (_wakingUrl != null) _cancelWakeWait();
     wsUrl = normalizeHostWsUrl(wsUrl);
+    final generation = ++_connectGeneration;
+    final pairingCode = _pairingController.text.trim();
     setState(() {
       _connecting = true;
       _connectingUrl = wsUrl;
+      _autoLabel = auto ? (label ?? lastHostLabel(wsUrl)) : null;
       _error = null;
     });
     try {
@@ -419,10 +525,9 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
           .read(connectionProvider.notifier)
           .connect(
             wsUrl,
-            pairingCode: _pairingController.text.trim().isEmpty
-                ? null
-                : _pairingController.text.trim(),
+            pairingCode: pairingCode.isEmpty ? null : pairingCode,
           );
+      if (!mounted || generation != _connectGeneration) return;
       var devices = await SavedDevices.remember(wsUrl, name: name);
       if (icon != null) {
         devices = [
@@ -432,36 +537,131 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
         await SavedDevices.save(devices);
       }
       await saveLastHostUrl(wsUrl);
-      if (!mounted) return;
+      if (!mounted || generation != _connectGeneration) return;
       _pairingController.clear();
       setState(() {
         _devices = devices;
         _showAddDevice = false;
+        _connecting = false;
+        _connectingUrl = null;
+        _autoLabel = null;
       });
       await Navigator.of(
         context,
       ).push(MaterialPageRoute(builder: (_) => const WorkspaceShell()));
-      // Returned from the launcher (disconnected) — nothing else to do.
+      // Returned from the workspace (disconnected) — nothing else to do.
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = 'Could not connect: $e';
-          _urlController.text = wsUrl;
-          _showAddDevice = true;
-        });
-      }
-    } finally {
-      if (mounted) {
+      if (!mounted || generation != _connectGeneration) return;
+      final pcName =
+          label ??
+          _devices.where((d) => d.url == wsUrl).firstOrNull?.name ??
+          lastHostLabel(wsUrl);
+      if (isAuthError(e)) {
         setState(() {
           _connecting = false;
           _connectingUrl = null;
+          _autoLabel = null;
+        });
+        _showPairAgain(wsUrl);
+        if (pairingCode.isNotEmpty || !auto) {
+          setState(() => _error = connectErrorMessage(e));
+        }
+        return;
+      }
+      setState(() {
+        _error = auto
+            ? 'Couldn’t reconnect to $pcName automatically. '
+                  '${connectErrorMessage(e)} Tap the PC to try again.'
+            : 'Couldn’t connect to $pcName. ${connectErrorMessage(e)}';
+        _urlController.text = wsUrl;
+        // Saved PCs stay one tap away; only show setup for new addresses.
+        if (!_devices.any((d) => d.url == wsUrl)) _showAddDevice = true;
+      });
+    } finally {
+      if (mounted && generation == _connectGeneration && _connecting) {
+        setState(() {
+          _connecting = false;
+          _connectingUrl = null;
+          _autoLabel = null;
         });
       }
     }
   }
 
+  Widget _connectingCard() {
+    final label = _autoLabel ?? lastHostLabel(_connectingUrl ?? '');
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: NxCard(
+        accent: NX.accent,
+        child: Row(
+          children: [
+            const SizedBox(
+              width: 22,
+              height: 22,
+              child: CircularProgressIndicator(strokeWidth: 2.4),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Connecting to $label…',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    lastHostLabel(_connectingUrl ?? ''),
+                    style: const TextStyle(color: NX.textDim, fontSize: 12.5),
+                  ),
+                ],
+              ),
+            ),
+            TextButton(onPressed: _cancelConnect, child: const Text('Cancel')),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _errorCard(String message) => Padding(
+    padding: const EdgeInsets.only(bottom: 16),
+    child: NxCard(
+      accent: NX.failed,
+      padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 1),
+            child: Icon(Icons.error_outline, color: NX.failed, size: 20),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(message, style: const TextStyle(color: NX.text)),
+          ),
+          IconButton(
+            tooltip: 'Dismiss',
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.close, size: 18, color: NX.textDim),
+            onPressed: () => setState(() => _error = null),
+          ),
+        ],
+      ),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) {
+    ref.listen<bool>(connectionAuthRequiredProvider, (previous, next) {
+      if (next && previous != true) {
+        _showPairAgain(ref.read(connectionProvider).hostUrl);
+      }
+    });
     return Scaffold(
       body: SafeArea(
         child: Center(
@@ -480,18 +680,11 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                 Text(
                   'Your PC, in your pocket',
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white.withValues(alpha: 0.4)),
+                  style: const TextStyle(color: NX.textDim),
                 ),
                 const SizedBox(height: 32),
-                if (_error != null)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: Text(
-                      _error!,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.redAccent),
-                    ),
-                  ),
+                if (_connecting && _autoLabel != null) _connectingCard(),
+                if (_error != null) _errorCard(_error!),
                 if (_devices.isNotEmpty) ...[
                   const Text(
                     'YOUR DEVICES',
@@ -577,10 +770,12 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                   const SizedBox(height: 24),
                   TextField(
                     controller: _pairingController,
+                    focusNode: _pairingFocus,
                     keyboardType: TextInputType.number,
                     decoration: const InputDecoration(
                       labelText: 'Pairing code (first connection)',
-                      helperText: 'On your PC: bun run host:pair',
+                      helperText:
+                          'Shown by NexusLink on your PC when you pair a phone',
                     ),
                   ),
                   const SizedBox(height: 16),

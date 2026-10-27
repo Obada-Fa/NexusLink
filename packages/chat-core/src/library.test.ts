@@ -77,7 +77,14 @@ describe('chat library index',()=>{
     const ids=first.events.map(event=>event.id);
     store.indexHistory('chat','two',raw);
     expect(store.historyPage('chat',{}).events.map(event=>event.id)).toEqual(ids);
+    // A transcript that only grew keeps every cursor valid; the new tail is readable forward.
     store.indexHistory('chat','three',[...raw,{kind:'text',ts:300,text:'new'}]);
+    expect(store.historyPage('chat',{olderCursor:first.olderCursor!}).restart).toBeUndefined();
+    const forward=store.historyPage('chat',{newerCursor:first.newerCursor!});
+    expect(forward.events.map(event=>event.text)).toEqual(['new']);
+    expect(store.historyPage('chat',{newerCursor:forward.newerCursor!}).events).toHaveLength(0);
+    // A rewritten transcript restarts readers.
+    store.indexHistory('chat','four',[{kind:'user',ts:1,text:'different start'},...raw]);
     expect(store.historyPage('chat',{olderCursor:first.olderCursor!}).restart).toBe(true);
   });
   test('durable operations never claim twice and recover uncertain dispatch after restart',()=>{
@@ -134,9 +141,11 @@ test('concurrent duplicate sends dispatch once and refuse busy/interrupted chats
 
 test('monitor pagination keeps older work first and applies state filters before paging',()=>{
   const store=storage();
-  store.upsert([...Array.from({length:75},(_,i)=>row(`recent-${i}`,100+i)),
-    {...row('running',1),execution:'working'}, {...row('waiting',2),execution:'needsReply'},
-    {...row('failed',3),taskState:'failed'}]);
+  // Recent timestamps: needs-you older than STALE_ATTENTION_MS is cleared as stale.
+  const base=Date.now()-100_000;
+  store.upsert([...Array.from({length:75},(_,i)=>row(`recent-${i}`,base+100+i)),
+    {...row('running',base+1),execution:'working'}, {...row('waiting',base+2),execution:'needsReply'},
+    {...row('failed',base+3),taskState:'failed'}]);
   const first=store.page({sort:'monitor',limit:3});
   expect(first.items.map(row=>row.id)).toEqual(['failed','waiting','running']);
   expect(store.page({sort:'monitor',monitorFilter:'running',limit:1}).items.map(row=>row.id)).toEqual(['running']);

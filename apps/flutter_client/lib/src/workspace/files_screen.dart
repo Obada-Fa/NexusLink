@@ -3,11 +3,156 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
 import '../screens/terminal_screen.dart';
+import '../theme/nexus_theme.dart';
 import 'editor_screen.dart';
 import 'platform_bridge.dart';
 import 'project.dart';
+
+const _imageExtensions = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'};
+const _binaryExtensions = {
+  'pdf',
+  'zip',
+  'gz',
+  'tgz',
+  'bz2',
+  'xz',
+  '7z',
+  'rar',
+  'tar',
+  'jar',
+  'apk',
+  'aab',
+  'exe',
+  'dll',
+  'so',
+  'dylib',
+  'bin',
+  'o',
+  'a',
+  'class',
+  'pyc',
+  'wasm',
+  'mp3',
+  'wav',
+  'flac',
+  'ogg',
+  'm4a',
+  'aac',
+  'mp4',
+  'mkv',
+  'mov',
+  'avi',
+  'webm',
+  'ico',
+  'tif',
+  'tiff',
+  'psd',
+  'heic',
+  'ttf',
+  'otf',
+  'woff',
+  'woff2',
+  'doc',
+  'docx',
+  'xls',
+  'xlsx',
+  'ppt',
+  'pptx',
+  'odt',
+  'ods',
+  'sqlite',
+  'db',
+  'iso',
+  'img',
+  'dmg',
+  'deb',
+  'rpm',
+  'msi',
+  'blend',
+  'pdb',
+};
+
+/// Files above this size are offered as downloads rather than opened as text.
+const _maxEditorBytes = 4 * 1024 * 1024;
+const _maxPreviewBytes = 25 * 1024 * 1024;
+
+String _extension(String name) {
+  final dot = name.lastIndexOf('.');
+  return dot <= 0 ? '' : name.substring(dot + 1).toLowerCase();
+}
+
+enum FileOpenKind { text, image, binary }
+
+/// How a tap on a PC file should open it on the phone.
+FileOpenKind fileOpenKind(String name, num? size) {
+  final ext = _extension(name);
+  if (_imageExtensions.contains(ext)) {
+    return (size ?? 0) > _maxPreviewBytes
+        ? FileOpenKind.binary
+        : FileOpenKind.image;
+  }
+  if (_binaryExtensions.contains(ext)) return FileOpenKind.binary;
+  if ((size ?? 0) > _maxEditorBytes) return FileOpenKind.binary;
+  return FileOpenKind.text;
+}
+
+/// "532 B", "12.4 KB", "3.1 MB", "2.0 GB".
+String formatFileSize(num? bytes) {
+  if (bytes == null || bytes < 0) return '';
+  if (bytes < 1024) return '${bytes.toInt()} B';
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  var value = bytes / 1024;
+  var unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return '${value < 10 ? value.toStringAsFixed(1) : value.round()} ${units[unit]}';
+}
+
+const _months = [
+  'Jan',
+  'Feb',
+  'Mar',
+  'Apr',
+  'May',
+  'Jun',
+  'Jul',
+  'Aug',
+  'Sep',
+  'Oct',
+  'Nov',
+  'Dec',
+];
+
+/// "Today 14:05", "Yesterday 09:12", "Oct 3", "Oct 3, 2024".
+String formatFileDate(Object? value, {DateTime? now}) {
+  final parsed = value is num
+      ? DateTime.fromMillisecondsSinceEpoch(value.toInt())
+      : value is String
+      ? DateTime.tryParse(value)
+      : null;
+  if (parsed == null) return '';
+  final local = parsed.toLocal();
+  final current = now ?? DateTime.now();
+  final today = DateTime(current.year, current.month, current.day);
+  final day = DateTime(local.year, local.month, local.day);
+  final time =
+      '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}';
+  if (day == today) return 'Today $time';
+  if (day == today.subtract(const Duration(days: 1))) return 'Yesterday $time';
+  final date = '${_months[local.month - 1]} ${local.day}';
+  return local.year == current.year ? date : '$date, ${local.year}';
+}
+
+String _parentOf(String path) {
+  final index = path.lastIndexOf('/');
+  if (index <= 0) return '/';
+  return path.substring(0, index);
+}
 
 class WorkspaceFilesScreen extends ConsumerStatefulWidget {
   final String? initialPath;
@@ -118,10 +263,136 @@ class _WorkspaceFilesScreenState extends ConsumerState<WorkspaceFilesScreen> {
 
   void _toast(Object value) {
     if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('$value')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            value is String
+                ? value
+                : friendlyLaunchError(value).replaceFirst('Exception: ', ''),
+          ),
+        ),
+      );
     }
+  }
+
+  /// The PC lists the methods it implements; actions it lacks stay hidden.
+  bool _hostHas(String method) =>
+      (ref.read(activeClientProvider)?.capabilities['methods'] as List?)
+          ?.contains(method) ==
+      true;
+
+  Future<void> _open(Map<String, dynamic> file) async {
+    final path = file['path'] as String;
+    final name = file['name'] as String;
+    switch (fileOpenKind(name, file['size'] as num?)) {
+      case FileOpenKind.text:
+        await openEditor(context, path);
+      case FileOpenKind.image:
+        await Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => FileImagePreview(path: path, name: name),
+          ),
+        );
+      case FileOpenKind.binary:
+        await _openChoice(file);
+    }
+  }
+
+  /// Files that are not text: download instead of dumping bytes in the editor.
+  Future<void> _openChoice(Map<String, dynamic> file) async {
+    final name = file['name'] as String;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text(name, maxLines: 2, overflow: TextOverflow.ellipsis),
+              subtitle: Text(
+                [
+                  formatFileSize(file['size'] as num?),
+                  formatFileDate(file['modifiedAt']),
+                ].where((part) => part.isNotEmpty).join(' · '),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.download),
+              title: const Text('Download to phone'),
+              subtitle: const Text('Saved in Downloads/NexusLink'),
+              onTap: () => Navigator.pop(ctx, 'download'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.save_alt),
+              title: const Text('Save as…'),
+              onTap: () => Navigator.pop(ctx, 'saveAs'),
+            ),
+            if (((file['size'] as num?) ?? 0) <= _maxEditorBytes)
+              ListTile(
+                leading: const Icon(Icons.notes),
+                title: const Text('Open as text anyway'),
+                onTap: () => Navigator.pop(ctx, 'text'),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (action == null || !mounted) return;
+    if (action == 'text') {
+      await openEditor(context, file['path'] as String);
+    } else {
+      await _action(action, file);
+    }
+  }
+
+  Future<void> _delete(Map<String, dynamic> file) async {
+    final dir = file['isDirectory'] == true;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete ${file['name']}?'),
+        content: Text(
+          dir
+              ? 'This folder and everything in it is deleted from the PC.'
+              : 'This file is deleted from the PC.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Keep'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: NX.failed),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await ref.read(activeClientProvider)!.request('fs.delete', {
+      'path': file['path'],
+    });
+    _toast('Deleted ${file['name']}');
+    if (_path != null) await _load(_path!);
+  }
+
+  Future<void> _move(Map<String, dynamic> file) async {
+    final path = file['path'] as String;
+    final name = file['name'] as String;
+    final target = await _input('Move or rename', initial: path);
+    if (target == null) return;
+    var to = target.trim();
+    if (to.isEmpty || to == path) return;
+    // A trailing slash means "into this folder, keep the name".
+    if (to.endsWith('/')) to = '$to$name';
+    if (!to.startsWith('/')) to = '${_parentOf(path)}/$to';
+    await ref.read(activeClientProvider)!.request('fs.move', {
+      'from': path,
+      'to': to,
+    });
+    _toast('Moved to $to');
+    if (_path != null) await _load(_path!);
   }
 
   Future<void> _download(Map<String, dynamic> file) async {
@@ -168,6 +439,12 @@ class _WorkspaceFilesScreenState extends ConsumerState<WorkspaceFilesScreen> {
         case 'agent':
           ref.read(projectProvider.notifier).select(directory);
           ref.read(workspaceTabProvider.notifier).select(0);
+          break;
+        case 'delete':
+          await _delete(file);
+          break;
+        case 'move':
+          await _move(file);
           break;
         case 'rename':
           final name = await _input(
@@ -433,25 +710,36 @@ class _WorkspaceFilesScreenState extends ConsumerState<WorkspaceFilesScreen> {
                 }
                 final f = _entries[index];
                 final dir = f['isDirectory'] == true;
+                final kind = dir
+                    ? null
+                    : fileOpenKind(f['name'] as String, f['size'] as num?);
+                final modified = formatFileDate(f['modifiedAt']);
                 return ListTile(
                   leading: Icon(
-                    dir ? Icons.folder_outlined : Icons.description_outlined,
+                    dir
+                        ? Icons.folder_outlined
+                        : kind == FileOpenKind.image
+                        ? Icons.image_outlined
+                        : kind == FileOpenKind.binary
+                        ? Icons.insert_drive_file_outlined
+                        : Icons.description_outlined,
                   ),
                   title: Text(f['name'] as String),
                   subtitle: Text(
                     f['error'] != null
                         ? 'Unavailable: ${f['error']}'
                         : dir
-                        ? 'Folder'
-                        : '${f['size']} bytes · ${f['modifiedAt']}',
+                        ? (modified.isEmpty ? 'Folder' : 'Folder · $modified')
+                        : [
+                            formatFileSize(f['size'] as num?),
+                            modified,
+                          ].where((part) => part.isNotEmpty).join(' · '),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
                   onTap: f['error'] != null
                       ? null
-                      : () => dir
-                            ? _load(f['path'] as String)
-                            : openEditor(context, f['path'] as String),
+                      : () => dir ? _load(f['path'] as String) : _open(f),
                   trailing: PopupMenuButton<String>(
                     onSelected: (a) => _action(a, f),
                     itemBuilder: (_) => [
@@ -482,6 +770,19 @@ class _WorkspaceFilesScreenState extends ConsumerState<WorkspaceFilesScreen> {
                           value: 'rename',
                           child: Text('Rename'),
                         ),
+                      if (_hostHas('fs.move'))
+                        const PopupMenuItem(
+                          value: 'move',
+                          child: Text('Move or rename…'),
+                        ),
+                      if (_hostHas('fs.delete'))
+                        const PopupMenuItem(
+                          value: 'delete',
+                          child: Text(
+                            'Delete',
+                            style: TextStyle(color: NX.failed),
+                          ),
+                        ),
                     ],
                   ),
                 );
@@ -509,6 +810,27 @@ Future<String?> saveDownloadAs(WidgetRef ref, String path, String name) async {
       as String?;
 }
 
+/// A short-lived, authorized HTTP URL for one PC file (the same path the
+/// Android downloader uses). Send the token as `Authorization: Bearer`.
+Future<({String url, String token})> authorizedFileUrl(
+  WidgetRef ref,
+  String path,
+) async {
+  final client = ref.read(activeClientProvider);
+  final httpBase = ref.read(connectionProvider).httpBase;
+  if (client == null || httpBase == null) {
+    throw Exception('Connect to your PC first.');
+  }
+  final auth = await client.requestMap('transfer.authorize', {'path': path});
+  final url = Uri.parse(httpBase)
+      .replace(
+        path: '/files',
+        queryParameters: {'path': auth['path'] as String},
+      )
+      .toString();
+  return (url: url, token: auth['token'] as String);
+}
+
 Future<Map<String, dynamic>> _downloadArguments(
   WidgetRef ref,
   String path,
@@ -516,20 +838,126 @@ Future<Map<String, dynamic>> _downloadArguments(
 ) async {
   final client = ref.read(activeClientProvider);
   if (client == null) throw Exception('Connect to your PC first.');
-  final auth = await client.requestMap('transfer.authorize', {'path': path});
-  final base = Uri.parse(ref.read(connectionProvider).httpBase!);
+  final file = await authorizedFileUrl(ref, path);
   return {
     'host': client.hostId ?? client.wsUrl,
     'path': path,
     'name': name,
-    'url': base
-        .replace(
-          path: '/files',
-          queryParameters: {'path': auth['path'] as String},
-        )
-        .toString(),
-    'token': auth['token'],
+    'url': file.url,
+    'token': file.token,
   };
+}
+
+/// Full-screen, zoomable preview of an image on the PC.
+class FileImagePreview extends ConsumerStatefulWidget {
+  const FileImagePreview({super.key, required this.path, required this.name});
+  final String path;
+  final String name;
+  @override
+  ConsumerState<FileImagePreview> createState() => _FileImagePreviewState();
+}
+
+class _FileImagePreviewState extends ConsumerState<FileImagePreview> {
+  late Future<({String url, String token})> _file = authorizedFileUrl(
+    ref,
+    widget.path,
+  );
+
+  Future<void> _save(bool saveAs) async {
+    try {
+      if (saveAs) {
+        final saved = await saveDownloadAs(ref, widget.path, widget.name);
+        if (saved == null) return;
+      } else {
+        await enqueueDownload(ref, widget.path, widget.name);
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              saveAs
+                  ? 'Saved to the selected location'
+                  : 'Downloading to Downloads/NexusLink',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(friendlyLaunchError(e))));
+      }
+    }
+  }
+
+  Widget _failed(Object error) => Center(
+    child: Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.broken_image_outlined, size: 40, color: NX.textDim),
+          const SizedBox(height: 12),
+          const Text(
+            'Couldn’t load this image from the PC.',
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton(
+            onPressed: () =>
+                setState(() => _file = authorizedFileUrl(ref, widget.path)),
+            child: const Text('Try again'),
+          ),
+        ],
+      ),
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.name, overflow: TextOverflow.ellipsis),
+        actions: [
+          IconButton(
+            tooltip: 'Download to phone',
+            onPressed: () => _save(false),
+            icon: const Icon(Icons.download),
+          ),
+          IconButton(
+            tooltip: 'Save as…',
+            onPressed: () => _save(true),
+            icon: const Icon(Icons.save_alt),
+          ),
+        ],
+      ),
+      body: FutureBuilder<({String url, String token})>(
+        future: _file,
+        builder: (context, snapshot) {
+          if (snapshot.hasError) return _failed(snapshot.error!);
+          final file = snapshot.data;
+          if (file == null) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          return InteractiveViewer(
+            maxScale: 8,
+            child: Center(
+              child: Image.network(
+                file.url,
+                headers: {'Authorization': 'Bearer ${file.token}'},
+                fit: BoxFit.contain,
+                loadingBuilder: (context, child, progress) => progress == null
+                    ? child
+                    : const Center(child: CircularProgressIndicator()),
+                errorBuilder: (context, error, _) => _failed(error),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
 }
 
 class TransfersScreen extends ConsumerStatefulWidget {
@@ -612,6 +1040,23 @@ class _TransfersScreenState extends ConsumerState<TransfersScreen>
     super.dispose();
   }
 
+  String _transferLabel(Map<String, dynamic> row) {
+    final total = row['total'] as num?;
+    final bytes = row['bytes'] as num?;
+    return switch (row['status']) {
+      'completed' => 'Downloaded · ${formatFileSize(total ?? bytes)}',
+      'running' =>
+        total != null && total > 0
+            ? 'Downloading · ${formatFileSize(bytes)} of ${formatFileSize(total)}'
+            : 'Downloading…',
+      'pending' => 'Waiting to start…',
+      'paused' => 'Paused · waiting for the network',
+      'failed' => 'Failed (error ${row['reason']}) · tap ⋮ to retry',
+      'canceled' => 'Canceled',
+      _ => 'No longer available',
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
     ref.listen(workspaceTabProvider, (_, _) {
@@ -632,6 +1077,36 @@ class _TransfersScreenState extends ConsumerState<TransfersScreen>
       ),
       body: _error != null
           ? Center(child: Text(_error!))
+          : _rows.isEmpty
+          ? const Center(
+              child: Padding(
+                padding: EdgeInsets.all(32),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.download_outlined,
+                      size: 44,
+                      color: NX.textFaint,
+                    ),
+                    SizedBox(height: 12),
+                    Text(
+                      'No downloads yet',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    SizedBox(height: 6),
+                    Text(
+                      'Files you download from your PC appear here.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: NX.textDim),
+                    ),
+                  ],
+                ),
+              ),
+            )
           : ListView(
               children: [
                 for (final row in _rows)
@@ -640,9 +1115,7 @@ class _TransfersScreenState extends ConsumerState<TransfersScreen>
                     subtitle: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          '${row['status']}${row['status'] == 'failed' ? ' · Error ${row['reason']}' : ''}',
-                        ),
+                        Text(_transferLabel(row)),
                         if (row['status'] == 'running')
                           LinearProgressIndicator(
                             value: (row['total'] as num? ?? 0) > 0

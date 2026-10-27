@@ -1,8 +1,15 @@
+// Fallback PC status for hosts without `monitor.v1`: CPU and memory history
+// from the older perf-update push, drawn with the design-system charts.
+
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
+import '../theme/nexus_theme.dart';
+import '../theme/nx_widgets.dart';
 import '../workspace/metrics.dart';
 
 final _historyProvider = Provider<List<Map<String, dynamic>>>((ref) {
@@ -50,107 +57,105 @@ class _PcChartsState extends ConsumerState<PcCharts> {
         DateTime.now().millisecondsSinceEpoch -
                 (data['timestamp'] as num? ?? 0) <
             15000;
+    List<double> series(String key) => history
+        .where((s) => s[key] is num)
+        .map((s) => (s[key] as num).toDouble())
+        .toList();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('PC status', style: Theme.of(context).textTheme.titleLarge),
+        Row(
+          children: [
+            LiveDot(
+              color: fresh ? NX.working : (connected ? NX.waiting : NX.idle),
+              pulse: fresh,
+            ),
+            const SizedBox(width: 6),
+            Text('PC status', style: Theme.of(context).textTheme.titleLarge),
+          ],
+        ),
         Text(
           !connected
               ? 'PC offline · Last received readings'
               : fresh
               ? 'Live · Recent samples'
               : 'Waiting for live readings…',
+          style: const TextStyle(color: NX.textDim),
         ),
-        const SizedBox(height: 8),
-        for (final metric in [
-          ('CPU', 'cpuPercent', Colors.lightBlueAccent),
-          ('Memory', 'ramPercent', Colors.tealAccent),
+        const SizedBox(height: 10),
+        for (final (label, key, color) in const [
+          ('CPU', 'cpuPercent', NX.accent),
+          ('Memory', 'ramPercent', NX.accent2),
         ])
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: NxCard(
               child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(metric.$1),
+                      Expanded(
+                        child: Text(
+                          label,
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                      ),
                       Text(
-                        data?[metric.$2] is num
-                            ? '${(data![metric.$2] as num).toStringAsFixed(0)}%'
+                        data?[key] is num
+                            ? '${(data![key] as num).toStringAsFixed(0)}%'
                             : '—',
+                        style: TextStyle(
+                          color: data?[key] is num
+                              ? NX.heat((data![key] as num).toDouble())
+                              : NX.textDim,
+                          fontWeight: FontWeight.w800,
+                          fontFeatures: NX.tabular,
+                        ),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    height: 80,
-                    width: double.infinity,
-                    child: CustomPaint(
-                      painter: _ChartPainter(
-                        history
-                            .where((s) => s[metric.$2] is num)
-                            .map((s) => (s[metric.$2] as num).toDouble())
-                            .toList(),
-                        fresh ? metric.$3 : Colors.grey,
-                      ),
-                    ),
+                  const SizedBox(height: 12),
+                  Sparkline(
+                    values: series(key),
+                    color: fresh ? color : NX.idle,
+                    max: 100,
+                    height: 64,
                   ),
-                  if (metric.$2 == 'ramPercent' && data?['ramUsedGb'] is num)
-                    Text(
-                      '${(data!['ramUsedGb'] as num).toStringAsFixed(1)} GB used',
+                  if (key == 'ramPercent' && data?['ramUsedGb'] is num)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        '${(data!['ramUsedGb'] as num).toStringAsFixed(1)} GB used',
+                        style: const TextStyle(color: NX.textDim),
+                      ),
                     ),
                 ],
               ),
             ),
           ),
         if (data?['diskFreeBytes'] is num)
-          ListTile(
-            leading: const Icon(Icons.storage),
-            title: const Text('Disk available'),
-            trailing: Text(
-              '${((data!['diskFreeBytes'] as num) / 1073741824).toStringAsFixed(1)} GB',
+          NxCard(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.storage, color: NX.textDim),
+              title: const Text('Disk available'),
+              trailing: Text(
+                '${((data!['diskFreeBytes'] as num) / 1073741824).toStringAsFixed(1)} GB',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontFeatures: NX.tabular,
+                ),
+              ),
             ),
           ),
+        const SizedBox(height: 8),
+        const Text(
+          'Update NexusLink on the PC to see GPU, temperatures, agent apps and RustDesk health here.',
+          style: TextStyle(color: NX.textFaint, fontSize: 12),
+        ),
       ],
     );
   }
-}
-
-class _ChartPainter extends CustomPainter {
-  _ChartPainter(this.samples, this.color);
-  final List<double> samples;
-  final Color color;
-  @override
-  void paint(Canvas canvas, Size size) {
-    final grid = Paint()
-      ..color = Colors.grey.withValues(alpha: 0.2)
-      ..strokeWidth = 1;
-    for (var i = 0; i <= 4; i++) {
-      final y = size.height * i / 4;
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), grid);
-    }
-    if (samples.isEmpty) return;
-    final line = Paint()
-      ..color = color
-      ..strokeWidth = 2
-      ..style = PaintingStyle.stroke;
-    final path = Path();
-    for (var i = 0; i < samples.length; i++) {
-      final x = size.width * i / 59;
-      final y = size.height * (1 - samples[i].clamp(0, 100) / 100);
-      if (i == 0) {
-        path.moveTo(x, y);
-      } else {
-        path.lineTo(x, y);
-      }
-      if (i == samples.length - 1) {
-        canvas.drawCircle(Offset(x, y), 3, Paint()..color = color);
-      }
-    }
-    canvas.drawPath(path, line);
-  }
-
-  @override
-  bool shouldRepaint(_ChartPainter oldDelegate) => true;
 }

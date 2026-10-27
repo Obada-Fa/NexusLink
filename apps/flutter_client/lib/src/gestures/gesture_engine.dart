@@ -21,6 +21,7 @@ import 'scroll_physics.dart';
 export 'classifier.dart';
 export 'scale_to_host.dart';
 export 'scroll_physics.dart';
+export 'view_zoom.dart';
 
 class GestureEngine {
   GestureEngine({

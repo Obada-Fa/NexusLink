@@ -6,6 +6,9 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.*
 import android.provider.Settings
 import android.net.Uri
@@ -32,6 +35,8 @@ class LiveActivityService:Service() {
         var running=false;var visible=false;var instance:LiveActivityService?=null
         var connectionState="stopped";var bubbleVisible=false;var bubbleHiddenReason="Monitoring stopped"
         var lastError:String?=null
+        /** Set by the app before a user stop that should also clear task alerts. */
+        @Volatile var clearAlertsOnStop=false
     }
     private val handler=Handler(Looper.getMainLooper())
     private val http=OkHttpClient.Builder().pingInterval(20,java.util.concurrent.TimeUnit.SECONDS).build()
@@ -59,6 +64,16 @@ class LiveActivityService:Service() {
     private var guiSyncedAt=0L
     private val guiSessions=mutableMapOf<String,JSONObject>()
     private val guiSettling=mutableMapOf<String,Pair<String,Long>>()
+    private var networkCallback:ConnectivityManager.NetworkCallback?=null
+    /** Backoff reconnect; named so a returning network can run it early. */
+    private val retry=Runnable{connect()}
+    /** Renews the session token on the same socket before it expires. */
+    private val refreshAuth=Runnable{
+        if(stopped || !online)return@Runnable
+        val credential=Credentials.get(this,host)
+        if(credential==null){pairingRevoked();return@Runnable}
+        request("refresh","session.resume",JSONObject().put("credential",credential).put("role","monitor"))
+    }
     private val pollGui=object:Runnable {
         override fun run(){
             if(stopped || !online || !guiMonitor)return
@@ -92,16 +107,60 @@ class LiveActivityService:Service() {
         }
         val filter=IntentFilter().apply{addAction(Intent.ACTION_SCREEN_OFF);addAction(Intent.ACTION_USER_PRESENT);addAction(Intent.ACTION_CONFIGURATION_CHANGED)}
         if(Build.VERSION.SDK_INT>=33)registerReceiver(screenReceiver,filter,Context.RECEIVER_NOT_EXPORTED) else registerReceiver(screenReceiver,filter)
+        // When the network comes back, reconnect now instead of waiting out the backoff.
+        if(Build.VERSION.SDK_INT>=24){
+            val callback=object:ConnectivityManager.NetworkCallback(){
+                override fun onAvailable(network:Network){handler.post{
+                    if(!stopped && !online && connectionState=="reconnecting" && host.isNotEmpty()){
+                        attempts=0;handler.removeCallbacks(retry);connect()
+                    }
+                }}
+            }
+            try{(getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).registerDefaultNetworkCallback(callback);networkCallback=callback}
+            catch(e:Exception){lastError="Network change updates are unavailable: ${e.message}"}
+        }
     }
     override fun onStartCommand(intent:Intent?,flags:Int,startId:Int):Int {
-        if(intent?.action=="stop"){stopSelf();return START_NOT_STICKY}
+        if(intent?.action=="stop"){userStop();return START_NOT_STICKY}
         host=intent?.getStringExtra("host")?:prefs.getString("host","").orEmpty()
+        // A null intent is Android restarting a sticky service it had to kill:
+        // only resume if the user still wants monitoring.
+        if(intent==null && (!prefs.getBoolean("requested",false) || host.isEmpty())){stopSelf();return START_NOT_STICKY}
         bubbleEnabled=if(intent?.hasExtra("bubble")==true) intent.getBooleanExtra("bubble",false) else prefs.getBoolean("bubble",false)
-        prefs.edit().putString("host",host).putBoolean("bubble",bubbleEnabled).apply()
-        prefs.edit().putBoolean("requested",true).apply()
-        running=true;stopped=false;connectionState="connecting";startForeground(9000,notification())
-        connect();updateOverlay();return START_NOT_STICKY
+        prefs.edit().putString("host",host).putBoolean("bubble",bubbleEnabled).putBoolean("requested",true).apply()
+        running=true;stopped=false;connectionState="connecting"
+        if(!enterForeground()){stopSelf();return START_NOT_STICKY}
+        connect();updateOverlay();return START_STICKY
     }
+    /** Android 12+ may refuse a background (re)start; never crash on it. */
+    private fun enterForeground():Boolean = try {
+        if(Build.VERSION.SDK_INT>=29)startForeground(9000,notification(),ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+        else startForeground(9000,notification())
+        true
+    } catch(e:Exception){
+        lastError="Android did not allow monitoring to start in the background. Open NexusLink to resume it."
+        false
+    }
+    /** The user turned monitoring off: do not restart it after boot or a crash. */
+    private fun userStop(){prefs.edit().putBoolean("requested",false).apply();stopSelf()}
+    private fun pairingRevoked(){
+        lastError="This phone is no longer paired with your PC."
+        prefs.edit().putBoolean("requested",false).apply()
+        try{
+            manager.notify("pairing",9004,builder("task_attention").setSmallIcon(android.R.drawable.stat_notify_error)
+                .setContentTitle("NexusLink monitoring stopped")
+                .setContentText("This phone is no longer paired with your PC. Open NexusLink to pair again.")
+                .setContentIntent(openTask()).setAutoCancel(true).build())
+        }catch(e:Exception){}
+        stopSelf()
+    }
+    private fun scheduleAuthRefresh(expires:Long){
+        handler.removeCallbacks(refreshAuth)
+        val lead=if(expires>0)expires-System.currentTimeMillis()-5*60*1000L else 50*60*1000L
+        handler.postDelayed(refreshAuth,lead.coerceAtLeast(30000L))
+    }
+    /** Drop this socket and reconnect with backoff (fresh authentication). */
+    private fun reconnect(){val gen=generation;socket?.cancel();lost(gen)}
     private fun openTask(id:String?=null):PendingIntent {
         val intent=Intent(this,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP).putExtra("taskId",id).putExtra("host",host)
         return PendingIntent.getActivity(this,id?.hashCode()?:0,intent,PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -179,8 +238,9 @@ class LiveActivityService:Service() {
     }
     private fun connect(){
         if(stopped||host.isEmpty())return
-        val credential=Credentials.get(this,host)?:run{stopSelf();return}
-        handler.removeCallbacks(pollGui);guiMonitor=false;guiSettling.clear();guiSessions.clear()
+        val credential=Credentials.get(this,host)?:run{pairingRevoked();return}
+        handler.removeCallbacks(pollGui);handler.removeCallbacks(refreshAuth);handler.removeCallbacks(retry)
+        guiMonitor=false;guiSettling.clear();guiSessions.clear()
         val gen=++generation;online=false;connectionState="connecting";socket?.cancel()
         socket=http.newWebSocket(Request.Builder().url(host).build(),object:WebSocketListener(){
             override fun onOpen(ws:WebSocket,response:Response){handler.post{if(gen==generation)request("auth","session.resume",JSONObject().put("credential",credential).put("role","monitor"))}}
@@ -193,8 +253,9 @@ class LiveActivityService:Service() {
     private fun lost(gen:Int){
         if(stopped||gen!=generation)return
         generation++;online=false;connectionState="reconnecting";manager.notify(9000,notification());updateOverlay()
+        handler.removeCallbacks(refreshAuth)
         val delay=(1000L shl attempts.coerceAtMost(5)).coerceAtMost(30000L);attempts++
-        handler.postDelayed({connect()},delay)
+        handler.removeCallbacks(retry);handler.postDelayed(retry,delay)
     }
     private fun message(msg:JSONObject){
         if(msg.optString("type")=="rpc-response"){
@@ -202,7 +263,14 @@ class LiveActivityService:Service() {
             scopedResults.remove(response.optString("id"))?.let{it(response);return}
             if(response.has("error")){
                 lastError=response.optString("error")
-                if(response.optString("code")=="UNAUTHENTICATED"){stopSelf();return}
+                val id=response.optString("id")
+                if(response.optString("code")=="UNAUTHENTICATED"){
+                    // Refused credential: pairing was removed on the PC. Any other
+                    // request: only the session token lapsed, so re-authenticate.
+                    if(id=="auth" || id=="refresh")pairingRevoked() else reconnect()
+                    return
+                }
+                if(id=="refresh"){reconnect();return}
                 if(response.optString("id")=="capabilities" || response.optString("id")=="snapshotV2"){
                     activityV2=false;synchronizing=false
                     request("sub","session.subscribe",JSONObject().put("topics",JSONArray().put("agents")))
@@ -212,7 +280,14 @@ class LiveActivityService:Service() {
             }
             when(response.optString("id")){
                 "guiMonitor"->applyGuiMonitor(response.getJSONObject("result"))
-                "auth"->{online=true;connectionState="connected";lastError=null;attempts=0;hostId=response.getJSONObject("result").optString("hostId",host);request("capabilities","session.getCapabilities");val gen=generation;handler.postDelayed({if(gen==generation)connect()},45*60*1000L)}
+                "auth"->{
+                    online=true;connectionState="connected";lastError=null;attempts=0
+                    val result=response.getJSONObject("result")
+                    hostId=result.optString("hostId",host)
+                    request("capabilities","session.getCapabilities")
+                    scheduleAuthRefresh(result.optLong("expires",0L))
+                }
+                "refresh"->scheduleAuthRefresh(response.optJSONObject("result")?.optLong("expires",0L)?:0L)
                 "capabilities"->{
                     val features=response.optJSONObject("result")?.optJSONArray("features")?:JSONArray()
                     guiMonitor=(0 until features.length()).any{features.optString(it)=="activity.monitor.v1"}
@@ -633,7 +708,7 @@ class LiveActivityService:Service() {
                 button("Close"){close()}
             }
             button("Hide pet"){bubbleEnabled=false;prefs.edit().putBoolean("bubble",false).apply();removeOverlay()}
-            button("Stop live activity"){stopSelf()}
+            button("Stop live activity"){userStop()}
         }else{
             val heading=label("Agent monitor").apply{textSize=21f;typeface=Typeface.DEFAULT_BOLD}
             list.addView(heading)
@@ -730,10 +805,17 @@ class LiveActivityService:Service() {
     private fun removeOverlay(){panelRefresh=null;overlay?.let{try{windows.removeView(it)}catch(e:Exception){}};overlay=null;bubbleVisible=false;panel?.let{try{windows.removeView(it)}catch(e:Exception){}};panel=null}
     override fun onDestroy(){
         stopped=true;running=false;connectionState="stopped";generation++;socket?.cancel()
-        prefs.edit().putBoolean("requested",false).apply()
-        WorkManager.getInstance(this).cancelAllWorkByTag("live-action")
-        for((tag,id) in activityStore.tags())if(hostId.isNotEmpty() && tag.contains(":$hostId:"))manager.cancel(tag,id)
-        for(task in sessions.keys)for(kind in listOf("result","error","permission-request"))manager.cancel((task+kind).hashCode())
+        // Android stopping the service (memory, sticky restart) keeps "requested",
+        // so it comes back; only an explicit user stop clears it.
+        if(!prefs.getBoolean("requested",false))WorkManager.getInstance(this).cancelAllWorkByTag("live-action")
+        // Task alerts already posted stay useful after monitoring stops.
+        if(clearAlertsOnStop){
+            clearAlertsOnStop=false
+            for((tag,id) in activityStore.tags())if(hostId.isNotEmpty() && tag.contains(":$hostId:"))manager.cancel(tag,id)
+            for(task in sessions.keys)for(kind in listOf("result","error","permission-request"))manager.cancel((task+kind).hashCode())
+        }
+        networkCallback?.let{try{(getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager).unregisterNetworkCallback(it)}catch(e:Exception){}}
+        networkCallback=null
         handler.removeCallbacksAndMessages(null);removeOverlay();activityStore.close();unregisterReceiver(screenReceiver);instance=null;super.onDestroy()
     }
 }

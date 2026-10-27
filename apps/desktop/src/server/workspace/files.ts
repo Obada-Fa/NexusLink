@@ -1,8 +1,8 @@
-import { promises as fs } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { promises as fs, constants as fsConstants, type Stats } from 'node:fs';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
-import { createHash } from 'node:crypto';
-import { WorkspaceError } from './security';
+import { createHash, randomBytes } from 'node:crypto';
+import { WorkspaceError, dataDirectory } from './security';
 export const EDIT_BYTES = 1024 * 1024;
 export function hostPath(raw: string): string {
   if (!raw || raw.includes('\0')) throw new WorkspaceError('INVALID_ARGUMENT', 'A file path is required.');
@@ -75,7 +75,7 @@ export async function writeText(raw: string, content: string, expectedRevision: 
       let current: string | null = null;
       try { const st = await fs.lstat(path); if (st.isSymbolicLink() || st.nlink > 1) throw new WorkspaceError('REVISION_CONFLICT', 'File identity changed.'); current = revision(await fs.readFile(path)); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
       if (current !== expectedRevision) throw new WorkspaceError('REVISION_CONFLICT', 'The file changed while saving.');
-      if (expectedRevision === null) { await fs.link(tmp, path); await fs.unlink(tmp); }
+      if (expectedRevision === null) await publishNoClobber(tmp, path);
       else await fs.rename(tmp, path);
       invalidateDirectory(path);
       return await readText(path);
@@ -113,19 +113,205 @@ export async function listPage(raw: string, options: { cursor?: string; limit?: 
   return { path, entries: output.slice(start, start + limit), nextCursor: start + limit < output.length ? String(start + limit) : null, total: output.length };
 }
 export async function renameFile(from: string, to: string) {
+  // No-clobber, works for folders, link-free filesystems (FAT/exFAT) and across mounts.
+  return moveEntry(from, to);
+}
+
+/** Link-free filesystems (FAT/exFAT, some FUSE/SMB mounts) report one of these for link(2). */
+const LINK_UNSUPPORTED = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV', 'EMLINK']);
+
+/**
+ * Move a finished temp file to `path` without ever replacing a file that
+ * already exists there. Uses link+unlink where hard links work; otherwise
+ * reserves the name with O_EXCL and renames over that empty placeholder; if
+ * even rename is impossible (EXDEV), copies with COPYFILE_EXCL.
+ */
+export async function publishNoClobber(
+  tmp: string,
+  path: string,
+  ops: { link?: typeof fs.link; rename?: typeof fs.rename; onExdev?: 'copy' | 'throw' } = {},
+): Promise<void> {
+  const link = ops.link ?? fs.link;
+  const rename = ops.rename ?? fs.rename;
+  try {
+    await link(tmp, path);
+    await fs.unlink(tmp);
+    return;
+  } catch (e: any) {
+    if (e?.code === 'EEXIST') throw new WorkspaceError('EXISTS', 'File exists');
+    if (e?.code === 'EXDEV' && ops.onExdev === 'throw') throw e;
+    if (!LINK_UNSUPPORTED.has(e?.code)) throw e;
+  }
+  let placeholder: Stats;
+  try {
+    const handle = await fs.open(path, 'wx', 0o600);
+    try { placeholder = await handle.stat(); } finally { await handle.close(); }
+  } catch (e: any) {
+    if (e?.code === 'EEXIST') throw new WorkspaceError('EXISTS', 'File exists');
+    throw e;
+  }
+  try {
+    await rename(tmp, path);
+  } catch (e: any) {
+    // Remove only our own still-empty placeholder, never someone else's file.
+    try { const cur = await fs.lstat(path); if (cur.ino === placeholder.ino && cur.size === 0) await fs.unlink(path); } catch { /* gone */ }
+    if (e?.code !== 'EXDEV' || ops.onExdev === 'throw') throw e;
+    await fs.copyFile(tmp, path, fsConstants.COPYFILE_EXCL);
+    await fs.unlink(tmp);
+  }
+}
+
+/**
+ * Paths the phone may never delete or move: /, top-level system folders,
+ * $HOME and its ancestors, and NexusLink's own data directory (+ ancestors).
+ */
+export function assertMutablePath(path: string, action: 'delete' | 'move'): void {
+  const p = resolve(path);
+  const home = resolve(homedir());
+  const data = resolve(dataDirectory());
+  const isSameOrAncestor = (protectedPath: string) => protectedPath === p || protectedPath.startsWith(p.endsWith(sep) ? p : p + sep);
+  const depth = p.split(sep).filter(Boolean).length;
+  if (depth < 2 || isSameOrAncestor(home) || isSameOrAncestor(data)) {
+    throw new WorkspaceError('PERMISSION_DENIED', `Refusing to ${action} ${p}: it is a protected folder.`);
+  }
+}
+
+const tmpSibling = (target: string, tag: string) => join(dirname(target), `.${basename(target).slice(0, 48)}.${tag}-${randomBytes(6).toString('hex')}`);
+
+/** Lock several paths in a stable order (no deadlock between opposite moves). */
+async function withFileLocks<T>(paths: string[], action: () => Promise<T>): Promise<T> {
+  const [first, ...rest] = [...new Set(paths)].sort();
+  if (!first) return action();
+  return withFileLock(first, () => withFileLocks(rest, action));
+}
+
+/** Rename a directory without replacing anything: claim the name with mkdir, then rename onto the empty placeholder. */
+async function renameDirNoClobber(source: string, target: string): Promise<void> {
+  try { await fs.mkdir(target); } catch (e: any) {
+    if (e?.code === 'EEXIST') throw new WorkspaceError('EXISTS', 'A file or folder with that name already exists.');
+    throw e;
+  }
+  try { await fs.rename(source, target); } catch (e) {
+    await fs.rmdir(target).catch(() => {});
+    throw e;
+  }
+}
+
+/**
+ * Move/rename a file, symlink or folder. Never overwrites the destination,
+ * refuses protected paths and moving a folder into itself, and works across
+ * filesystems (copy, verify, then remove the source).
+ */
+export async function moveEntry(from: string, to: string): Promise<{ path: string }> {
   const source = hostPath(from), target = hostPath(to);
   if (source === target) return { path: target };
-  // File-only rename uses link/unlink for no-clobber semantics on Linux.
-  const info = await fs.lstat(source);
-  if (!info.isFile() || info.isSymbolicLink()) throw new WorkspaceError('UNSUPPORTED', 'Rename currently supports regular files only.');
-  await fs.link(source, target); await fs.unlink(source); invalidateDirectory(source); invalidateDirectory(target); return { path: target };
+  assertMutablePath(source, 'move');
+  if (target.startsWith(source + sep)) throw new WorkspaceError('INVALID_ARGUMENT', 'Cannot move a folder into itself.');
+  return withFileLocks([source, target], async () => {
+    const info = await fs.lstat(source);
+    try { await fs.lstat(target); throw new WorkspaceError('EXISTS', 'A file or folder with that name already exists.'); }
+    catch (e: any) { if (e?.code !== 'ENOENT') throw e; }
+    const targetDev = (await fs.stat(dirname(target))).dev;
+    try {
+      if (targetDev !== info.dev) throw Object.assign(new Error('cross-device move'), { code: 'EXDEV' });
+      if (info.isDirectory()) await renameDirNoClobber(source, target);
+      else await publishNoClobber(source, target, { onExdev: 'throw' });
+    } catch (e: any) {
+      // Bind mounts share st_dev but still refuse rename(2) with EXDEV.
+      if (e?.code !== 'EXDEV') throw e;
+      await copyAcrossFilesystems(source, target, info);
+    }
+    invalidateDirectory(source); invalidateDirectory(target);
+    return { path: target };
+  });
 }
+
+async function copyAcrossFilesystems(source: string, target: string, info: Stats): Promise<void> {
+  const staging = tmpSibling(target, 'nlmove');
+  try {
+    if (info.isDirectory()) {
+      await fs.cp(source, staging, { recursive: true, errorOnExist: true, force: false, preserveTimestamps: true, verbatimSymlinks: true });
+      await renameDirNoClobber(staging, target);
+    } else if (info.isSymbolicLink()) {
+      await fs.symlink(await fs.readlink(source), staging);
+      await publishNoClobber(staging, target);
+    } else {
+      await fs.copyFile(source, staging, fsConstants.COPYFILE_EXCL);
+      await fs.chmod(staging, info.mode & 0o7777).catch(() => {});
+      await fs.utimes(staging, info.atime, info.mtime).catch(() => {});
+      await publishNoClobber(staging, target);
+    }
+  } catch (e) {
+    await fs.rm(staging, { recursive: true, force: true }).catch(() => {});
+    throw e;
+  }
+  // The copy is complete and published; only now remove the original.
+  await fs.rm(source, { recursive: true, force: false });
+}
+
+type TrashRunner = (path: string) => Promise<boolean>;
+const TRASH_TIMEOUT_MS = 15_000;
+
+/** `gio trash` (freedesktop Trash, restorable from the file manager). False when unavailable/failed. */
+const gioTrash: TrashRunner = async (path) => {
+  if (!Bun.which('gio')) return false;
+  try {
+    const proc = Bun.spawn(['gio', 'trash', '--', path], { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' });
+    const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* gone */ } }, TRASH_TIMEOUT_MS);
+    try { return (await proc.exited) === 0; } finally { clearTimeout(timer); }
+  } catch { return false; }
+};
+let trashRunner: TrashRunner = gioTrash;
+
+/** Test hook: replace the trash implementation (null restores gio). */
+export function setTrashRunnerForTests(fn: TrashRunner | null): void { trashRunner = fn ?? gioTrash; }
+
+/**
+ * Delete a file, symlink or folder from the phone. Prefers the desktop Trash
+ * (recoverable). Without a usable Trash only files/symlinks and empty folders
+ * are removed; a non-empty folder is never rm -rf'd. Folders with contents
+ * need `recursive: true` even when trashing.
+ */
+export async function deleteEntry(raw: string, opts: { recursive?: boolean } = {}): Promise<{ ok: true; path: string; trashed: boolean }> {
+  const path = hostPath(raw);
+  assertMutablePath(path, 'delete');
+  return withFileLock(path, async () => {
+    const info = await fs.lstat(path);
+    const isDir = info.isDirectory();
+    if (isDir && !opts.recursive && (await fs.readdir(path)).length > 0) {
+      throw new WorkspaceError('INVALID_ARGUMENT', 'Folder is not empty; confirm deleting it with its contents.');
+    }
+    let trashed = await trashRunner(path);
+    if (trashed) {
+      // gio can exit 0 without moving anything on odd mounts; verify.
+      try { await fs.lstat(path); trashed = false; } catch (e: any) { if (e?.code !== 'ENOENT') throw e; }
+    }
+    if (!trashed) {
+      if (!isDir) await fs.unlink(path);
+      else {
+        try { await fs.rmdir(path); } catch (e: any) {
+          if (e?.code === 'ENOTEMPTY' || e?.code === 'EEXIST') throw new WorkspaceError('UNSUPPORTED', 'This folder cannot be moved to the Trash here; delete it on the PC.');
+          throw e;
+        }
+      }
+    }
+    invalidateDirectory(path);
+    return { ok: true as const, path, trashed };
+  });
+}
+
+const GIT_TIMEOUT_MS = 15_000;
+/** Read-only git: never take index.lock (would break the user's own git commands) or prompt. */
+const gitEnv = () => ({ ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' });
 export async function gitChanges(raw: string) {
   const cwd = hostPath(raw);
-  const proc = Bun.spawn(['git', '-C', cwd, 'status', '--porcelain=v1', '-z', '--untracked-files=normal'], { stdout: 'pipe', stderr: 'pipe' });
-  const [text, error, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+  const proc = Bun.spawn(['git', '-C', cwd, 'status', '--porcelain=v1', '-z', '--untracked-files=normal'], { stdout: 'pipe', stderr: 'pipe', env: gitEnv() });
+  const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* gone */ } }, GIT_TIMEOUT_MS);
+  let text: string, error: string, code: number;
+  try { [text, error, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]); }
+  finally { clearTimeout(timer); }
   if (code !== 0) throw new WorkspaceError('INVALID_ARGUMENT', error.trim() || 'Not a Git repository.');
-  const root = Bun.spawn(['git','-C',cwd,'rev-parse','--show-toplevel'], { stdout:'pipe', stderr:'ignore' });
+  const root = Bun.spawn(['git','-C',cwd,'rev-parse','--show-toplevel'], { stdout:'pipe', stderr:'ignore', env: gitEnv() });
   const repository = (await new Response(root.stdout).text()).trim(); await root.exited;
   const parts = text.split('\0'); const files: any[] = [];
   for (let i=0; i<parts.length; i++) { const row = parts[i]; if (!row) continue; const status=row.slice(0,2), path=row.slice(3); const from = /[RC]/.test(status) ? parts[++i] : undefined; files.push({ path, absolutePath: join(repository,path), status, from, staged: status[0] !== ' ' && status[0] !== '?', unstaged: status[1] !== ' ', untracked: status === '??' }); }
@@ -133,12 +319,14 @@ export async function gitChanges(raw: string) {
 }
 export async function gitDiff(raw: string, path: string, staged: boolean) {
   const cwd = hostPath(raw);
-  const proc = Bun.spawn(['git','-C',cwd,'diff','--no-ext-diff','--no-textconv',...(staged ? ['--cached'] : []),'--',path], { stdout:'pipe', stderr:'pipe' });
+  const proc = Bun.spawn(['git','-C',cwd,'diff','--no-ext-diff','--no-textconv',...(staged ? ['--cached'] : []),'--',path], { stdout:'pipe', stderr:'pipe', env: gitEnv() });
+  const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* gone */ } }, GIT_TIMEOUT_MS);
   let text=''; let truncated=false;
   const decoder=new TextDecoder();
   const errors = new Response(proc.stderr).text();
   for await (const chunk of proc.stdout) { if (text.length < EDIT_BYTES) text += decoder.decode(chunk, { stream:true }); else { truncated=true; proc.kill(); break; } }
   const code = await proc.exited;
+  clearTimeout(timer);
   if (code !== 0 && !truncated) throw new WorkspaceError('INVALID_ARGUMENT', (await errors).slice(0,1000));
   return { text: text.slice(0,EDIT_BYTES), truncated, binary: text.startsWith('Binary files ') || text.includes('\nBinary files ') };
 }

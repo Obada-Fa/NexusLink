@@ -61,6 +61,10 @@ import {
   resolveAgentIcon,
   resolveBin,
   spawnArgv,
+  findHostChatProcesses,
+  isHostChatBusy,
+  killHostChatProcesses,
+  agentSessionLive,
 } from '../agents';
 
 const sessionCwd = existsSync('/tmp') ? '/tmp' : tmpdir();
@@ -428,6 +432,10 @@ describe('composer flags and attachments', () => {
     expect(claudeSonnet).toContain('high');
     expect(claudeSpawnArgs({ bin: 'claude', resumeId: 'provider-session' })).toContain('--resume');
     expect(claudeSpawnArgs({ bin: 'claude', resumeId: 'provider-session' })).toContain('provider-session');
+    // Without a prompt tool, --print silently denies anything that would ask (e.g. Bash).
+    const permissionTool = claudeOpus.indexOf('--permission-prompt-tool');
+    expect(permissionTool).toBeGreaterThan(0);
+    expect(claudeOpus[permissionTool + 1]).toBe('stdio');
 
     const codex = buildCodexArgv({ bin: 'codex', cwd: '/work', text: 'continue', threadId: 'thread-id', model: 'gpt-5.3-codex', thinking: 'high' });
     expect(codex).toContain('resume');
@@ -1067,5 +1075,94 @@ describe('permission resolution honesty', () => {
 
     closeAgentSession(info.agentSessionId);
     setAgentBroadcast(null);
+  });
+});
+
+describe('Claude permission prompts over stdio', () => {
+  test('can_use_tool reaches the phone and the answer goes back in the SDK control format', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'nexuslink-fake-claude-'));
+    const argsFile = join(dir, 'args.json');
+    // A stand-in `claude` that asks to run a destructive command and reports the reply it receives.
+    writeFileSync(join(dir, 'claude'), `#!${process.execPath}
+const fs = require('node:fs');
+fs.writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));
+const out = (m) => process.stdout.write(JSON.stringify(m) + '\\n');
+let buffer = '';
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  let nl;
+  while ((nl = buffer.indexOf('\\n')) >= 0) {
+    const line = buffer.slice(0, nl); buffer = buffer.slice(nl + 1);
+    const msg = JSON.parse(line);
+    if (msg.type === 'user') {
+      out({ type: 'system', subtype: 'init', session_id: 'fake-session' });
+      out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'rm -rf build' } }] } });
+      out({ type: 'control_request', request_id: 'req-1', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'rm -rf build' }, tool_use_id: 'tu1' } });
+    } else if (msg.type === 'control_response') {
+      out({ type: 'assistant', message: { content: [{ type: 'text', text: 'REPLY ' + JSON.stringify(msg) }] } });
+      out({ type: 'result', subtype: 'success', result: 'done' });
+    }
+  }
+});
+`, { mode: 0o755 });
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${dir}${delimiter}${previousPath}`;
+    const previousMode = getAgentApprovalMode('claude');
+    setAgentApprovalMode('claude', 'ask');
+    const pushed: AgentEvent[] = [];
+    setAgentBroadcast((m: WsMessage) => { if (m.type === 'agent-event') pushed.push(m.event as AgentEvent); });
+    const info = createAgentSession('claude', sessionCwd, 'stdio approval test');
+    try {
+      expect(promptAgent(info.agentSessionId, 'clean the build').ok).toBe(true);
+      const deadline = Date.now() + 10000;
+      while (!pushed.some((e) => e.kind === 'permission-request') && Date.now() < deadline) await Bun.sleep(25);
+      const request = pushed.find((e) => e.kind === 'permission-request')!;
+      expect(request.refId).toBe('req-1');
+      expect(request.toolName).toBe('Bash');
+      expect(agentSessionLive(info.agentSessionId)).toMatchObject({ state: 'waiting', step: 'Running: rm -rf build', via: 'nexuslink' });
+      expect(resolveAgentPermission(info.agentSessionId, 'req-1', true).ok).toBe(true);
+      while (!pushed.some((e) => e.kind === 'result') && Date.now() < deadline) await Bun.sleep(25);
+      const reply = pushed.find((e) => e.kind === 'text' && e.text?.startsWith('REPLY '))!;
+      expect(JSON.parse(reply.text!.slice(6))).toEqual({
+        type: 'control_response',
+        response: { subtype: 'success', request_id: 'req-1', response: { behavior: 'allow', updatedInput: { command: 'rm -rf build' } } },
+      });
+      const args = JSON.parse(require('node:fs').readFileSync(argsFile, 'utf8')) as string[];
+      expect(args[args.indexOf('--permission-prompt-tool') + 1]).toBe('stdio');
+    } finally {
+      closeAgentSession(info.agentSessionId);
+      setAgentBroadcast(() => {});
+      setAgentApprovalMode('claude', previousMode);
+      process.env.PATH = previousPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15000);
+});
+
+describe('process ownership and responsiveness', () => {
+  test.skipIf(process.platform !== 'linux')('a chat id in some other process is neither busy nor signalled', async () => {
+    const id = `nexuslink-foreign-${Date.now()}`;
+    // Detached from this process tree, like Claude Desktop's idle `claude --resume=<id>`.
+    Bun.spawnSync(['bash', '-c', `(exec -a ${id} sleep 20 &)`]);
+    await Bun.sleep(100);
+    const foreign = require('node:fs').readdirSync('/proc').filter((p: string) => /^\d+$/.test(p)).find((p: string) => {
+      try { return require('node:fs').readFileSync(`/proc/${p}/cmdline`, 'utf8').split('\0')[0] === id; } catch { return false; }
+    });
+    expect(foreign).toBeDefined();
+    try {
+      expect(findHostChatProcesses('claude', id)).toEqual([]);
+      expect(isHostChatBusy('claude', id)).toBe(false);
+      expect(killHostChatProcesses('claude', id)).toBe(false);
+      expect(existsSync(`/proc/${foreign}`)).toBe(true);
+    } finally {
+      try { process.kill(Number(foreign), 'SIGTERM'); } catch { /* exited */ }
+    }
+  });
+
+  test('agent.list answers from cache without running agent CLIs', () => {
+    const start = performance.now();
+    for (let i = 0; i < 5; i++) listAgents();
+    expect(listAgentModels('cursor', true).length).toBeGreaterThan(0);
+    expect(performance.now() - start).toBeLessThan(250);
   });
 });

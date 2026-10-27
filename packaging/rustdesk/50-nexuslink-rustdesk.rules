@@ -1,0 +1,12 @@
+// Lets the desktop user (and so the NexusLink host) restart RustDesk without a
+// password prompt. Scope: rustdesk.service start/stop/restart only.
+polkit.addRule(function(action, subject) {
+  if (action.id == "org.freedesktop.systemd1.manage-units" &&
+      action.lookup("unit") == "rustdesk.service" &&
+      subject.user == "@USER@") {
+    var verb = action.lookup("verb");
+    if (verb == "restart" || verb == "start" || verb == "stop" || verb == "try-restart") {
+      return polkit.Result.YES;
+    }
+  }
+});

@@ -37,6 +37,50 @@ class SavedDevice {
   };
 }
 
+/// Why the app did (or did not) reconnect on its own at launch.
+enum AutoConnectReason {
+  connect,
+  noSavedPc,
+  lastPcNotSaved,
+  notPaired,
+  userDisconnected,
+  alreadyTried,
+}
+
+/// Cold-start decision: reconnect to the last PC this phone successfully used,
+/// but only when it is still a saved device with a stored pairing, the user
+/// has not disconnected in this run, and we have not already tried once.
+Future<({SavedDevice? device, AutoConnectReason reason})> decideAutoConnect({
+  required List<SavedDevice> devices,
+  required String? lastHostUrl,
+  required bool userDisconnected,
+  required bool alreadyAttempted,
+  required Future<bool> Function(String url) hasCredential,
+}) async {
+  if (alreadyAttempted) {
+    return (device: null, reason: AutoConnectReason.alreadyTried);
+  }
+  if (userDisconnected) {
+    return (device: null, reason: AutoConnectReason.userDisconnected);
+  }
+  final last = lastHostUrl == null ? '' : normalizeHostWsUrl(lastHostUrl);
+  if (last.isEmpty || devices.isEmpty) {
+    return (device: null, reason: AutoConnectReason.noSavedPc);
+  }
+  final device = devices.where((d) => d.url == last).firstOrNull;
+  if (device == null) {
+    return (device: null, reason: AutoConnectReason.lastPcNotSaved);
+  }
+  bool paired;
+  try {
+    paired = await hasCredential(device.url);
+  } catch (_) {
+    paired = false;
+  }
+  if (!paired) return (device: null, reason: AutoConnectReason.notPaired);
+  return (device: device, reason: AutoConnectReason.connect);
+}
+
 class SavedDevices {
   static Future<List<SavedDevice>> load() async {
     final prefs = await SharedPreferences.getInstance();

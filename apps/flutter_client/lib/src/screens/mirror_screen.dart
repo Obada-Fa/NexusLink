@@ -3,6 +3,7 @@
 // manipulation touch via the ported GestureEngine (lib/src/gestures/).
 
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -39,6 +40,10 @@ class MirrorTarget {
   /// Whether this target is a web browser (built-in or desktop-adopted).
   final bool isBrowser;
 
+  /// Start without forwarding touches to the PC (pinch/drag only zoom and
+  /// pan the picture). The chrome bar can switch control on.
+  final bool viewOnly;
+
   const MirrorTarget({
     this.windowId,
     this.appId,
@@ -47,9 +52,22 @@ class MirrorTarget {
     this.sessionAppId,
     this.sessionId,
     this.isBrowser = false,
+    this.viewOnly = false,
   });
 
+  /// The whole PC desktop (primary monitor), as `MirrorTarget()` requests.
+  const MirrorTarget.desktop({this.viewOnly = false})
+    : windowId = null,
+      appId = null,
+      wmClass = null,
+      title = 'Desktop',
+      sessionAppId = null,
+      sessionId = null,
+      isBrowser = false;
+
   bool get isVirtual => sessionAppId != null || sessionId != null;
+
+  bool get isDesktop => !isVirtual && windowId == null && appId == null;
 }
 
 enum MirrorPhase { launching, adopting, streaming, error }
@@ -78,9 +96,28 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   double _lastDecodeMs = 0;
   bool _keyboardOpen = false;
   bool _mouseMode = false;
+
+  /// Full desktop only: touches pan/zoom the picture but never reach the PC.
+  late bool _viewOnly = widget.target.viewOnly;
+
+  /// Full desktop only: user asked for landscape to see the 16:9 desktop larger.
+  bool _landscape = false;
   bool _chromeVisible = true;
-  Offset _canvasPan = Offset.zero;
-  double _canvasScale = 1;
+
+  /// Local pinch-zoom/pan of the picture (all modes; never reaches the PC).
+  final _zoom = ViewZoom();
+
+  /// Bumps when [_zoom] changes so only the transformed picture rebuilds.
+  final _viewTick = ValueNotifier<int>(0);
+
+  /// Mouse mode pointer, owned by the phone (region-local host px).
+  final _cursor = VirtualCursor();
+  bool _cursorPlaced = false;
+
+  /// Last PC pointer position reported by input.cursorHint (region-local).
+  Offset? _hintCursor;
+  double _lastTwoFingerTapMs = -1;
+  bool _sharpRequested = false;
   Offset? _cursorHost;
   Size _viewSize = Size.zero;
   int? _queuedDragX;
@@ -144,6 +181,9 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           x < r.x + r.width &&
           y >= r.y &&
           y < r.y + r.height;
+      if (inside) {
+        _hintCursor = Offset(x.toDouble() - r.x, y.toDouble() - r.y);
+      }
       if (_cursorKeyboard.observe(
         active: hint['textCursor'] == true && inside,
         focus: hint['focus'] as String?,
@@ -201,6 +241,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     );
     _clock.start();
     _engine = GestureEngine(onGesture: _onGesture);
+    _engine.setMode(_gestureMode);
     _ticker = createTicker((_) {
       // Drive long-press evaluation + inertia on a shared clock. Keep ticking
       // while streaming so a pending long-press fires even without new frames.
@@ -265,7 +306,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           if (windowId != null) break;
         }
         if (windowId == null) {
-          throw 'The app started but no window appeared. Go back and tap it under "Open on your PC".';
+          throw 'The app started but its window hasn’t appeared yet. Go back and open it from Running windows on the PC tab.';
         }
       }
       if (!mounted) return;
@@ -478,7 +519,13 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   void _syncDecodeWidth() {
     if (!mounted) return;
     final dpr = MediaQuery.maybeOf(context)?.devicePixelRatio ?? 1;
-    final w = _viewSize.width * dpr;
+    // Decode at the zoomed size (capped at the source) so zooming in shows
+    // real detail instead of an upscaled phone-width frame.
+    var w = _viewSize.width * dpr * _zoom.scale;
+    final src = _region?.width;
+    if (src != null && src > 0) {
+      w = math.min(w, math.max(src.toDouble(), _viewSize.width * dpr));
+    }
     if (w >= 32) _sink?.targetWidth = w.round();
   }
 
@@ -619,7 +666,9 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     leftover?.dispose();
     _decoded.dispose();
     _pointerView.dispose();
+    _viewTick.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    if (_landscape) SystemChrome.setPreferredOrientations(const []);
     for (final u in _unsubs) {
       u();
     }
@@ -634,8 +683,9 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     if (client != null) {
       if (id != null) client.notify('screen.stopCapture', {'streamId': id});
       if (win != null) client.notify('window.release', {'windowId': win});
-      if (webrtcId != null)
+      if (webrtcId != null) {
         client.notify('webrtc.stop', {'webrtcId': webrtcId});
+      }
     }
     // Home keeps the virtual session alive (like backgrounding a phone app).
     unawaited(_pc?.close() ?? Future.value());
@@ -657,6 +707,28 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   void _onGesture(GestureEvent e) {
     final client = _client;
     if (client == null) return;
+    // Local-only gestures: zooming/panning the picture never reaches the PC.
+    switch (e) {
+      case ViewTransformEvent():
+        _applyViewStep(e);
+        return;
+      case TwoFingerTapEvent():
+        final now = _nowMs;
+        if (_lastTwoFingerTapMs >= 0 && now - _lastTwoFingerTapMs < 400) {
+          _lastTwoFingerTapMs = -1;
+          _resetZoom();
+        } else {
+          _lastTwoFingerTapMs = now;
+        }
+        return;
+      default:
+        break;
+    }
+    if (_viewOnly) return;
+    if (_mouseMode) {
+      _onMouseGesture(e, client);
+      return;
+    }
     final ox = _region?.x ?? 0;
     final oy = _region?.y ?? 0;
     int hx(double x) => (x + ox).round();
@@ -672,20 +744,15 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           _sid({'button': 'left', 'x': hx(e.x), 'y': hy(e.y)}),
         );
       case DoubleTapEvent():
+        // The first tap already clicked; one more click within the OS
+        // double-click time makes the double click (two here was a triple).
         _cursorTapped();
         _cursorHost = Offset(e.x, e.y);
         _syncPointerFromHost();
-        final x = hx(e.x), y = hy(e.y);
         client.notify(
           'input.mouseClick',
-          _sid({'button': 'left', 'x': x, 'y': y}),
+          _sid({'button': 'left', 'x': hx(e.x), 'y': hy(e.y)}),
         );
-        Future.delayed(const Duration(milliseconds: 50), () {
-          client.notify(
-            'input.mouseClick',
-            _sid({'button': 'left', 'x': x, 'y': y}),
-          );
-        });
       case ContextEvent():
         HapticFeedback.mediumImpact();
         _cursorHost = Offset(e.x, e.y);
@@ -705,8 +772,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           _sid({
             'deltaX': e.deltaX,
             'deltaY': e.deltaY,
-            if (!_mouseMode) 'x': hx(e.x),
-            if (!_mouseMode) 'y': hy(e.y),
+            'x': hx(e.x),
+            'y': hy(e.y),
           }),
         );
       case MouseMoveEvent():
@@ -729,32 +796,184 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           'input.buttonUp',
           _sid({'button': 'left', 'x': hx(e.x), 'y': hy(e.y)}),
         );
-      case ZoomEvent():
-        if (_mouseMode) {
-          setState(() {
-            _canvasScale = (_canvasScale * (1 + e.scale)).clamp(1.0, 4.0);
-          });
-          _syncCanvasTransform();
-        } else {
-          client.notify(
-            'input.mouseScroll',
-            _sid({
-              'deltaX': 0,
-              'deltaY': (-e.scale * 160).round(),
-              'x': hx(e.x),
-              'y': hy(e.y),
-              'modifiers': ['ctrl'],
-            }),
-          );
-        }
-      case CanvasPanEvent():
-        setState(() => _canvasPan += Offset(e.dx, e.dy));
-        _syncCanvasTransform();
+      case PointerDeltaEvent() || ViewTransformEvent() || TwoFingerTapEvent():
+        break;
     }
   }
 
+  /// Mouse mode: every click lands where the phone-drawn pointer is, not
+  /// where the finger is.
+  void _onMouseGesture(GestureEvent e, RpcClient client) {
+    _ensureCursorPlaced();
+    final at = _sid({
+      'x': (_cursor.x + (_region?.x ?? 0)).round(),
+      'y': (_cursor.y + (_region?.y ?? 0)).round(),
+    });
+    void click(String button) {
+      _flushQueuedDrag();
+      client.notify('input.mouseClick', {...at, 'button': button});
+    }
+
+    switch (e) {
+      case PointerDeltaEvent():
+        _moveCursor(e);
+      case TapEvent() || DoubleTapEvent():
+        _cursorTapped();
+        click('left');
+      case ContextEvent():
+        HapticFeedback.mediumImpact();
+        click('right');
+      case MiddleClickEvent():
+        click('middle');
+      case ScrollEvent():
+        _flushQueuedDrag();
+        client.notify(
+          'input.mouseScroll',
+          _sid({'deltaX': e.deltaX, 'deltaY': e.deltaY}),
+        );
+      case DragStartEvent():
+        HapticFeedback.selectionClick();
+        _flushQueuedDrag();
+        client.notify('input.buttonDown', {...at, 'button': 'left'});
+      case DragEndEvent():
+        _flushQueuedDrag();
+        client.notify('input.buttonUp', {...at, 'button': 'left'});
+      case MouseMoveEvent() ||
+          DragMoveEvent() ||
+          ViewTransformEvent() ||
+          TwoFingerTapEvent():
+        break;
+    }
+  }
+
+  GestureMode get _gestureMode => _viewOnly
+      ? GestureMode.view
+      : _mouseMode
+      ? GestureMode.mouse
+      : GestureMode.direct;
+
+  ContentRect get _contentRect {
+    final r = _region;
+    return fittedContentRect(
+      _viewSize.width,
+      _viewSize.height,
+      (r?.width ?? 1).toDouble(),
+      (r?.height ?? 1).toDouble(),
+      _scaleFit,
+    );
+  }
+
+  /// Region-local host px → where it is drawn on screen right now.
+  Offset _hostToScreen(double x, double y) {
+    final r = _region;
+    if (r == null || _viewSize == Size.zero) return Offset.zero;
+    final m = hostToView(
+      x,
+      y,
+      _viewSize.width,
+      _viewSize.height,
+      r.width.toDouble(),
+      r.height.toDouble(),
+      _scaleFit,
+    );
+    final v = _zoom.toView(m.x, m.y);
+    return Offset(v.x, v.y);
+  }
+
+  void _ensureCursorPlaced() {
+    final r = _region;
+    if (_cursorPlaced || r == null) return;
+    final start =
+        _hintCursor ?? _cursorHost ?? Offset(r.width / 2, r.height / 2);
+    _cursor.placeAt(start.dx, start.dy);
+    _cursorHost = start;
+    _cursorPlaced = true;
+  }
+
+  void _moveCursor(PointerDeltaEvent e) {
+    final r = _region;
+    if (r == null || _viewSize == Size.zero) return;
+    final rect = _contentRect;
+    final hostPerView = r.width / math.max(1.0, rect.w * _zoom.scale);
+    _cursor.moveBy(
+      e.dx,
+      e.dy,
+      e.timestampMs,
+      hostPerView,
+      r.width.toDouble(),
+      r.height.toDouble(),
+    );
+    _cursorHost = Offset(_cursor.x, _cursor.y);
+    // While zoomed, the picture follows the pointer near the screen edges.
+    final v = _hostToScreen(_cursor.x, _cursor.y);
+    final px = _zoom.panX, py = _zoom.panY;
+    _zoom.follow(v.dx, v.dy, 56, rect, _viewSize.width, _viewSize.height);
+    if (px != _zoom.panX || py != _zoom.panY) _viewChanged();
+    _pointerView.value = _hostToScreen(_cursor.x, _cursor.y);
+    // Absolute moves: the PC pointer can never drift from the drawn one.
+    // Sent once per frame by the ticker (latest wins).
+    _queuedDragX = (_cursor.x + r.x).round();
+    _queuedDragY = (_cursor.y + r.y).round();
+  }
+
+  void _applyViewStep(ViewTransformEvent e) {
+    if (_viewSize == Size.zero) return;
+    final before = _zoom.scale;
+    _zoom.applyStep(
+      ratio: e.scale,
+      focalX: e.focalX,
+      focalY: e.focalY,
+      dx: e.dx,
+      dy: e.dy,
+      rect: _contentRect,
+      viewW: _viewSize.width,
+      viewH: _viewSize.height,
+    );
+    _viewChanged(scaleChanged: (before - _zoom.scale).abs() > 1e-4);
+  }
+
+  void _resetZoom() {
+    if (!_zoom.zoomed) return;
+    _zoom.reset();
+    _viewChanged(scaleChanged: true);
+  }
+
+  void _viewChanged({bool scaleChanged = false}) {
+    final wasZoomed = _zoomBadgeShown;
+    _zoomBadgeShown = _zoom.zoomed;
+    _viewTick.value++;
+    _syncCanvasTransform();
+    _syncPointerFromHost();
+    if (scaleChanged) {
+      _syncDecodeWidth();
+      _maybeRequestSharp();
+    }
+    if (wasZoomed != _zoomBadgeShown) setState(() {});
+  }
+
+  bool _zoomBadgeShown = false;
+
+  /// Zoomed in: ask the PC for native-resolution frames so text stays sharp.
+  /// The PC's own QoS may still step down again on a congested link.
+  void _maybeRequestSharp() {
+    if (_zoom.scale <= 1.3) {
+      _sharpRequested = false;
+      return;
+    }
+    final client = _captureClient;
+    final id = _streamId;
+    if (_sharpRequested ||
+        client == null ||
+        id == null ||
+        !client.supports('screen.quality.v1')) {
+      return;
+    }
+    _sharpRequested = true;
+    client.notify('screen.setQuality', {'streamId': id, 'quality': 'full'});
+  }
+
   void _syncCanvasTransform() {
-    _engine.setCanvasTransform(_canvasPan.dx, _canvasPan.dy, _canvasScale);
+    _engine.setCanvasTransform(_zoom.panX, _zoom.panY, _zoom.scale);
   }
 
   void _flushQueuedDrag() {
@@ -771,22 +990,14 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       .toList();
 
   void _syncPointerFromHost() {
-    final region = _region;
     final cursor = _cursorHost;
-    if (region == null || cursor == null || _viewSize == Size.zero) return;
-    final mapped = hostToView(
-      cursor.dx,
-      cursor.dy,
-      _viewSize.width,
-      _viewSize.height,
-      region.width.toDouble(),
-      region.height.toDouble(),
-      _scaleFit,
-    );
-    _pointerView.value = Offset(
-      mapped.x * _canvasScale + _canvasPan.dx,
-      mapped.y * _canvasScale + _canvasPan.dy,
-    );
+    if (_viewOnly ||
+        _region == null ||
+        cursor == null ||
+        _viewSize == Size.zero) {
+      return;
+    }
+    _pointerView.value = _hostToScreen(cursor.dx, cursor.dy);
   }
 
   void _showChrome() {
@@ -806,14 +1017,16 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
 
   void _onPointerDown(PointerDownEvent e) {
     _activePointers[e.pointer] = e.localPosition;
-    _pointerView.value = e.localPosition;
+    if (!_viewOnly && !_mouseMode) _pointerView.value = e.localPosition;
+    // Each mouse-mode stroke starts from rest (no carried-over speed).
+    if (_mouseMode && _activePointers.length == 1) _cursor.endStroke();
     if (!_chromeVisible && e.localPosition.dy < 28) _showChrome();
     _engine.onTouchStart(_touches, _nowMs);
   }
 
   void _onPointerMove(PointerMoveEvent e) {
     _activePointers[e.pointer] = e.localPosition;
-    _pointerView.value = e.localPosition;
+    if (!_viewOnly && !_mouseMode) _pointerView.value = e.localPosition;
     _engine.onTouchMove(_touches, _nowMs);
   }
 
@@ -913,17 +1126,24 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                 },
               ),
             ),
-          Positioned(
-            right: 12,
-            bottom: _keyboardOpen ? 76 : 12,
-            child: SafeArea(
-              child: IconButton.filled(
-                tooltip: 'Show or hide keyboard',
-                onPressed: _toggleKeyboard,
-                icon: const Icon(Icons.keyboard),
+          if (!_viewOnly)
+            Positioned(
+              right: 12,
+              bottom: _keyboardOpen ? 76 : 12,
+              child: SafeArea(
+                child: IconButton.filled(
+                  tooltip: 'Show or hide keyboard',
+                  onPressed: _toggleKeyboard,
+                  icon: const Icon(Icons.keyboard),
+                ),
               ),
             ),
-          ),
+          if (_zoomBadgeShown && _phase == MirrorPhase.streaming)
+            Positioned(
+              left: 12,
+              bottom: _keyboardOpen ? 76 : 12,
+              child: SafeArea(child: _zoomBadge()),
+            ),
           if (_keyboardOpen)
             Positioned(left: 0, right: 0, bottom: 0, child: _keyboardBar()),
         ],
@@ -975,26 +1195,13 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
               ),
               IconButton(
                 tooltip: _mouseMode
-                    ? 'Mouse mode: pan the picture, tap to click'
+                    ? 'Mouse mode: drag to move the pointer, tap to click'
                     : 'Touch mode: tap where you press, swipe to scroll',
                 icon: Icon(
                   _mouseMode ? Icons.mouse : Icons.touch_app,
                   color: _mouseMode ? const Color(0xFF2A6AFF) : Colors.white,
                 ),
-                onPressed: () {
-                  setState(() {
-                    _mouseMode = !_mouseMode;
-                    if (!_mouseMode) {
-                      _canvasPan = Offset.zero;
-                      _canvasScale = 1;
-                    }
-                  });
-                  _engine.setMode(
-                    _mouseMode ? GestureMode.mouse : GestureMode.direct,
-                  );
-                  _syncCanvasTransform();
-                  _scheduleHideChrome();
-                },
+                onPressed: _toggleMouseMode,
               ),
               if (_session != null)
                 IconButton(
@@ -1061,6 +1268,50 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     );
   }
 
+  void _toggleViewOnly() {
+    setState(() {
+      _viewOnly = !_viewOnly;
+      if (_viewOnly && _keyboardOpen) {
+        _kbFocus.unfocus();
+        _keyboardOpen = false;
+      }
+    });
+    _pointerView.value = null;
+    _engine.setMode(_gestureMode);
+    if (!_viewOnly && _mouseMode) {
+      _cursorPlaced = false;
+      _ensureCursorPlaced();
+      _syncPointerFromHost();
+    }
+    _scheduleHideChrome();
+  }
+
+  void _toggleMouseMode() {
+    setState(() => _mouseMode = !_mouseMode);
+    _pointerView.value = null;
+    _engine.setMode(_gestureMode);
+    if (_mouseMode) {
+      // Start from the PC's real pointer when we know it.
+      _cursorPlaced = false;
+      _ensureCursorPlaced();
+      _syncPointerFromHost();
+    }
+    _scheduleHideChrome();
+  }
+
+  void _toggleLandscape() {
+    setState(() => _landscape = !_landscape);
+    SystemChrome.setPreferredOrientations(
+      _landscape
+          ? const [
+              DeviceOrientation.landscapeLeft,
+              DeviceOrientation.landscapeRight,
+            ]
+          : const [],
+    );
+    _scheduleHideChrome();
+  }
+
   Widget _genericBar() {
     final title =
         widget.target.title ??
@@ -1079,6 +1330,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           child: Row(
             children: [
               IconButton(
+                tooltip: 'Back',
                 icon: const Icon(Icons.home_outlined, color: Colors.white),
                 onPressed: () => Navigator.of(context).maybePop(),
               ),
@@ -1125,29 +1377,38 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                   ],
                 ),
               ),
-              IconButton(
-                tooltip: _mouseMode
-                    ? 'Mouse mode: pan the picture, tap to click'
-                    : 'Touch mode: tap where you press, swipe to scroll',
-                icon: Icon(
-                  _mouseMode ? Icons.mouse : Icons.touch_app,
-                  color: _mouseMode ? const Color(0xFF2A6AFF) : Colors.white,
+              if (widget.target.isDesktop) ...[
+                IconButton(
+                  tooltip: _viewOnly
+                      ? 'View only: tap to control the PC'
+                      : 'Controlling the PC: tap for view only',
+                  icon: Icon(
+                    _viewOnly
+                        ? Icons.visibility_outlined
+                        : Icons.back_hand_outlined,
+                    color: _viewOnly ? const Color(0xFF7AA2FF) : Colors.white,
+                  ),
+                  onPressed: _toggleViewOnly,
                 ),
-                onPressed: () {
-                  setState(() {
-                    _mouseMode = !_mouseMode;
-                    if (!_mouseMode) {
-                      _canvasPan = Offset.zero;
-                      _canvasScale = 1;
-                    }
-                  });
-                  _engine.setMode(
-                    _mouseMode ? GestureMode.mouse : GestureMode.direct,
-                  );
-                  _syncCanvasTransform();
-                  _scheduleHideChrome();
-                },
-              ),
+                IconButton(
+                  tooltip: _landscape
+                      ? 'Back to portrait'
+                      : 'Rotate to landscape',
+                  icon: const Icon(Icons.screen_rotation, color: Colors.white),
+                  onPressed: _toggleLandscape,
+                ),
+              ],
+              if (!_viewOnly)
+                IconButton(
+                  tooltip: _mouseMode
+                      ? 'Mouse mode: drag to move the pointer, tap to click'
+                      : 'Touch mode: tap where you press, swipe to scroll',
+                  icon: Icon(
+                    _mouseMode ? Icons.mouse : Icons.touch_app,
+                    color: _mouseMode ? const Color(0xFF2A6AFF) : Colors.white,
+                  ),
+                  onPressed: _toggleMouseMode,
+                ),
               if (_session != null)
                 IconButton(
                   tooltip: 'Quit this app',
@@ -1166,7 +1427,13 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       case MirrorPhase.streaming:
         return LayoutBuilder(
           builder: (context, constraints) {
-            _viewSize = Size(constraints.maxWidth, constraints.maxHeight);
+            final size = Size(constraints.maxWidth, constraints.maxHeight);
+            if (size != _viewSize) {
+              _viewSize = size;
+              // Rotation / keyboard: keep the zoomed picture on screen.
+              _zoom.clamp(_contentRect, size.width, size.height);
+              _syncCanvasTransform();
+            }
             _engine.setViewSize(constraints.maxWidth, constraints.maxHeight);
             _syncDecodeWidth();
             return Listener(
@@ -1181,10 +1448,14 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    Transform(
-                      transform: Matrix4.identity()
-                        ..translate(_canvasPan.dx, _canvasPan.dy)
-                        ..scale(_canvasScale),
+                    ValueListenableBuilder<int>(
+                      valueListenable: _viewTick,
+                      builder: (context, _, child) => Transform(
+                        transform: Matrix4.identity()
+                          ..translateByDouble(_zoom.panX, _zoom.panY, 0, 1)
+                          ..scaleByDouble(_zoom.scale, _zoom.scale, 1, 1),
+                        child: child,
+                      ),
                       child: _rtcLive && _renderer != null
                           ? RTCVideoView(
                               _renderer!,
@@ -1234,12 +1505,14 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         return _centered(
           Icons.warning_amber,
           _errorMsg,
-          action: 'Back to apps',
+          action: widget.target.isDesktop ? 'Back' : 'Back to apps',
         );
       default:
         return _centered(
           null,
-          _phase == MirrorPhase.launching
+          widget.target.isDesktop
+              ? 'Connecting to your desktop…'
+              : _phase == MirrorPhase.launching
               ? 'Opening on your PC (Beta)…'
               : 'Fitting the app to your screen (Beta)…',
         );
@@ -1249,30 +1522,17 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   Widget _cursorOverlay() {
     return ValueListenableBuilder<Offset?>(
       valueListenable: _pointerView,
-      builder: (context, finger, _) {
-        var pos = finger;
-        final region = _region;
-        final cursor = _cursorHost;
-        if (pos == null &&
-            _mouseMode &&
-            region != null &&
-            cursor != null &&
-            _viewSize != Size.zero) {
-          final mapped = hostToView(
-            cursor.dx,
-            cursor.dy,
-            _viewSize.width,
-            _viewSize.height,
-            region.width.toDouble(),
-            region.height.toDouble(),
-            _scaleFit,
-          );
-          pos = Offset(
-            mapped.x * _canvasScale + _canvasPan.dx,
-            mapped.y * _canvasScale + _canvasPan.dy,
+      builder: (context, pos, _) {
+        if (pos == null || _viewOnly) return const SizedBox.shrink();
+        if (_mouseMode) {
+          // Tip of the arrow is the hot spot.
+          return IgnorePointer(
+            child: CustomPaint(
+              painter: _ArrowCursorPainter(pos),
+              child: const SizedBox.expand(),
+            ),
           );
         }
-        if (pos == null) return const SizedBox.shrink();
         return IgnorePointer(
           child: Stack(
             children: [
@@ -1293,6 +1553,35 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           ),
         );
       },
+    );
+  }
+
+  /// Shown while zoomed: current zoom, tap to fit the whole picture again.
+  Widget _zoomBadge() {
+    return ValueListenableBuilder<int>(
+      valueListenable: _viewTick,
+      builder: (context, _, _) => Material(
+        color: const Color(0xCC0A0A0F),
+        shape: const StadiumBorder(),
+        child: InkWell(
+          customBorder: const StadiumBorder(),
+          onTap: _resetZoom,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${_zoom.scale.toStringAsFixed(1)}×',
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                ),
+                const SizedBox(width: 6),
+                const Icon(Icons.fit_screen, size: 18, color: Colors.white),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -1378,4 +1667,39 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       child: Text(label),
     ),
   );
+}
+
+/// Classic arrow pointer, white with a dark outline, tip at [tip].
+class _ArrowCursorPainter extends CustomPainter {
+  _ArrowCursorPainter(this.tip);
+
+  final Offset tip;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = Path()
+      ..moveTo(0, 0)
+      ..lineTo(0, 17)
+      ..lineTo(4.2, 13.2)
+      ..lineTo(7.2, 19.6)
+      ..lineTo(10, 18.4)
+      ..lineTo(7.1, 12.1)
+      ..lineTo(12.6, 12.1)
+      ..close();
+    canvas.save();
+    canvas.translate(tip.dx, tip.dy);
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = Colors.black87
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.2
+        ..strokeJoin = StrokeJoin.round,
+    );
+    canvas.drawPath(path, Paint()..color = Colors.white);
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_ArrowCursorPainter old) => old.tip != tip;
 }

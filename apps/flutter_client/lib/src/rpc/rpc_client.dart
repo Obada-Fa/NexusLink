@@ -57,8 +57,8 @@ Map<String, dynamic> expectMap(dynamic raw, String method) {
   if (raw is Map) return Map<String, dynamic>.from(raw);
   if (raw == null) {
     throw RpcException(
-      'The PC host is out of date (no result for $method). '
-      'On the PC, stop NexusLink, update the repo, and run `bun run lan`.',
+      'NexusLink on your PC is out of date (no result for $method). '
+      'Update NexusLink on the PC and restart it, then try again.',
     );
   }
   throw RpcException('Unexpected $method result (${raw.runtimeType}).');
@@ -68,8 +68,8 @@ List<dynamic> expectList(dynamic raw, String method) {
   if (raw is List) return raw;
   if (raw == null) {
     throw RpcException(
-      'The PC host is out of date (no result for $method). '
-      'On the PC, stop NexusLink, update the repo, and run `bun run lan`.',
+      'NexusLink on your PC is out of date (no result for $method). '
+      'Update NexusLink on the PC and restart it, then try again.',
     );
   }
   throw RpcException('Unexpected $method result (${raw.runtimeType}).');
@@ -79,17 +79,24 @@ List<dynamic> expectList(dynamic raw, String method) {
 String friendlyLaunchError(Object error) {
   final raw = error is RpcException ? error.message : error.toString();
   if (raw.contains('Null') && raw.contains('Map<String')) {
-    return 'The PC host is out of date. On the PC, stop NexusLink, '
-        'update the repo, and run `bun run lan`. Then reopen this app.';
+    return 'NexusLink on your PC is out of date. Update NexusLink on the PC '
+        'and restart it, then reopen this app.';
   }
   if (raw.contains('unknown method')) {
-    return 'The PC host is out of date. Restart NexusLink on the PC with `bun run lan`.';
+    return 'NexusLink on your PC is out of date. Update and restart NexusLink on the PC.';
   }
   if (raw.contains('unknown app session')) {
     return 'The app quit before it could show a window. '
         'If it is already open on the PC, close it there and try again.';
   }
   return raw.replaceFirst(RegExp(r'^RpcException:\s*'), '');
+}
+
+/// How this phone appears in the PC's list of paired devices.
+String pairedDeviceName() {
+  if (Platform.isAndroid) return 'Android phone';
+  if (Platform.isIOS) return 'iPhone';
+  return 'NexusLink on ${Platform.operatingSystem}';
 }
 
 /// Backoff for a dropped WebSocket: 1s, 2s, 4s, 8s, then cap at 30s.
@@ -109,6 +116,17 @@ class RpcClient {
   int _generation = 0;
   Future<void>? _connecting;
   final Map<String, int> _demands = {};
+
+  /// True once the host refused this phone's pairing; automatic reconnects
+  /// stop until the user pairs again.
+  bool get authRequired => phase == 'authentication required';
+
+  /// Host subscriptions such as `chat.subscribe` live on one socket. Remember
+  /// the last requested state so a reconnect restores it.
+  bool? _chatSubscribed;
+  bool _everConnected = false;
+  String? _credential;
+  Timer? _authRefresh;
   bool supports(String feature) =>
       (capabilities['features'] as List?)?.contains(feature) == true ||
       (capabilities['methods'] as List?)?.contains(feature) == true;
@@ -201,19 +219,19 @@ class RpcClient {
           auth = expectMap(
             await _requestRaw('session.enroll', {
               'code': pairingCode,
-              'name': 'Android NexusLink',
+              'name': pairedDeviceName(),
             }),
             'session.enroll',
           );
-          await PlatformBridge.saveCredential(
-            wsUrl,
-            auth['credential'] as String,
-          );
+          _credential = auth['credential'] as String;
+          await PlatformBridge.saveCredential(wsUrl, _credential!);
           pairingCode = null;
+          credentialRevoked = false;
         } else {
           if (credential == null) {
             throw RpcException(
-              'Enter the pairing code from bun run host:pair on your PC.',
+              'This phone is not paired with that PC yet. Enter the pairing '
+                  'code shown by NexusLink on your PC.',
               'UNAUTHENTICATED',
             );
           }
@@ -226,9 +244,11 @@ class RpcClient {
             if (error.code == 'UNAUTHENTICATED') credentialRevoked = true;
             rethrow;
           }
+          _credential = credential;
         }
         token = auth['token'] as String;
         hostId = auth['hostId'] as String;
+        _scheduleAuthRefresh(auth['expires'], generation);
         phase = 'synchronizing';
         capabilities = expectMap(
           await _requestRaw('session.getCapabilities', {}),
@@ -264,6 +284,8 @@ class RpcClient {
       _setStatus(RpcStatus.connected);
       _startHeartbeat();
       await _updateDemands();
+      await _restoreSubscriptions(resync: _everConnected);
+      _everConnected = true;
     } catch (e) {
       if (generation != _generation || _closed) rethrow;
       ++_generation;
@@ -271,6 +293,7 @@ class RpcClient {
       _ws = null;
       await ws?.close();
       _stopHeartbeat();
+      _authRefresh?.cancel();
       phase = e is RpcException && e.code == 'UNAUTHENTICATED'
           ? 'authentication required'
           : 'reconnecting';
@@ -308,10 +331,76 @@ class RpcClient {
     });
   }
 
+  /// Session tokens expire (one hour on current hosts). Renew on the same
+  /// socket a few minutes early so requests and pushes never hit an expired
+  /// token, instead of waiting for the heartbeat to fail and reconnecting.
+  void _scheduleAuthRefresh(Object? expires, int generation) {
+    _authRefresh?.cancel();
+    if (expires is! num || _credential == null) return;
+    final lead = DateTime.fromMillisecondsSinceEpoch(
+      expires.toInt(),
+    ).difference(DateTime.now());
+    final delay = lead - const Duration(minutes: 5);
+    _authRefresh = Timer(
+      delay < const Duration(seconds: 30) ? const Duration(seconds: 30) : delay,
+      () => unawaited(_refreshAuth(generation)),
+    );
+  }
+
+  Future<void> _refreshAuth(int generation) async {
+    final credential = _credential;
+    if (_closed || generation != _generation || credential == null) return;
+    try {
+      final auth = expectMap(
+        await _requestRaw('session.resume', {'credential': credential}),
+        'session.resume',
+      );
+      if (generation != _generation) return;
+      token = auth['token'] as String? ?? token;
+      _scheduleAuthRefresh(auth['expires'], generation);
+    } on RpcException catch (error) {
+      if (generation != _generation) return;
+      if (error.code == 'UNAUTHENTICATED') {
+        credentialRevoked = true;
+        phase = 'authentication required';
+        ++_generation;
+        _stopHeartbeat();
+        final ws = _ws;
+        _ws = null;
+        unawaited(ws?.close());
+        _failPending('Pairing was removed on the PC');
+        _setStatus(RpcStatus.disconnected);
+        return;
+      }
+      // Transient failure: a fresh connection re-authenticates.
+      unawaited(_ws?.close());
+    } catch (_) {
+      if (generation == _generation) unawaited(_ws?.close());
+    }
+  }
+
+  Future<void> _restoreSubscriptions({required bool resync}) async {
+    if (_chatSubscribed == true) {
+      try {
+        await _requestRaw('chat.subscribe', {'enabled': true});
+      } catch (_) {}
+    }
+    // Pushes sent while the socket was down are gone; tell listeners to
+    // refetch quietly instead of rebuilding their state from scratch.
+    if (resync) {
+      _dispatch('chat-library-update', {
+        'type': 'chat-library-update',
+        'revision': -1,
+        'resync': true,
+      });
+    }
+  }
+
   void _onClosed() {
     if (_closed) return;
     ++_generation;
     _stopHeartbeat();
+    _authRefresh?.cancel();
     final previous = _ws;
     _ws = null;
     unawaited(previous?.close());
@@ -334,16 +423,29 @@ class RpcClient {
   Future<void> _updateDemands() async {
     if (status != RpcStatus.connected || !supports('session.subscribe')) return;
     final metrics = _demands.entries
-        .where((e) => e.key != 'windows')
+        .where((e) => e.key != 'windows' && !e.key.startsWith('monitor:'))
         .map((e) => e.value);
+    // Mission-control snapshots (vitals, agent apps, remote health): `monitor:<owner>`.
+    final monitor = supports('monitor.v1')
+        ? _demands.entries
+              .where((e) => e.key.startsWith('monitor:'))
+              .map((e) => e.value)
+        : const Iterable<int>.empty();
     try {
       await request('session.subscribe', {
         'topics': [
           'agents',
           if (metrics.isNotEmpty) 'metrics',
           if (_demands.containsKey('windows')) 'windows',
+          if (monitor.isNotEmpty) 'monitor',
         ],
         'metricsInterval': metrics.isEmpty ? 5000 : metrics.reduce(min),
+        if (monitor.isNotEmpty)
+          'monitorInterval': monitor.reduce(min) <= 1000
+              ? 1000
+              : monitor.reduce(min) <= 2000
+              ? 2000
+              : 5000,
       });
     } catch (_) {}
   }
@@ -392,6 +494,7 @@ class RpcClient {
     }
     _dialPending = null;
     _reconnectTimer?.cancel();
+    _authRefresh?.cancel();
     _stopHeartbeat();
     _failPending('disconnected');
     _ws?.close();
@@ -419,6 +522,9 @@ class RpcClient {
     }
     if (_ws == null || _currentStatus != RpcStatus.connected) {
       throw RpcException('not connected');
+    }
+    if (method == 'chat.subscribe' && params['enabled'] is bool) {
+      _chatSubscribed = params['enabled'] as bool;
     }
     return _requestRaw(method, params, timeout);
   }
@@ -485,6 +591,15 @@ class RpcClient {
     );
   }
 
+  /// Send one binary frame upstream (phone mic audio). Dropped while the
+  /// socket is not connected, like [notify].
+  bool sendBinary(Uint8List bytes) {
+    final ws = _ws;
+    if (ws == null || _currentStatus != RpcStatus.connected) return false;
+    ws.add(bytes);
+    return true;
+  }
+
   /// Subscribe to a JSON topic (e.g. 'stream-region', 'terminal-output').
   /// Returns an unsubscribe callback.
   void Function() subscribe(
@@ -529,13 +644,14 @@ class RpcClient {
       }
       return;
     }
-    if (type is String) {
-      final subs = _topicSubs[type];
-      if (subs != null) {
-        for (final cb in List.of(subs)) {
-          cb(msg);
-        }
-      }
+    if (type is String) _dispatch(type, msg);
+  }
+
+  void _dispatch(String topic, Map<String, dynamic> msg) {
+    final subs = _topicSubs[topic];
+    if (subs == null) return;
+    for (final cb in List.of(subs)) {
+      cb(msg);
     }
   }
 

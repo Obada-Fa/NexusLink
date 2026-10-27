@@ -11,14 +11,18 @@ import { setChatLibraryReady } from './workspace/protocol';
 import { detachTerminalsForSocket, stopAllTerminals } from './handlers/terminal';
 // Linux/X11 host. Windows ships as apps/windows-host — do not add win32 branches here.
 import type { WsMessage, RpcRequest, RpcResponse, RpcMethod } from '@nexuslink/rpc-types';
-import { gitWorkingTree, handleFsList, handleFsMkdir, handleFsRead, listProjects } from './handlers/fs';
-import { listProcesses } from './handlers/process';
+import { gitWorkingTree, handleFsList, handleFsMkdir, handleFsRead, listProjects, handleFsDelete, handleFsMove } from './handlers/fs';
+import { listProcesses, killProcess } from './handlers/process';
 import { getSystemInfo, getPerfSnapshot } from './handlers/system';
+import { getVitals } from './handlers/vitals';
+import { listAgentApps, agentAppAction } from './handlers/agent-apps';
+import { remoteHealth, restartRustdesk, startRemoteWatchdog } from './handlers/remote-access';
+import type { MonitorSnapshot } from '@nexuslink/rpc-types';
 import { handleTerminalCreate, handleTerminalInput, handleTerminalResize, handleTerminalKill, setSend as setTerminalSend } from './handlers/terminal';
 import { validateToken } from './handlers/auth';
 import { setSend as setSignalingSend } from './handlers/signaling';
 import { mouseMove, mouseClick, mouseScroll, keyEvent, typeText, buttonDown, buttonUp, mouseMoveAbs } from './handlers/input';
-import { setSend as setCaptureSend, startCapture, stopCapture, stopCapturesForSocket, getScreenMetadata, reportStreamStats } from './handlers/capture';
+import { setSend as setCaptureSend, setCaptureAuthorizer, listMonitors, startCapture, stopCapture, stopCapturesForSocket, getScreenMetadata, reportStreamStats, setStreamQuality } from './handlers/capture';
 import {
   listWindows, listApps, refreshApps, launchApp, adoptWindow, releaseWindow, activateWindow, closeWindow,
   getWindowGeometry, getAdoptedCaptureRegion, setAppsBroadcast, initAppWatcher,
@@ -29,7 +33,8 @@ import {
   getAppSession, getSessionDisplay, setSessionBroadcast,
 } from './handlers/app-sessions';
 import { setSend as setWebrtcSend, startWebrtc, signalWebrtc, stopWebrtc, stopWebrtcForSocket } from './handlers/webrtc';
-import { getClipboard, setClipboard } from './handlers/clipboard';
+import { readClipboard, setClipboard } from './handlers/clipboard';
+import { micStatus, startMic, stopMic, stopMicForSocket, handleMicFrame, setMicAuthorizer, unloadMicDevice } from './handlers/mic';
 import {
   listAgents, createAgentSession, renameAgentSession, setAgentSessionCwd, listAgentSessions, listHostChats, openHostChat, promptAgent,
   cancelAgent, closeAgentSession, agentHistory, resolveAgentPermission, setAgentBroadcast,
@@ -58,6 +63,8 @@ type Session = {
   topics?: Set<string>;
   metricsInterval?: number;
   lastMetric?: number;
+  monitorInterval?: number;
+  lastMonitor?: number;
   role?: string;
 };
 
@@ -80,11 +87,28 @@ export async function startRpcServer(port = 45678, hostname?: string) {
     try {return await run;} finally {if(taskMutations.get(task)===run)taskMutations.delete(task);}
   }
 
+  let lastSnapshot: MonitorSnapshot | null = null;
+  /** Vitals + agent apps + remote health in one payload; shared by all subscribers for 900 ms. */
+  function monitorSnapshot(fresh = false): MonitorSnapshot {
+    if (!fresh && lastSnapshot && Date.now() - lastSnapshot.at < 900) return lastSnapshot;
+    const vitals = getVitals();
+    const { apps, launchers } = listAgentApps();
+    lastSnapshot = { at: Date.now(), vitals, apps, launchers, remote: remoteHealth() };
+    return lastSnapshot;
+  }
+
   let bindHost = hostname ?? process.env.NEXUSLINK_HOST ?? process.env.HOST;
   const tailscaleOnly = process.env.NEXUSLINK_TAILSCALE_ONLY === '1' || process.env.TAILSCALE_ONLY === '1';
 
   if (!bindHost && tailscaleOnly) {
-    const tsIps = tailscaleIpv4FromCli();
+    // At boot the user service can start before tailscaled has an address. Wait for it
+    // rather than exiting into a restart loop (or, worse, staying alive with no listener).
+    let tsIps = tailscaleIpv4FromCli();
+    for (let waited = 0; tsIps.length === 0 && waited < 120; waited += 3) {
+      if (waited === 0) console.log('[rpc-server] waiting for Tailscale to come up…');
+      await Bun.sleep(3000);
+      tsIps = tailscaleIpv4FromCli();
+    }
     if (tsIps.length > 0) {
       bindHost = tsIps[0];
       console.log(`[rpc-server] Tailscale-only mode active: binding exclusively to ${bindHost}`);
@@ -118,6 +142,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         detachTerminalsForSocket(ws);
         stopCapturesForSocket(ws);
         stopWebrtcForSocket(ws);
+        stopMicForSocket(ws);
         if (ws.readyState === 1) ws.close(1008, 'Authorization expired');
         return;
       }
@@ -149,6 +174,15 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   setTerminalSend(send);
   setSignalingSend(send);
   setCaptureSend(send);
+  // Binary frames bypass send(); re-check the credential on every frame so a stream
+  // stops when the token expires or the phone is revoked.
+  const controlAuthorized = (ws: WebSocket) => {
+    const id = findSession(ws);
+    const s = id ? sessions.get(id) : undefined;
+    return !!s?.authenticated && s.role !== 'monitor' && !!(accessToken(s.token) || (s.isLocal && process.env.NEXUSLINK_DEV === '1' && validateToken(s.token || '')));
+  };
+  setCaptureAuthorizer(controlAuthorized);
+  setMicAuthorizer(controlAuthorized);
   setWebrtcSend(send);
   setActivityBroadcast(record=>{
     for(const s of sessions.values())if(s.topics?.has('activity'))send(s.ws,{type:'activity-update',record});
@@ -196,9 +230,10 @@ export async function startRpcServer(port = 45678, hostname?: string) {
     if (method === 'session.subscribe') {
       if (session) {
         const topics = params.topics;
-        if (!Array.isArray(topics) || topics.some(t=> !['agents','windows','metrics','activity'].includes(t as string))) throw new WorkspaceError('INVALID_ARGUMENT','Invalid subscriptions.');
+        if (!Array.isArray(topics) || topics.some(t=> !['agents','windows','metrics','activity','monitor'].includes(t as string))) throw new WorkspaceError('INVALID_ARGUMENT','Invalid subscriptions.');
         session.topics = new Set(topics as string[]);
         session.metricsInterval=params.metricsInterval===2000?2000:5000;
+        session.monitorInterval=params.monitorInterval===1000?1000:params.monitorInterval===5000?5000:2000;
         if(session.role === 'monitor') session.topics=new Set(['agents',...(topics.includes('activity')?['activity']:[])]);
       }
       send(ws,{type:'rpc-response',response:{id:req.id,result:{ok:true}}}); return;
@@ -207,7 +242,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
       // Keep discovery alive while a background phone is connected. Expose only
       // bounded summaries: monitor credentials still cannot read transcripts.
       chats.subscribe(ws, true);
-      const pages = await Promise.all(['codex', 'antigravity'].map(source => chats.list({source, limit: 50, archived: false, sort: 'monitor'})));
+      const pages = await Promise.all(['claude', 'codex', 'antigravity', 'opencode', 'cursor'].map(source => chats.list({source, limit: 50, archived: false, sort: 'monitor'})));
       const items = petSummaries(pages.flatMap(page => page.items));
       send(ws, {type: 'rpc-response', response: {id: req.id, result: {items, sources: pages[0].sources}}}); return;
     }
@@ -242,10 +277,23 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         result = await gitWorkingTree(params.cwd as string);
         break;
       case 'process.list':
-        result = await listProcesses();
+        result = await listProcesses({ limit: typeof params.limit === 'number' ? params.limit : undefined });
         break;
-      case 'process.kill':
-        throw new WorkspaceError('UNSUPPORTED', 'Process termination is not implemented on this host.');
+      case 'process.kill': {
+        const pid = Number(params.pid);
+        if (!Number.isSafeInteger(pid) || pid <= 1) throw new WorkspaceError('INVALID_ARGUMENT', 'Invalid process ID.');
+        result = await killProcess(pid, params.force === true);
+        break;
+      }
+      case 'fs.delete':
+        result = await handleFsDelete(stringParam(params, 'path'), params.recursive === true);
+        break;
+      case 'fs.move':
+        result = await handleFsMove(stringParam(params, 'from'), stringParam(params, 'to'));
+        break;
+      case 'screen.listMonitors':
+        result = listMonitors({ fresh: true });
+        break;
       case 'terminal.create':
         result = await once(accessToken(session?.token)?.deviceId || 'development', method, params, () => handleTerminalCreate(
           params.cols as number,
@@ -271,6 +319,27 @@ export async function startRpcServer(port = 45678, hostname?: string) {
       case 'system.getPerf':
         result = await getPerfSnapshot();
         break;
+      case 'system.getVitals':
+        result = getVitals();
+        break;
+      case 'monitor.snapshot':
+        result = monitorSnapshot(true);
+        break;
+      case 'monitor.appAction': {
+        const action = stringParam(params, 'action');
+        if (!['restart', 'quit', 'kill', 'focus', 'launch'].includes(action)) throw new WorkspaceError('INVALID_ARGUMENT', 'Invalid app action.');
+        result = await agentAppAction({ instanceId: stringParam(params, 'instanceId', true) || undefined, appId: stringParam(params, 'appId', true) || undefined, action: action as any });
+        lastSnapshot = null;
+        break;
+      }
+      case 'monitor.remoteAction': {
+        const service = stringParam(params, 'service');
+        const action = stringParam(params, 'action');
+        if (service !== 'rustdesk' || !['restart', 'repair'].includes(action)) throw new WorkspaceError('INVALID_ARGUMENT', 'Only RustDesk can be restarted from the phone.');
+        result = await restartRustdesk(`phone: ${action}`);
+        lastSnapshot = null;
+        break;
+      }
       case 'input.cursorHint': {
         const requestedSession = params.sessionId === undefined ? undefined : stringParam(params, 'sessionId');
         const display = requestedSession ? getSessionDisplay(requestedSession) : undefined;
@@ -391,7 +460,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         result = undefined;
         break;
       case 'clipboard.get':
-        result = getClipboard(inputDisplay);
+        result = await readClipboard(inputDisplay);
         break;
       case 'clipboard.set':
         result = setClipboard(params.text as string, inputDisplay);
@@ -570,6 +639,10 @@ export async function startRpcServer(port = 45678, hostname?: string) {
           (params.quality as 'low' | 'medium' | 'high' | 'full') ?? 'medium',
           (params.fps as number) ?? 24,
           ws,
+          undefined,
+          undefined,
+          undefined,
+          { monitor: typeof params.monitor === 'string' ? params.monitor : undefined },
         );
         break;
       }
@@ -579,6 +652,22 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         break;
       case 'screen.getMetadata':
         result = getScreenMetadata();
+        break;
+      case 'mic.status':
+        result = micStatus(ws);
+        break;
+      case 'mic.start':
+        result = startMic(ws, params);
+        break;
+      case 'mic.stop':
+        result = stopMic(ws);
+        break;
+      case 'screen.setQuality':
+        setStreamQuality(
+          params.streamId as string,
+          params.quality as 'low' | 'medium' | 'high' | 'full',
+        );
+        result = undefined;
         break;
       case 'screen.reportStats':
         reportStreamStats(
@@ -663,6 +752,10 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         sessions.set(id, { ws: ws as unknown as WebSocket, isLocal, address, authenticated: devBypass });
       },
       async message(ws, raw) {
+        if (typeof raw !== 'string') {
+          handleMicFrame(ws as unknown as WebSocket, raw as unknown as Uint8Array);
+          return;
+        }
         let msg: WsMessage;
         try {
           msg = JSON.parse(raw as unknown as string) as WsMessage;
@@ -674,7 +767,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
             await dispatch(msg.request.method, (msg.request.params as Params) ?? {}, msg.request, ws as unknown as WebSocket);
           } catch (err) {
             if (err instanceof WorkspaceError) console.warn(`[rpc] ${err.code}: ${err.message}`);
-            else console.error('[rpc] request failed:', err instanceof Error ? err.name : 'unknown error');
+            else console.error(`[rpc] ${msg.request.method} failed:`, err instanceof Error ? `${err.name}: ${err.message}` : 'unknown error');
             const response: RpcResponse = { id: msg.request.id, error: err instanceof Error ? err.message : 'Request failed', code: (err as any)?.code || 'INTERNAL' };
             send(ws as unknown as WebSocket, { type: 'rpc-response', response });
           }
@@ -685,6 +778,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         detachTerminalsForSocket(ws as unknown as WebSocket);
         stopCapturesForSocket(ws as unknown as WebSocket);
         stopWebrtcForSocket(ws as unknown as WebSocket);
+        stopMicForSocket(ws as unknown as WebSocket);
         sessions.forEach((s, id) => {
           if (s.ws === (ws as unknown as WebSocket)) sessions.delete(id);
         });
@@ -705,6 +799,14 @@ export async function startRpcServer(port = 45678, hostname?: string) {
     try { const windows=await listWindows(); for(const s of targets) send(s.ws,{type:'windows-update',windows}); } catch {}
   },5000);
   windowTimer.unref();
+  const monitorTimer = setInterval(() => {
+    const now = Date.now();
+    const targets = [...sessions.values()].filter(s => s.topics?.has('monitor') && accessToken(s.token) && now - (s.lastMonitor || 0) >= (s.monitorInterval || 2000) - 50);
+    if (!targets.length) return;
+    try { const snapshot = monitorSnapshot(); for (const s of targets) { s.lastMonitor = now; send(s.ws, { type: 'monitor-update', snapshot }); } } catch (e) { console.error('[monitor] snapshot failed:', e instanceof Error ? e.message : e); }
+  }, 500);
+  monitorTimer.unref();
+  const stopWatchdog = startRemoteWatchdog();
   if (!tailscaleOnly && bindHost === '0.0.0.0') {
     startMdns(port);
   }
@@ -712,10 +814,12 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   const servesClient = await staticAvailable();
   printLaunchBanner(server.port, servesClient);
   console.log(`[rpc-server] listening on ${bindHost}:${server.port}`);
-  return { port: server.port, stop: async () => { setChatLibraryReady(false); await chats.close(); await closeAgentStore(); clearInterval(metricTimer); clearInterval(windowTimer); stopAllTerminals(); server.stop(true); closeSecurityStore(); } };
+  return { port: server.port, stop: async () => { setChatLibraryReady(false); await chats.close(); await closeAgentStore(); clearInterval(metricTimer); clearInterval(windowTimer); clearInterval(monitorTimer); stopWatchdog(); stopAllTerminals(); unloadMicDevice(); server.stop(true); closeSecurityStore(); } };
 }
 
 // Start the server if this file is run directly
 if (import.meta.main) {
-  startRpcServer(45678).catch(error => { console.error(error.message); process.exitCode = 1; });
+  // Exit for real on startup failure: background intervals would otherwise keep a dead
+  // host alive with no listener, and systemd would never restart it.
+  startRpcServer(45678).catch(error => { console.error(error.message); process.exit(1); });
 }

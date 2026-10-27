@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { readdirSync, existsSync, readFileSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { roots } from '../paths';
 import type { AgentHostChat } from '../../../rpc-types/src/index';
 import type { HostChatDelta } from './local';
 
@@ -82,7 +82,7 @@ function validTime(value: unknown, factor = 1): number {
   const n = typeof value === 'number' ? value * factor : typeof value === 'string' ? Date.parse(value) : 0;
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
-const codexHome = () => process.env.CODEX_HOME || join(homedir(),'.codex');
+const codexHome = () => roots().codex;
 function rollouts(): Array<{path:string;archived:boolean}> {
   const files: Array<{path:string;archived:boolean}> = [];
   const visit = (path: string, archived: boolean) => {
@@ -96,16 +96,66 @@ function rollouts(): Array<{path:string;archived:boolean}> {
   visit(join(codexHome(),'sessions'),false); visit(join(codexHome(),'archived_sessions'),true);
   return files;
 }
+const clipTool = (text: string) => text.length > 4000 ? `${text.slice(0, 4000)}…` : text;
+function outputText(output: unknown): string {
+  if (typeof output === 'string') return output;
+  if (Array.isArray(output)) return output.map((part: any) => typeof part === 'string' ? part : part?.text || '').join('');
+  if (output && typeof output === 'object') return JSON.stringify(output);
+  return '';
+}
+/** Rollout JSONL → chat events (messages plus tool calls and their output). */
 export function parseCodexJsonl(text: string): HostChatDelta[] {
   const out: HostChatDelta[] = [];
   for (const line of text.split('\n')) {
     let row: any;
     try { row=JSON.parse(line); } catch { continue; }
     const payload = row.payload;
-    if (row.type !== 'response_item' || payload?.type !== 'message' || !['user','assistant'].includes(payload.role)) continue;
+    if (row.type !== 'response_item' || !payload) continue;
+    const ts = validTime(row.timestamp);
+    if (['function_call','custom_tool_call','local_shell_call'].includes(payload.type)) {
+      const input = payload.arguments ?? payload.input ?? payload.action ?? {};
+      out.push({kind:'tool-start',toolName:String(payload.name || 'shell'),toolInput:clipTool(typeof input === 'string' ? input : JSON.stringify(input,null,2)),refId:String(payload.call_id || payload.id || ''),ts});
+      continue;
+    }
+    if (['function_call_output','custom_tool_call_output','local_shell_call_output'].includes(payload.type)) {
+      out.push({kind:'tool-end',toolOutput:clipTool(outputText(payload.output)),refId:String(payload.call_id || ''),ts});
+      continue;
+    }
+    if (payload.type !== 'message' || !['user','assistant'].includes(payload.role)) continue;
     const text = (payload.content || []).filter((part: any)=>['input_text','output_text','text'].includes(part.type)).map((part: any)=>part.text || '').join('\n');
-    if (!text.trim() || /^# (?:AGENTS\.md instructions|Files mentioned by the user:)/.test(text) || /^<(?:environment_context|permissions|INSTRUCTIONS|system)/.test(text)) continue;
-    out.push({kind:payload.role === 'user' ? 'user' : 'text',text,ts:validTime(row.timestamp),refId:payload.id});
+    if (!text.trim() || /^# (?:AGENTS\.md instructions|Files mentioned by the user:)/.test(text) || /^<(?:environment_context|permissions|INSTRUCTIONS|system|user_instructions|turn_aborted)/.test(text)) continue;
+    out.push({kind:payload.role === 'user' ? 'user' : 'text',text,ts,refId:payload.id});
+  }
+  return out;
+}
+/** Codex Desktop's paginated history (thread_history_N.sqlite item_json rows) → chat events. */
+export function parseCodexHistoryItems(items: any[]): HostChatDelta[] {
+  const out: HostChatDelta[] = [];
+  for (const item of items) {
+    const ts = Number(item?._ts) || 0;
+    switch (item?.type) {
+      case 'userMessage': {
+        const text = (item.content || []).filter((part: any)=>part?.type === 'text').map((part: any)=>part.text).join('\n');
+        if (text.trim()) out.push({kind:'user',text,refId:item.id,ts});
+        break;
+      }
+      case 'agentMessage': if (item.text) out.push({kind:'text',text:item.text,refId:item.id,ts}); break;
+      case 'commandExecution':
+        out.push({kind:'tool-start',toolName:'Command',toolInput:clipTool(Array.isArray(item.command) ? item.command.join(' ') : String(item.command || '')),refId:item.id,ts});
+        if (item.aggregatedOutput !== undefined) out.push({kind:'tool-end',toolName:'Command',toolOutput:clipTool(String(item.aggregatedOutput || '')),refId:item.id,ts});
+        break;
+      case 'fileChange': {
+        const changes = Array.isArray(item.changes) ? item.changes : [];
+        out.push({kind:'tool-start',toolName:'File changes',toolInput:clipTool(changes.map((c: any)=>c?.path).filter(Boolean).join('\n')),refId:item.id,ts});
+        out.push({kind:'tool-end',toolName:'File changes',toolOutput:clipTool(changes.map((c: any)=>c?.diff || '').join('\n')),refId:item.id,ts});
+        break;
+      }
+      case 'mcpToolCall': case 'webSearch':
+        out.push({kind:'tool-start',toolName:item.type === 'webSearch' ? 'Web search' : `${item.server || 'mcp'}.${item.tool || 'tool'}`,toolInput:clipTool(JSON.stringify(item.arguments ?? item.query ?? {},null,2)),refId:item.id,ts});
+        out.push({kind:'tool-end',toolOutput:clipTool(outputText(item.result?.content ?? item.result ?? '')),refId:item.id,ts});
+        break;
+      case 'plan': if (item.text) out.push({kind:'text',text:item.text,refId:item.id,ts}); break;
+    }
   }
   return out;
 }
