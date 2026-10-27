@@ -37,6 +37,8 @@ import '../workspace/project.dart';
 import '../workspace/changes_screen.dart';
 import '../chats/chat_models.dart';
 import '../chats/chat_repository.dart';
+import '../theme/nexus_theme.dart';
+import '../theme/nx_widgets.dart';
 
 /// PC conversations will get their own screen. Skip the slow
 /// `agent.listHostChats` scan on this tab until then.
@@ -72,7 +74,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   List<AgentSessionInfo> _sessions = [];
   List<AgentHostChat> _hostChats = [];
   AgentSessionInfo? _active;
-  final _events = <AgentEvent>[];
+  final _transcript = AgentTranscript();
+
+  /// Display list of the last build (host events + phone notes).
+  List<AgentEvent> _display = const [];
   final _input = TextEditingController();
   final _scroll = ScrollController();
   final _imagePicker = ImagePicker();
@@ -80,9 +85,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   final _thumbsBySeq = <int, List<Uint8List>>{};
   List<Uint8List>? _pendingThumbs;
 
-  /// Permission requests that arrived while another chat was on screen, keyed by
-  /// agentSessionId. Surfaced as a badge and asked when that chat is opened.
-  final _pendingApprovals = <String, AgentEvent>{};
+  /// Permission requests for chats that are not on screen, keyed by
+  /// `sessionId:requestId`. Shown in a banner and asked when that chat opens.
+  final _pendingApprovals = <String, ({String sessionId, AgentEvent event})>{};
+  bool _stopping = false;
   final _resolvedApprovals = <String>{};
   String _mode = 'agent';
   String _thinking = 'medium';
@@ -91,7 +97,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   bool _loading = true;
   bool _busy = false;
   bool _sending = false;
-  int _menuTab = 0;
   int _chatTab = 0;
   final Set<String> _terminalVisited = {};
   final Map<String, String> _drafts = {};
@@ -121,6 +126,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   bool _librarySyncing = false;
   bool _startedNew = false;
   bool _libraryForeground = true;
+  bool _wasBackgrounded = false;
+
+  /// Live library updates: refetch on `chat-library-update`, at most every
+  /// 700 ms, re-running once if a push lands mid-fetch.
+  Timer? _libraryPushTimer;
+  bool _libraryDirty = false;
+  DateTime _lastLibraryFetch = DateTime.fromMillisecondsSinceEpoch(0);
+  static const _libraryThrottle = Duration(milliseconds: 700);
   ChatSummary? _librarySummary;
   final Map<String, Map<String, dynamic>> _libraryEvents = {};
   String? _libraryRevision;
@@ -141,8 +154,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     WidgetsBinding.instance.addObserver(this);
     _input.addListener(_draftChanged);
     if (_isLibrary) {
+      // Fallback poll; pushes normally refresh much sooner.
       _libraryTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-        if (_libraryForeground && _client?.status == RpcStatus.connected) {
+        if (_libraryForeground &&
+            _client?.status == RpcStatus.connected &&
+            DateTime.now().difference(_lastLibraryFetch) >
+                const Duration(seconds: 4)) {
           unawaited(_loadLibrary(quiet: true));
         }
       });
@@ -152,8 +169,25 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _libraryForeground = state == AppLifecycleState.resumed;
-    if (_isLibrary && !_libraryForeground) {
+    if (state == AppLifecycleState.resumed) {
+      _libraryForeground = true;
+      // Only a real trip to the background (not the notification shade or a
+      // permission dialog) can have dropped socket events.
+      if (_wasBackgrounded) {
+        _wasBackgrounded = false;
+        unawaited(_onForeground());
+      } else if (_libraryDirty) {
+        _scheduleLibraryRefresh();
+      }
+      return;
+    }
+    if (state != AppLifecycleState.paused &&
+        state != AppLifecycleState.hidden) {
+      return;
+    }
+    _wasBackgrounded = true;
+    _libraryForeground = false;
+    if (_isLibrary) {
       final chat = _chatSummary;
       unawaited(
         ref
@@ -165,9 +199,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               position: _scroll.hasClients ? _scroll.offset : null,
             ),
       );
-    }
-    if (state == AppLifecycleState.resumed) {
-      unawaited(_onForeground());
     }
   }
 
@@ -223,6 +254,20 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       _unsubs.add(client.subscribe('agent-event', _onPush));
       _unsubs.add(client.subscribe('agent-session-update', _onSessionUpdate));
       _unsubs.add(client.subscribe('agent-session-deleted', _onSessionDelete));
+      if (_isLibrary && client.supports('chat.library.v1')) {
+        _unsubs.add(
+          client.subscribe(
+            'chat-library-update',
+            (_) => _scheduleLibraryRefresh(),
+          ),
+        );
+        // Per-connection on the host; harmless if the list already asked.
+        unawaited(
+          client
+              .requestMap('chat.subscribe', {'enabled': true})
+              .catchError((Object _) => <String, dynamic>{}),
+        );
+      }
       _boundClient = client;
       if (!mounted) return;
       setState(() {
@@ -249,6 +294,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         _error = null;
       });
       _openPendingTask();
+      unawaited(_seedBackgroundApprovals());
       if (widget.initialTaskId != null && _active == null) {
         final task = _sessions
             .where((session) => session.agentSessionId == widget.initialTaskId)
@@ -305,7 +351,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       List<AgentEvent> history = const [];
       if (shouldSyncTranscript) {
         if (client.supports('agent.historyPage')) {
-          var cursor = _events.isEmpty ? 0 : _events.last.seq;
+          var cursor = _transcript.latestHostSeq;
           final missing = <AgentEvent>[];
           while (mounted && gen == _syncGen) {
             final page = await client.requestMap('agent.historyPage', {
@@ -360,14 +406,19 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             if (!match.busy) _busy = false;
           }
           if (shouldSyncTranscript && _active?.agentSessionId == activeId) {
-            final merged = applyAgentHistorySnapshot(
-              history,
-              _events,
-              busy: _busy,
+            // Merge host events only; phone notes live in their own key
+            // space and are re-interleaved for display.
+            final current = _transcript.host;
+            final merged = mergeAgentHistory(history, current);
+            _transcript.replaceHost(
+              merged.isEmpty && current.isNotEmpty ||
+                      (_busy && merged.length < current.length)
+                  ? current
+                  : merged,
             );
-            _events
-              ..clear()
-              ..addAll(merged);
+            if (!_busy && _transcript.hasOpenTools) {
+              _transcript.settleOpenTools('Interrupted — host restarted.');
+            }
           }
         }
       });
@@ -375,11 +426,25 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         await _syncApprovals(activeId);
         _scrollToEnd();
       }
-      _flushPendingApproval();
+      unawaited(_seedBackgroundApprovals());
       unawaited(_refreshGitTree());
     } catch (_) {
       // Stay on the last known transcript; the next resume will try again.
     }
+  }
+
+  void _scheduleLibraryRefresh() {
+    if (!_isLibrary || !mounted) return;
+    if (!_libraryForeground) {
+      _libraryDirty = true;
+      return;
+    }
+    if (_libraryPushTimer?.isActive == true) return;
+    final wait =
+        _libraryThrottle - DateTime.now().difference(_lastLibraryFetch);
+    _libraryPushTimer = Timer(wait.isNegative ? Duration.zero : wait, () {
+      if (mounted) unawaited(_loadLibrary(quiet: true));
+    });
   }
 
   Future<void> _loadLibrary({
@@ -387,8 +452,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     bool older = false,
     bool savedOnly = false,
   }) async {
-    if (!_isLibrary || _librarySyncing || !mounted) return;
+    if (!_isLibrary || !mounted) return;
+    if (_librarySyncing) {
+      if (!savedOnly) _libraryDirty = true;
+      return;
+    }
     _librarySyncing = true;
+    if (!savedOnly) {
+      _libraryDirty = false;
+      _lastLibraryFetch = DateTime.now();
+    }
     final chat = widget.libraryChat!;
     final repository = ref.read(chatRepositoryProvider);
     final generation = ++_syncGen;
@@ -439,11 +512,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       final ordered = _libraryEvents.values.toList()
         ..sort((a, b) => (a['seq'] as num).compareTo(b['seq'] as num));
       final loaded = ordered.map(AgentEvent.fromJson).toList();
+      final previous = _transcript.host;
       final hasNew =
-          loaded.length != _events.length ||
+          loaded.length != previous.length ||
           (loaded.isNotEmpty &&
-              _events.isNotEmpty &&
-              loaded.last.text != _events.last.text);
+              previous.isNotEmpty &&
+              loaded.last.text != previous.last.text);
       final oldExtent = _scroll.hasClients
           ? _scroll.position.maxScrollExtent
           : 0.0;
@@ -461,14 +535,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           agent: current.source,
           cwd: current.folderPath ?? '',
           title: current.title,
-          busy: current.execution == 'working',
+          busy: !_stopping && current.execution == 'working',
           status: 'running',
           hostChatId: current.json['nativeId'] as String?,
         );
-        _busy = current.execution == 'working';
-        _events
-          ..clear()
-          ..addAll(loaded);
+        if (!_stopping) _busy = current.execution == 'working';
+        _transcript.replaceHost(loaded);
         _libraryOlder = page['olderCursor'] as String?;
         _hasOlder = !_savedCopy && _libraryOlder != null;
         _loading = false;
@@ -522,13 +594,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       }
     } finally {
       _librarySyncing = false;
+      if (_libraryDirty && mounted) _scheduleLibraryRefresh();
     }
   }
 
   Future<void> _sendLibrary() async {
     if (!_replyAllowed || _sending || _input.text.trim().isEmpty) return;
     final chat = _chatSummary;
-    final isWorking = _busy ||
+    final isWorking =
+        _busy ||
         chat.execution == 'working' ||
         (chat.json['capabilities'] as Map?)?['safety'] == 'busy';
     bool interrupt = false;
@@ -653,12 +727,297 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
   }
 
-  /// Ask a permission request that arrived while this chat was in the background.
+  /// A chat with parked approvals was just opened: they are no longer
+  /// "background", and the first unanswered one is asked right away.
   void _flushPendingApproval() {
+    final id = _active?.agentSessionId;
+    if (!mounted || id == null) return;
     if (_isLibrary && (_savedCopy || _chatSummary.json['managed'] != true)) {
       return;
     }
-    /* Approval cards remain inline until explicitly answered. */
+    final parked = _pendingApprovals.entries
+        .where((entry) => entry.value.sessionId == id)
+        .toList();
+    if (parked.isEmpty) return;
+    setState(() {
+      for (final entry in parked) {
+        _pendingApprovals.remove(entry.key);
+      }
+    });
+    final ask = parked
+        .map((entry) => entry.value.event)
+        .where((e) => e.refId != null && !_resolvedApprovals.contains(e.refId))
+        .firstOrNull;
+    if (ask != null) unawaited(_askPermission(ask));
+  }
+
+  /// Approvals that were already waiting before this screen existed (or
+  /// arrived while the socket was down) for chats that are not open.
+  Future<void> _seedBackgroundApprovals() async {
+    final client = _client;
+    if (client == null ||
+        client.status != RpcStatus.connected ||
+        !client.supports('agent.pendingApprovals')) {
+      return;
+    }
+    final activeId = _active?.agentSessionId;
+    final waiting = _sessions
+        .where(
+          (s) =>
+              !s.archived &&
+              s.taskState == 'waiting' &&
+              s.agentSessionId != activeId,
+        )
+        .take(6)
+        .toList();
+    final found = <String, ({String sessionId, AgentEvent event})>{};
+    for (final session in waiting) {
+      try {
+        final pending = await client.requestList('agent.pendingApprovals', {
+          'agentSessionId': session.agentSessionId,
+        });
+        for (final raw in pending.whereType<Map>()) {
+          final event = AgentEvent.fromJson(Map<String, dynamic>.from(raw));
+          if (event.refId == null) continue;
+          found['${session.agentSessionId}:${event.refId}'] = (
+            sessionId: session.agentSessionId,
+            event: event,
+          );
+        }
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    final stillWaiting = waiting.map((s) => s.agentSessionId).toSet();
+    setState(() {
+      // Sessions no longer waiting have nothing left to answer.
+      _pendingApprovals.removeWhere(
+        (_, value) =>
+            value.sessionId != _active?.agentSessionId &&
+            !stillWaiting.contains(value.sessionId) &&
+            _sessions.any((s) => s.agentSessionId == value.sessionId),
+      );
+      _pendingApprovals.addAll(found);
+    });
+  }
+
+  List<({String sessionId, AgentEvent event})> get _backgroundApprovals => [
+    for (final value in _pendingApprovals.values)
+      if (value.sessionId != _active?.agentSessionId) value,
+  ];
+
+  String _sessionTitle(String sessionId) =>
+      _sessions
+          .where((s) => s.agentSessionId == sessionId)
+          .firstOrNull
+          ?.title ??
+      'Another chat';
+
+  Widget _approvalBanner() {
+    final waiting = _backgroundApprovals;
+    if (waiting.isEmpty) return const SizedBox.shrink();
+    final first = waiting.first;
+    final label = waiting.length == 1
+        ? '${_sessionTitle(first.sessionId)} needs approval · '
+              '${first.event.toolName ?? 'action'}'
+        : '${waiting.length} approvals waiting in other chats';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
+      child: NxCard(
+        accent: NX.waiting,
+        padding: const EdgeInsets.fromLTRB(12, 6, 6, 6),
+        onTap: _reviewApprovals,
+        child: Row(
+          children: [
+            const LiveDot(color: NX.waiting, size: 7),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                label,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: NX.text, fontSize: 13),
+              ),
+            ),
+            TextButton(
+              onPressed: _reviewApprovals,
+              child: const Text('Review'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _reviewApprovals() async {
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (sheetContext, refresh) {
+          final waiting = _backgroundApprovals;
+          if (waiting.isEmpty) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (sheetContext.mounted) Navigator.of(sheetContext).pop();
+            });
+          }
+          return SafeArea(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(sheetContext).size.height * .75,
+              ),
+              child: ListView(
+                shrinkWrap: true,
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(bottom: 8),
+                    child: Text(
+                      'Waiting for your approval',
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  for (final item in waiting)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: NxCard(
+                        accent: NX.waiting,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Text(
+                              _sessionTitle(item.sessionId),
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: NX.text,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              item.event.text ??
+                                  'Allow ${item.event.toolName ?? 'this action'}?',
+                              style: const TextStyle(color: NX.waiting),
+                            ),
+                            if ((item.event.toolInput ?? '').isNotEmpty)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 6),
+                                child: Text(
+                                  item.event.toolInput!,
+                                  maxLines: 6,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontFamily: 'monospace',
+                                    fontSize: 12,
+                                    color: NX.textDim,
+                                  ),
+                                ),
+                              ),
+                            const SizedBox(height: 10),
+                            Row(
+                              children: [
+                                if (!_isLibrary)
+                                  TextButton(
+                                    onPressed: () {
+                                      Navigator.of(sheetContext).pop();
+                                      final session = _sessions
+                                          .where(
+                                            (s) =>
+                                                s.agentSessionId ==
+                                                item.sessionId,
+                                          )
+                                          .firstOrNull;
+                                      if (session != null) {
+                                        unawaited(_openSession(session));
+                                      }
+                                    },
+                                    child: const Text('Open chat'),
+                                  ),
+                                const Spacer(),
+                                OutlinedButton(
+                                  onPressed: () async {
+                                    await _answerApproval(
+                                      item.sessionId,
+                                      item.event.refId!,
+                                      false,
+                                    );
+                                    refresh(() {});
+                                  },
+                                  child: const Text('Deny'),
+                                ),
+                                const SizedBox(width: 8),
+                                FilledButton(
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: NX.waiting,
+                                    foregroundColor: Colors.black,
+                                  ),
+                                  onPressed: () async {
+                                    await _answerApproval(
+                                      item.sessionId,
+                                      item.event.refId!,
+                                      true,
+                                    );
+                                    refresh(() {});
+                                  },
+                                  child: const Text('Approve'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Answers one approval via `agent.permission`: true when the PC accepted
+  /// it, false when the PC refused it (e.g. expired), null when unreachable.
+  Future<bool?> _answerApproval(
+    String sessionId,
+    String requestId,
+    bool allow,
+  ) async {
+    final client = _client;
+    if (client == null || client.status != RpcStatus.connected) {
+      _toast('Reconnect to the PC to answer this approval.');
+      return null;
+    }
+    try {
+      final res = await client.request('agent.permission', {
+        'agentSessionId': sessionId,
+        'requestId': requestId,
+        'allow': allow,
+      });
+      if (!mounted) return false;
+      if (res is Map && res['ok'] == false) {
+        final expired = res['reason'] == 'request already expired';
+        _toast(
+          expired
+              ? 'That request already expired on the PC.'
+              : 'The PC could not accept that answer.',
+        );
+        if (expired) {
+          setState(() => _pendingApprovals.remove('$sessionId:$requestId'));
+        }
+        return false;
+      }
+      setState(() => _pendingApprovals.remove('$sessionId:$requestId'));
+      if (sessionId != _active?.agentSessionId) {
+        _toast(allow ? 'Approved.' : 'Denied.');
+      }
+      return true;
+    } catch (e) {
+      if (mounted) _toast('Could not reach the PC: $e');
+      return null;
+    }
   }
 
   String _draftKey(String id) =>
@@ -703,7 +1062,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (!mounted || _active?.agentSessionId != id) return;
     final activeIds = pending.map((e) => e['refId'] as String?).toSet();
     setState(() {
-      for (final event in _events.where(
+      for (final event in _transcript.host.where(
         (e) => e.kind == 'permission-request' && e.refId != null,
       )) {
         if (!activeIds.contains(event.refId)) {
@@ -720,19 +1079,19 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
     final id = _active?.agentSessionId;
     final client = _client;
-    if (id == null || client == null || _events.isEmpty) return;
+    final oldest = _transcript.oldestHostSeq;
+    if (id == null || client == null || oldest == null) return;
     try {
       final page = await client.requestMap('agent.historyPage', {
         'agentSessionId': id,
-        'beforeSeq': _events.first.seq,
+        'beforeSeq': oldest,
       });
       if (!mounted || _active?.agentSessionId != id) return;
       final old = (page['events'] as List)
           .map((e) => AgentEvent.fromJson(Map<String, dynamic>.from(e)))
           .toList();
       setState(() {
-        final seen = _events.map((e) => e.seq).toSet();
-        _events.insertAll(0, old.where((e) => !seen.contains(e.seq)));
+        _transcript.addOlder(old);
         _hasOlder = page['hasMore'] == true;
       });
     } catch (e) {
@@ -761,14 +1120,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         // the turn already finished on the phone.
         if (!updated.busy) {
           _busy = false;
-          final settled = closeOpenTools(
-            _events,
-            output: 'Interrupted — host is no longer running this turn.',
-          );
-          if (settled.length != _events.length) {
-            _events
-              ..clear()
-              ..addAll(settled);
+          if (_transcript.hasOpenTools) {
+            _transcript.settleOpenTools(
+              _stopping
+                  ? 'Stopped.'
+                  : 'Interrupted — host is no longer running this turn.',
+            );
           }
         }
       }
@@ -783,9 +1140,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       _sessions.removeWhere((s) => s.agentSessionId == id);
       if (_active?.agentSessionId == id) {
         _active = null;
-        _events.clear();
+        _transcript.clear();
         _busy = false;
       }
+      _pendingApprovals.removeWhere((_, value) => value.sessionId == id);
     });
   }
 
@@ -809,10 +1167,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (parsed.kind == 'status' &&
         parsed.refId != null &&
         (parsed.text ?? '').startsWith('Approval ')) {
-      _pendingApprovals.remove('$sessionId:${parsed.refId}');
-      if (sessionId == _active?.agentSessionId) {
+      final settled =
+          _pendingApprovals.remove('$sessionId:${parsed.refId}') != null;
+      if (sessionId == _active?.agentSessionId && parsed.refId != null) {
         _resolvedApprovals.add(parsed.refId!);
       }
+      // Answered on the PC or another device: drop it from the banner.
+      if (settled && mounted) setState(() {});
     }
 
     if (sessionId != null &&
@@ -840,7 +1201,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           sessionId != null &&
           parsed.refId != null) {
         setState(
-          () => _pendingApprovals['$sessionId:${parsed.refId}'] = parsed,
+          () => _pendingApprovals['$sessionId:${parsed.refId}'] = (
+            sessionId: sessionId,
+            event: parsed,
+          ),
         );
         return;
       }
@@ -854,11 +1218,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       _thumbsBySeq[parsed.seq] = _pendingThumbs!;
       _pendingThumbs = null;
     }
+    var added = false;
     setState(() {
-      if (!_events.any((e) => e.seq == parsed.seq)) _events.add(parsed);
+      // Dedupe against host seqs only; phone notes cannot collide.
+      added = _transcript.addHost(parsed);
       if (parsed.kind == 'result' || parsed.kind == 'error') _setBusy(false);
     });
-    _scrollToEnd();
+    if (added) _scrollToEnd();
   }
 
   void _scrollToEnd({bool force = false}) {
@@ -884,36 +1250,17 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         (_isLibrary && (_savedCopy || _chatSummary.json['managed'] != true))) {
       return;
     }
-    final client = _client;
     final session = _active;
-    if (client == null || session == null || requestId == null || !mounted) {
-      return;
-    }
+    if (session == null || requestId == null || !mounted) return;
     setState(() => _resolvedApprovals.add(requestId));
-    try {
-      final res = await client.request('agent.permission', {
-        'agentSessionId': session.agentSessionId,
-        'requestId': requestId,
-        'allow': allow,
-      });
-      if (!mounted) return;
-      if (res is Map && res['ok'] == false) {
-        _toast(
-          res['reason'] == 'request already expired'
-              ? 'That request already expired on the PC.'
-              : 'The PC could not accept that answer.',
-        );
-      } else if (mounted) {
-        setState(
-          () =>
-              _pendingApprovals.remove('${session.agentSessionId}:$requestId'),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _resolvedApprovals.remove(requestId));
-        _toast('Could not reach the PC: $e');
-      }
+    final accepted = await _answerApproval(
+      session.agentSessionId,
+      requestId,
+      allow,
+    );
+    // Unreachable: let the user try again. Refused: the PC settled it.
+    if (accepted == null && mounted) {
+      setState(() => _resolvedApprovals.remove(requestId));
     }
   }
 
@@ -1011,8 +1358,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         );
         _sessions.insert(0, session);
         _active = session;
-        _events.clear();
+        _transcript.clear();
         _busy = false;
+        _stopping = false;
         _photos.clear();
         _liveModels = [];
         _gitTree = null;
@@ -1058,17 +1406,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     setState(() {
       _active = s;
       _busy = s.busy;
-      _events
+      _stopping = false;
+      _transcript
         ..clear()
-        ..addAll(loaded);
-      if (!s.busy && transcriptHasOpenTools(_events)) {
-        final settled = closeOpenTools(
-          _events,
-          output: 'Interrupted — host restarted.',
-        );
-        _events
-          ..clear()
-          ..addAll(settled);
+        ..replaceHost(loaded);
+      if (!s.busy && _transcript.hasOpenTools) {
+        _transcript.settleOpenTools('Interrupted — host restarted.');
       }
       _photos.clear();
       _liveModels = [];
@@ -1091,40 +1434,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         _flushPendingApproval,
       ),
     );
-  }
-
-  Future<void> _openHostChat(AgentHostChat chat) async {
-    final client = _client;
-    if (client == null) return;
-    var cwd = chat.cwd.trim();
-    if (cwd.isEmpty) {
-      cwd = (await _pickProject())?.trim() ?? '';
-      if (cwd.isEmpty) return;
-    }
-    try {
-      final created =
-          await client.request('agent.openHostChat', {
-                'agent': chat.agent,
-                'hostChatId': chat.hostChatId,
-                'cwd': cwd,
-                'title': chat.title,
-              }, const Duration(seconds: 25))
-              as Map<String, dynamic>;
-      final session = AgentSessionInfo.fromJson(created);
-      if (!mounted) return;
-      setState(() {
-        _sessions.removeWhere(
-          (s) => s.agentSessionId == session.agentSessionId,
-        );
-        _sessions.insert(0, session);
-      });
-      await _openSession(session);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(e.toString())));
-    }
   }
 
   AgentInfo? get _activeAgent {
@@ -1321,7 +1630,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         ),
       );
       if (choice != 'interrupt') return;
-      await _cancel();
+      final outcome = await _cancel();
+      if (outcome == null || !outcome.ended) return;
       await Future<void>.delayed(const Duration(milliseconds: 150));
     }
     final text = _input.text.trim();
@@ -1394,13 +1704,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         setState(() {
           _setBusy(false);
           _pendingThumbs = null;
-          _events.add(
-            AgentEvent(
-              seq: _events.length + 1,
-              ts: DateTime.now().millisecondsSinceEpoch,
-              kind: 'error',
-              text: e.toString(),
-            ),
+          _transcript.note(
+            'error',
+            'Your message was not delivered: ${friendlyLaunchError(e)}',
           );
         });
       }
@@ -1409,45 +1715,57 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
   }
 
-  bool get _canStop => _busy || transcriptHasOpenTools(_events);
+  bool get _canStop => _busy || _transcript.hasOpenTools;
 
-  Future<void> _cancel() async {
+  /// Stop: show "Stopping…" until the PC answers, then the real outcome.
+  /// Returns null when a stop is already in flight or there is no chat.
+  Future<StopOutcome?> _cancel() async {
     final session = _active;
     final client = _client;
-    if (mounted) {
-      setState(() {
-        _setBusy(false);
-        final settled = closeOpenTools(_events, output: 'Stopped.');
-        _events
-          ..clear()
-          ..addAll(settled);
-      });
-    }
-    if (_isLibrary) {
-      try {
-        await ref.read(chatRepositoryProvider).cancel(_chatSummary);
-      } catch (_) {}
-    }
-    if (session != null && client != null && !session.agentSessionId.startsWith('library:')) {
-      try {
-        await client.request('agent.cancel', {
+    if (_stopping || session == null || !mounted) return null;
+    setState(() => _stopping = true);
+    StopOutcome outcome;
+    try {
+      if (_isLibrary) {
+        final stopped = await ref
+            .read(chatRepositoryProvider)
+            .cancel(_chatSummary);
+        outcome = describeStopResult({'ok': stopped}, library: true);
+      } else {
+        if (client == null || client.status != RpcStatus.connected) {
+          throw RpcException('the PC is offline');
+        }
+        final result = await client.request('agent.cancel', {
           'agentSessionId': session.agentSessionId,
-        });
-      } catch (_) {}
+        }, const Duration(seconds: 15));
+        outcome = describeStopResult(result);
+      }
+    } catch (error) {
+      outcome = describeStopResult(null, error: error, library: _isLibrary);
     }
+    if (!mounted) return outcome;
+    setState(() {
+      _stopping = false;
+      if (outcome.ended && _active?.agentSessionId == session.agentSessionId) {
+        _setBusy(false);
+        _transcript.settleOpenTools(
+          outcome.state == StopState.stopped ? 'Stopped.' : 'Not running.',
+        );
+      }
+      if (outcome.state == StopState.failed ||
+          outcome.state == StopState.unsupported) {
+        _transcript.note('error', outcome.message);
+      }
+    });
+    _toast(outcome.message);
+    if (outcome.state == StopState.stopped) {
+      unawaited(_refreshSnapshot());
+    }
+    return outcome;
   }
 
   void _localStatus(String text) {
-    setState(() {
-      _events.add(
-        AgentEvent(
-          seq: _events.length + 1,
-          ts: DateTime.now().millisecondsSinceEpoch,
-          kind: 'status',
-          text: text,
-        ),
-      );
-    });
+    setState(() => _transcript.note('status', text));
     _scrollToEnd();
   }
 
@@ -1585,8 +1903,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   bool get _needsSignIn {
-    for (var i = _events.length - 1; i >= 0; i--) {
-      final e = _events[i];
+    for (var i = _display.length - 1; i >= 0; i--) {
+      final e = _display[i];
       final t = (e.text ?? '').toLowerCase();
       if (e.kind == 'result' && t.contains('signed in')) return false;
       if (e.kind == 'error' || e.kind == 'status' || e.kind == 'text') {
@@ -1638,20 +1956,50 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   Future<void> _deleteSession(AgentSessionInfo s) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete this task?'),
+        content: Text(
+          '“${s.title}” and its conversation are removed from the PC. '
+          'This can’t be undone. Archive it instead to keep the history.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Keep'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: NX.failed),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
     final client = _client;
-    if (client != null) {
-      try {
-        await client.request('agent.close', {
-          'agentSessionId': s.agentSessionId,
-        });
-      } catch (_) {}
+    if (client == null || client.status != RpcStatus.connected) {
+      _toast('Reconnect to the PC to delete this task.');
+      return;
+    }
+    try {
+      final result = await client.request('agent.close', {
+        'agentSessionId': s.agentSessionId,
+      });
+      if (result is Map && result['ok'] == false) {
+        _toast('The PC no longer has that task.');
+      }
+    } catch (e) {
+      _toast('Couldn’t delete the task: ${friendlyLaunchError(e)}');
+      return;
     }
     if (!mounted) return;
     setState(() {
       _sessions.removeWhere((x) => x.agentSessionId == s.agentSessionId);
       if (_active?.agentSessionId == s.agentSessionId) {
         _active = null;
-        _events.clear();
+        _transcript.clear();
         _busy = false;
       }
     });
@@ -1709,22 +2057,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
   }
 
-  Future<void> _closeActive() async {
-    final session = _active;
-    final client = _client;
-    if (session == null || client == null) return;
-    await client.request('agent.close', {
-      'agentSessionId': session.agentSessionId,
-    });
-    setState(() {
-      _sessions.removeWhere((s) => s.agentSessionId == session.agentSessionId);
-      _active = null;
-      _events.clear();
-      _busy = false;
-      _chatTab = 0;
-    });
-  }
-
   void _leaveChat() {
     if (widget.initialTaskId != null) {
       Navigator.of(context).pop();
@@ -1747,8 +2079,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
     setState(() {
       _active = null;
-      _events.clear();
+      _transcript.clear();
       _busy = false;
+      _stopping = false;
       _photos.clear();
       _liveModels = [];
       _gitTree = null;
@@ -2089,7 +2422,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final models = _pickerModels;
     if (models.isEmpty) {
       _localStatus(
-        'This agent has no model list yet. Restart the PC host and try again.',
+        'This agent has no model list yet. Restart NexusLink on the PC and try again.',
       );
       return;
     }
@@ -2299,7 +2632,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Restart the PC host (bun run lan) so photos actually reach the agent.',
+            'Update NexusLink on your PC so photos reach the agent.',
           ),
         ),
       );
@@ -2394,6 +2727,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     _listenGen++;
     _speech.stop();
     _libraryTimer?.cancel();
+    _libraryPushTimer?.cancel();
     if (_isLibrary) {
       final chat = widget.libraryChat!;
       unawaited(
@@ -2517,66 +2851,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                         style: const TextStyle(color: Colors.white70),
                       ),
                     )
-            : _active == null
-            ? _picker()
-            : _chatWithTerminal(),
+            : Column(
+                children: [
+                  _approvalBanner(),
+                  Expanded(
+                    child: _active == null ? _picker() : _chatWithTerminal(),
+                  ),
+                ],
+              ),
       ),
     );
-  }
-
-  /// Per-agent permission policy. 'auto' is the escape hatch for when a request
-  /// would otherwise sit unanswered on a phone that is not watching that chat.
-  Widget _approvalToggle(AgentInfo a) {
-    final auto = a.capabilities.approvalMode == 'auto';
-    return Row(
-      children: [
-        const Text(
-          'Approvals',
-          style: TextStyle(fontSize: 12, color: Color(0xFF8A8A9A)),
-        ),
-        const SizedBox(width: 10),
-        _ApprovalChip(
-          label: 'Ask me',
-          selected: !auto,
-          onTap: () => _setApprovalMode(a, 'ask'),
-        ),
-        const SizedBox(width: 6),
-        _ApprovalChip(
-          label: 'Automatic',
-          selected: auto,
-          onTap: () => _setApprovalMode(a, 'auto'),
-        ),
-      ],
-    );
-  }
-
-  Future<void> _setApprovalMode(AgentInfo a, String mode) async {
-    final client = _client;
-    if (client == null) return;
-    try {
-      final res = await client.request('agent.setApprovalMode', {
-        'agent': a.id,
-        'mode': mode,
-      });
-      if (!mounted) return;
-      if (res is Map && res['ok'] != true) {
-        _toast('The PC rejected that approval setting.');
-        return;
-      }
-      setState(() {
-        _agents = _agents
-            .map(
-              (x) => x.id == a.id
-                  ? x.copyWith(
-                      capabilities: x.capabilities.copyWith(approvalMode: mode),
-                    )
-                  : x,
-            )
-            .toList();
-      });
-    } catch (_) {
-      if (mounted) _toast('This PC does not support approval settings yet.');
-    }
   }
 
   void _toast(String message) {
@@ -2836,78 +3120,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     );
   }
 
-  Widget _menuTabs() {
-    return Container(
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        color: _panelBackgroundColor(_active?.agent),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: _borderColor(_active?.agent)),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: _tabButton(
-              label: _sessions.isNotEmpty
-                  ? 'Recent (${_sessions.length})'
-                  : 'Recent',
-              icon: Icons.history,
-              selected: _menuTab == 0,
-              onTap: () => setState(() => _menuTab = 0),
-            ),
-          ),
-          const SizedBox(width: 4),
-          Expanded(
-            child: _tabButton(
-              label: _hostChats.isNotEmpty ? 'PC (${_hostChats.length})' : 'PC',
-              icon: Icons.computer_outlined,
-              selected: _menuTab == 1,
-              onTap: () => setState(() => _menuTab = 1),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _tabButton({
-    required String label,
-    required IconData icon,
-    required bool selected,
-    required VoidCallback onTap,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        decoration: BoxDecoration(
-          color: selected ? const Color(0xFF2A6AFF) : Colors.transparent,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              icon,
-              size: 15,
-              color: selected ? Colors.white : const Color(0xFF888899),
-            ),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
-                color: selected ? Colors.white : const Color(0xFF888899),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   Color _chatBackgroundColor(String? agentId) => const Color(0xFF0B0D12);
 
   Widget _chatWithTerminal() {
@@ -3020,9 +3232,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   Widget _chat() {
-    final display = groupAgentDisplay(_events);
+    _display = _transcript.display;
+    final display = groupAgentDisplay(_display);
+    final live = _isLibrary ? _chatSummary.live : null;
     return Column(
       children: [
+        if (ChatLiveHeader.shows(live)) ChatLiveHeader(live: live!),
         if (_hasOlder)
           TextButton(
             onPressed: _older,
@@ -3101,9 +3316,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             size: 22,
           ),
           const SizedBox(width: 10),
-          const Text(
-            'Working…',
-            style: TextStyle(
+          Text(
+            _stopping ? 'Stopping…' : 'Working…',
+            style: const TextStyle(
               color: Colors.white38,
               fontSize: 12,
               fontStyle: FontStyle.italic,
@@ -3267,7 +3482,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       case 'text-delta':
       case 'result':
         if ((e.text ?? '').trim().isEmpty) {
-          if (e.kind == 'result' && _events.isNotEmpty && e == _events.last) {
+          if (e.kind == 'result' &&
+              _display.isNotEmpty &&
+              e.seq == _display.last.seq) {
             return const Padding(
               padding: EdgeInsets.symmetric(vertical: 4, horizontal: 8),
               child: Text(
@@ -3511,120 +3728,130 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }).firstOrNull;
     final planInfo = planEvent != null ? extractToolFileInfo(planEvent) : null;
 
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      decoration: BoxDecoration(
+    // Painted by a Material (not a DecoratedBox) so the ExpansionTile's ink
+    // and background stay visible; a colored box here trips a debug assert.
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Material(
         color: _panelBackgroundColor(_active?.agent),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: _borderColor(_active?.agent)),
-      ),
-      child: Theme(
-        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-        child: ExpansionTile(
-          key: PageStorageKey<int>(tools.first.seq),
-          initiallyExpanded: false,
-          tilePadding: const EdgeInsets.symmetric(horizontal: 12),
-          childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-          leading: running && _busy && _active != null
-              ? AgentActivityIcon(
-                  agentId: _active!.agent,
-                  icon: _active!.icon,
-                  active: true,
-                  size: 18,
-                )
-              : Icon(
-                  running
-                      ? Icons.hourglass_top
-                      : (planInfo != null
-                            ? Icons.assignment_turned_in_outlined
-                            : Icons.check_circle_outline),
-                  size: 18,
-                  color: running
-                      ? const Color(0xFFF0C040)
-                      : (planInfo != null
-                            ? const Color(0xFFC084FC)
-                            : const Color(0xFF4ADE80)),
-                ),
-          title: Text(
-            _isLibrary ? 'Work details' : toolGroupTitle(tools),
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          ),
-          subtitle: summary.isEmpty
-              ? null
-              : Text(
-                  summary,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: planInfo != null
-                        ? const Color(0xFFC084FC).withValues(alpha: 0.85)
-                        : Colors.white54,
+        clipBehavior: Clip.antiAlias,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: _borderColor(_active?.agent)),
+        ),
+        child: Theme(
+          data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+          child: ExpansionTile(
+            key: PageStorageKey<int>(tools.first.seq),
+            initiallyExpanded: false,
+            tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+            childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+            leading: running && _busy && _active != null
+                ? AgentActivityIcon(
+                    agentId: _active!.agent,
+                    icon: _active!.icon,
+                    active: true,
+                    size: 18,
+                  )
+                : Icon(
+                    running
+                        ? Icons.hourglass_top
+                        : (planInfo != null
+                              ? Icons.assignment_turned_in_outlined
+                              : Icons.check_circle_outline),
+                    size: 18,
+                    color: running
+                        ? const Color(0xFFF0C040)
+                        : (planInfo != null
+                              ? const Color(0xFFC084FC)
+                              : const Color(0xFF4ADE80)),
                   ),
-                ),
-          trailing: running
-              ? IconButton(
-                  tooltip: 'Stop',
-                  icon: const Icon(Icons.stop, size: 20),
-                  onPressed: _cancel,
-                )
-              : (planInfo != null && _client != null)
-              ? Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    InkWell(
-                      onTap: () => _openToolFile(planInfo),
-                      borderRadius: BorderRadius.circular(6),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 8,
-                          vertical: 4,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(
-                            0xFF9F54FF,
-                          ).withValues(alpha: 0.18),
-                          borderRadius: BorderRadius.circular(6),
-                          border: Border.all(
+            title: Text(
+              _isLibrary ? 'Work details' : toolGroupTitle(tools),
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+            subtitle: summary.isEmpty
+                ? null
+                : Text(
+                    summary,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: planInfo != null
+                          ? const Color(0xFFC084FC).withValues(alpha: 0.85)
+                          : Colors.white54,
+                    ),
+                  ),
+            trailing: running
+                ? IconButton(
+                    tooltip: _stopping ? 'Stopping…' : 'Stop',
+                    icon: _stopping
+                        ? const SizedBox.square(
+                            dimension: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.stop, size: 20),
+                    onPressed: _stopping ? null : _cancel,
+                  )
+                : (planInfo != null && _client != null)
+                ? Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      InkWell(
+                        onTap: () => _openToolFile(planInfo),
+                        borderRadius: BorderRadius.circular(6),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
                             color: const Color(
                               0xFF9F54FF,
-                            ).withValues(alpha: 0.5),
-                          ),
-                        ),
-                        child: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.assignment_outlined,
-                              size: 12,
-                              color: Color(0xFFC084FC),
+                            ).withValues(alpha: 0.18),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(
+                              color: const Color(
+                                0xFF9F54FF,
+                              ).withValues(alpha: 0.5),
                             ),
-                            SizedBox(width: 4),
-                            Text(
-                              'View plan',
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.assignment_outlined,
+                                size: 12,
                                 color: Color(0xFFC084FC),
                               ),
-                            ),
-                          ],
+                              SizedBox(width: 4),
+                              Text(
+                                'View plan',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFFC084FC),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 4),
-                    const Icon(
-                      Icons.expand_more,
-                      size: 20,
-                      color: Colors.white54,
-                    ),
-                  ],
-                )
-              : null,
-          children: [
-            for (final e in tools)
-              _toolCard(e, running: e.kind == 'tool-start', nested: true),
-          ],
+                      const SizedBox(width: 4),
+                      const Icon(
+                        Icons.expand_more,
+                        size: 20,
+                        color: Colors.white54,
+                      ),
+                    ],
+                  )
+                : null,
+            children: [
+              for (final e in tools)
+                _toolCard(e, running: e.kind == 'tool-start', nested: true),
+            ],
+          ),
         ),
       ),
     );
@@ -4145,7 +4372,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       );
 
       if (!available) {
-        if (mounted && await Permission.microphone.isGranted) {
+        final granted = await Permission.microphone.isGranted;
+        if (mounted && granted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text(
@@ -4158,8 +4386,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       }
 
       if (!await _speech.hasPermission) {
+        final appGranted = await Permission.microphone.isGranted;
         if (mounted) {
-          final appGranted = await Permission.microphone.isGranted;
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
@@ -4203,6 +4431,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   Future<void> _listenSession({required bool restart}) async {
     final gen = ++_listenGen;
     _listenStarting = true;
+    final localeId = speechLocaleId(Localizations.localeOf(context));
     try {
       // Google's recognizer often returns error_client if listen() races
       // the just-created SpeechRecognizer.
@@ -4230,8 +4459,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             }
           });
         },
-        localeId: speechLocaleId(Localizations.localeOf(context)),
-        listenOptions: speechListenOptions(),
+        listenOptions: speechListenOptions().copyWith(localeId: localeId),
       );
       if (!mounted || gen != _listenGen) return;
       _listenSessionWasActive = true;
@@ -4379,27 +4607,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                           color: _isListening ? Colors.red : Colors.white70,
                         ),
                       ),
-                      IconButton.filled(
-                        tooltip:
-                            (_canStop &&
-                                    _input.text.trim().isEmpty &&
-                                    _photos.isEmpty)
-                                ? 'Stop'
-                                : 'Send',
-                        onPressed:
-                            (_canStop &&
-                                    _input.text.trim().isEmpty &&
-                                    _photos.isEmpty)
-                                ? _cancel
-                                : (_replyAllowed ? _send : null),
-                        icon: Icon(
-                          (_canStop &&
-                                  _input.text.trim().isEmpty &&
-                                  _photos.isEmpty)
-                              ? Icons.stop
-                              : Icons.arrow_upward,
-                        ),
-                      ),
+                      _sendOrStopButton(),
                     ],
                   ),
                 ],
@@ -4408,6 +4616,29 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           ],
         ),
       ),
+    );
+  }
+
+  Widget _sendOrStopButton() {
+    final stopMode =
+        _stopping ||
+        (_canStop && _input.text.trim().isEmpty && _photos.isEmpty);
+    if (!stopMode) {
+      return IconButton.filled(
+        tooltip: 'Send',
+        onPressed: _replyAllowed ? _send : null,
+        icon: const Icon(Icons.arrow_upward),
+      );
+    }
+    return IconButton.filled(
+      tooltip: _stopping ? 'Stopping…' : 'Stop',
+      onPressed: _stopping ? null : _cancel,
+      icon: _stopping
+          ? const SizedBox.square(
+              dimension: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.stop),
     );
   }
 
@@ -4526,47 +4757,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 }
 
-/// Compact two-state selector for the per-agent approval policy.
-class _ApprovalChip extends StatelessWidget {
-  const _ApprovalChip({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(999),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-        decoration: BoxDecoration(
-          color: selected
-              ? const Color(0xFF2F6BFF).withValues(alpha: 0.22)
-              : null,
-          border: Border.all(
-            color: selected ? const Color(0xFF2F6BFF) : const Color(0xFF33334A),
-          ),
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: 12,
-            color: selected ? const Color(0xFF9FC0FF) : const Color(0xFF8A8A9A),
-            fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _CopyButton extends StatefulWidget {
   final String text;
   const _CopyButton({required this.text});
@@ -4617,6 +4807,441 @@ class _CopyButtonState extends State<_CopyButton> {
         _copied ? Icons.check : Icons.copy_rounded,
         size: 14,
         color: _copied ? const Color(0xFF4ADE80) : Colors.white38,
+      ),
+    );
+  }
+}
+
+/// A chat transcript: host events keyed by the host's `seq`, plus phone-only
+/// notes (slash-command replies, send errors, "Stopped" settlements) kept in a
+/// separate key space. A phone note can never shadow or swallow a host event
+/// that later arrives with the same seq, and dedupe only ever compares host
+/// seqs with host seqs.
+class AgentTranscript {
+  final List<AgentEvent> _host = [];
+  final Set<int> _hostSeqs = {};
+  final List<({int anchor, int order, bool settlement, AgentEvent event})>
+  _local = [];
+  int _localCount = 0;
+
+  /// Host events in arrival order (read-only view).
+  List<AgentEvent> get host => List.unmodifiable(_host);
+  bool get isEmpty => _host.isEmpty && _local.isEmpty;
+
+  int get latestHostSeq {
+    var max = 0;
+    for (final e in _host) {
+      if (e.seq > max) max = e.seq;
+    }
+    return max;
+  }
+
+  int? get oldestHostSeq {
+    int? min;
+    for (final e in _host) {
+      if (e.seq > 0 && (min == null || e.seq < min)) min = e.seq;
+    }
+    return min;
+  }
+
+  /// Adds a live host event. Returns false when that host seq is already
+  /// present (replayed push). Events without a seq are always kept.
+  bool addHost(AgentEvent event) {
+    if (event.seq > 0 && !_hostSeqs.add(event.seq)) return false;
+    _host.add(event);
+    return true;
+  }
+
+  void replaceHost(Iterable<AgentEvent> events) {
+    _host
+      ..clear()
+      ..addAll(events);
+    _hostSeqs
+      ..clear()
+      ..addAll(_host.map((e) => e.seq).where((seq) => seq > 0));
+  }
+
+  /// Prepends an older page, skipping events already present.
+  void addOlder(Iterable<AgentEvent> events) {
+    final fresh = [
+      for (final e in events)
+        if (e.seq <= 0 || _hostSeqs.add(e.seq)) e,
+    ];
+    _host.insertAll(0, fresh);
+  }
+
+  /// A phone-only status/error line, shown after the host events seen so far.
+  void note(String kind, String text) => _addLocal(
+    AgentEvent(
+      seq: 0,
+      ts: DateTime.now().millisecondsSinceEpoch,
+      kind: kind,
+      text: text,
+    ),
+  );
+
+  void _addLocal(AgentEvent event, {bool settlement = false}) {
+    final order = ++_localCount;
+    _local.add((
+      anchor: latestHostSeq,
+      order: order,
+      settlement: settlement,
+      // Negative seqs are display-only keys; they never meet host seqs.
+      event: AgentEvent(
+        seq: -order,
+        ts: event.ts,
+        kind: event.kind,
+        text: event.text,
+        toolName: event.toolName,
+        toolInput: event.toolInput,
+        toolOutput: event.toolOutput,
+        refId: event.refId,
+      ),
+    ));
+  }
+
+  /// Ends every unfinished tool on the phone so the UI leaves "Working".
+  /// Settlements disappear by themselves once the host sends real tool ends.
+  void settleOpenTools(String output) {
+    final ts = DateTime.now().millisecondsSinceEpoch;
+    for (final start in mergeToolEvents(
+      display,
+    ).where((e) => e.kind == 'tool-start')) {
+      _addLocal(
+        AgentEvent(
+          seq: 0,
+          ts: ts,
+          kind: 'tool-end',
+          toolName: start.toolName,
+          toolInput: start.toolInput,
+          toolOutput: output,
+          refId: start.refId,
+        ),
+        settlement: true,
+      );
+    }
+  }
+
+  bool get hasOpenTools => transcriptHasOpenTools(display);
+
+  void clear() {
+    _host.clear();
+    _hostSeqs.clear();
+    _local.clear();
+  }
+
+  /// Host events with phone notes interleaved after the host event they
+  /// followed.
+  List<AgentEvent> get display {
+    if (_local.isEmpty) return List.of(_host);
+    // A settlement only stands in for a tool the host still shows as open.
+    final open = <String, int>{};
+    for (final e in mergeToolEvents(_host)) {
+      if (e.kind != 'tool-start') continue;
+      final key = '${e.refId}|${e.toolName}';
+      open[key] = (open[key] ?? 0) + 1;
+    }
+    final locals =
+        [
+          for (final l in _local)
+            if (!l.settlement) l else if (_take(open, l.event)) l,
+        ]..sort((a, b) {
+          final byAnchor = a.anchor.compareTo(b.anchor);
+          return byAnchor != 0 ? byAnchor : a.order.compareTo(b.order);
+        });
+    final out = <AgentEvent>[];
+    var i = 0;
+    for (final h in _host) {
+      while (i < locals.length && h.seq > 0 && locals[i].anchor < h.seq) {
+        out.add(locals[i++].event);
+      }
+      out.add(h);
+    }
+    while (i < locals.length) {
+      out.add(locals[i++].event);
+    }
+    return out;
+  }
+
+  static bool _take(Map<String, int> open, AgentEvent end) {
+    final key = '${end.refId}|${end.toolName}';
+    final count = open[key] ?? 0;
+    if (count == 0) return false;
+    open[key] = count - 1;
+    return true;
+  }
+}
+
+enum StopState { stopped, notRunning, unsupported, failed }
+
+/// What actually happened when the user pressed Stop.
+class StopOutcome {
+  const StopOutcome(this.state, this.message);
+  final StopState state;
+  final String message;
+
+  /// The turn is over on the PC (or was never running there).
+  bool get ended => state == StopState.stopped || state == StopState.notRunning;
+}
+
+/// Turns the host's answer to `agent.cancel` / `chat.cancel` (or the error
+/// thrown while asking) into an honest outcome for the UI.
+StopOutcome describeStopResult(
+  Object? result, {
+  Object? error,
+  bool library = false,
+}) {
+  if (error != null) {
+    final reason = error is RpcException ? error.message : '$error';
+    return StopOutcome(
+      StopState.failed,
+      'Couldn’t stop the agent: $reason. It may still be running on the PC.',
+    );
+  }
+  if (result is Map && result['ok'] == false) {
+    return library
+        ? const StopOutcome(
+            StopState.unsupported,
+            'This conversation can’t be stopped from the phone. Stop it on the PC.',
+          )
+        : const StopOutcome(
+            StopState.notRunning,
+            'That task was no longer running on the PC.',
+          );
+  }
+  return const StopOutcome(StopState.stopped, 'Stopped.');
+}
+
+/// Compact "what is the agent doing right now" header for a PC conversation,
+/// built from the chat summary's `live` field (absent on older hosts).
+class ChatLiveHeader extends StatefulWidget {
+  const ChatLiveHeader({super.key, required this.live, this.now});
+  final ChatLive live;
+
+  /// Clock override for tests.
+  final DateTime Function()? now;
+
+  /// Whether [live] carries anything worth a header.
+  static bool shows(ChatLive? live) =>
+      live != null &&
+      (const {'working', 'waiting', 'failed'}.contains(live.state) ||
+          live.todos.isNotEmpty);
+
+  @override
+  State<ChatLiveHeader> createState() => _ChatLiveHeaderState();
+}
+
+class _ChatLiveHeaderState extends State<ChatLiveHeader> {
+  Timer? _tick;
+  bool _expanded = false;
+
+  bool get _ticking =>
+      widget.live.turnStartedAt != null &&
+      (widget.live.state == 'working' || widget.live.state == 'waiting');
+
+  @override
+  void initState() {
+    super.initState();
+    _syncTimer();
+  }
+
+  @override
+  void didUpdateWidget(ChatLiveHeader oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncTimer();
+  }
+
+  void _syncTimer() {
+    if (_ticking && _tick == null) {
+      _tick = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (mounted) setState(() {});
+      });
+    } else if (!_ticking) {
+      _tick?.cancel();
+      _tick = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final live = widget.live;
+    final color = Status.color(live.state);
+    final now = (widget.now ?? DateTime.now)();
+    final started = live.turnStartedAt;
+    final todos = live.todos;
+    final done = live.todosDone;
+    final step =
+        live.step ??
+        live.activeTodo ??
+        (live.state == 'waiting'
+            ? 'Waiting for you'
+            : Status.label(live.state));
+    final meta = [
+      if (live.model != null) live.model!,
+      if (live.steps != null) '${live.steps} steps',
+    ].join(' · ');
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      child: NxCard(
+        accent: color,
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                LiveDot(color: color, pulse: live.state == 'working'),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    step,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: NX.text,
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                if (started != null && _ticking) ...[
+                  const SizedBox(width: 8),
+                  Text(
+                    formatElapsed(now.difference(started)),
+                    style: const TextStyle(
+                      color: NX.textDim,
+                      fontSize: 12,
+                      fontFeatures: NX.tabular,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            if (live.waitingFor != null) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: NX.waiting.withValues(alpha: .12),
+                  borderRadius: BorderRadius.circular(NX.radiusSm),
+                  border: Border.all(color: NX.waiting.withValues(alpha: .35)),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(
+                      Icons.front_hand_outlined,
+                      size: 16,
+                      color: NX.waiting,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        live.waitingFor!,
+                        style: const TextStyle(color: NX.text, fontSize: 12.5),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            if (todos.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              InkWell(
+                onTap: () => setState(() => _expanded = !_expanded),
+                borderRadius: BorderRadius.circular(8),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(99),
+                          child: LinearProgressIndicator(
+                            value: done / todos.length,
+                            minHeight: 5,
+                            color: color,
+                            backgroundColor: NX.line.withValues(alpha: .6),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        '$done/${todos.length}',
+                        style: const TextStyle(
+                          color: NX.textDim,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          fontFeatures: NX.tabular,
+                        ),
+                      ),
+                      Icon(
+                        _expanded ? Icons.expand_less : Icons.expand_more,
+                        size: 18,
+                        color: NX.textDim,
+                        semanticLabel: _expanded ? 'Hide plan' : 'Show plan',
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              if (_expanded)
+                for (final todo in todos)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(
+                          todo.state == 'done'
+                              ? Icons.check_circle
+                              : todo.state == 'active'
+                              ? Icons.play_circle_outline
+                              : Icons.radio_button_unchecked,
+                          size: 15,
+                          color: todo.state == 'done'
+                              ? NX.done
+                              : todo.state == 'active'
+                              ? NX.working
+                              : NX.textFaint,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            todo.text,
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              color: todo.state == 'done'
+                                  ? NX.textFaint
+                                  : NX.text,
+                              decoration: todo.state == 'done'
+                                  ? TextDecoration.lineThrough
+                                  : null,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+            ],
+            if (meta.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                meta,
+                style: const TextStyle(color: NX.textFaint, fontSize: 11),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

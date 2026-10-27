@@ -3,6 +3,9 @@ import fs from 'fs/promises';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { existsSync, realpathSync, statSync } from 'node:fs';
+import { deleteEntry, moveEntry } from '../workspace/files';
+
+export { deleteEntry, moveEntry };
 
 export function toPosixPath(p: string): string {
   return p.replace(/\\/g, '/');
@@ -30,6 +33,10 @@ export async function handleFsRead(rawPath: string): Promise<string> {
   if (stat.isDirectory()) {
     throw new Error(`Cannot read directory: ${p}`);
   }
+  // FIFOs block forever and devices like /dev/zero never end.
+  if (!stat.isFile()) {
+    throw new Error(`Not a regular file: ${p}`);
+  }
   const MAX_READ_BYTES = 5 * 1024 * 1024;
   if (stat.size > MAX_READ_BYTES) {
     throw new Error(`File is too large (${stat.size} bytes, max ${MAX_READ_BYTES} bytes)`);
@@ -41,6 +48,16 @@ export async function handleFsMkdir(rawPath: string): Promise<{ path: string; na
   const p = expandHostPath(rawPath);
   await fs.mkdir(p, { recursive: true });
   return { path: toPosixPath(p), name: basename(p) };
+}
+
+/** `fs.delete` {path, recursive?}: Trash first; see deleteEntry for the guards. */
+export function handleFsDelete(path: string, recursive?: boolean) {
+  return deleteEntry(path, { recursive: recursive === true });
+}
+
+/** `fs.move` {from, to}: no-clobber move/rename of files and folders, cross-filesystem safe. */
+export function handleFsMove(from: string, to: string) {
+  return moveEntry(from, to);
 }
 
 export function getWindowsDrives(): FileEntry[] {
@@ -189,17 +206,28 @@ export function parseGitStatusPorcelain(output: string): Omit<GitWorkingTree, 'c
   return { branch, ahead, behind, changed: fileLines.length, files };
 }
 
+/** git status is async and bounded: a huge or network-mounted repo must not stall the host. */
+export const GIT_STATUS_TIMEOUT_MS = 4000;
+
 export async function gitWorkingTree(cwd: string): Promise<GitWorkingTree | null> {
   const dir = expandHostPath(cwd);
   if (!dir || !existsSync(dir)) return null;
   try {
-    const proc = Bun.spawnSync(['git', '-C', dir, 'status', '-sb', '--porcelain=v1'], {
+    const proc = Bun.spawn(['git', '-C', dir, 'status', '-sb', '--porcelain=v1'], {
+      stdin: 'ignore',
       stdout: 'pipe',
-      stderr: 'pipe',
-      timeout: 4000,
+      stderr: 'ignore',
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' },
     });
-    if (proc.exitCode !== 0) return null;
-    const text = proc.stdout?.toString() ?? '';
+    const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* gone */ } }, GIT_STATUS_TIMEOUT_MS);
+    let text: string;
+    let code: number;
+    try {
+      [text, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (code !== 0) return null;
     const parsed = parseGitStatusPorcelain(text);
     if (!parsed) return null;
     return { cwd: toPosixPath(dir), ...parsed };

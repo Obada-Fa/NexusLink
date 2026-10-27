@@ -22,6 +22,10 @@
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
+    <!-- Resume PC monitoring after a reboot or app update, only if the user left it on. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <!-- Reconnect monitoring as soon as the network returns. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
     <application
         android:label="${appLabel}"
@@ -32,6 +36,13 @@
         android:dataExtractionRules="@xml/chat_data_extraction_rules">
         <service android:name=".LiveActivityService" android:exported="false" android:foregroundServiceType="connectedDevice"/>
         <receiver android:name=".NotificationActionReceiver" android:exported="false"/>
+        <!-- Only the system sends these (protected broadcasts), so it stays unexported. -->
+        <receiver android:name=".BootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+            </intent-filter>
+        </receiver>
         <activity
             android:name=".MainActivity"
             android:exported="true"

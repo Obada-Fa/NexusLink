@@ -118,4 +118,36 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+
+  testWidgets(
+    'running windows offer Close and Restart without a hidden long-press',
+    (tester) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            appsProvider.overrideWith(TestApps.new),
+            windowsProvider.overrideWith(TestWindows.new),
+            appSessionsProvider.overrideWith(TestSessions.new),
+          ],
+          child: const MaterialApp(home: LauncherScreen()),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('View desktop'), findsOneWidget);
+      final menu = find.byTooltip('Actions for Editor');
+      await tester.ensureVisible(menu);
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      expect(find.text('Open on phone'), findsOneWidget);
+      expect(find.text('Close window'), findsOneWidget);
+      expect(find.text('Restart app'), findsOneWidget);
+      await tester.tap(find.text('Restart app'));
+      await tester.pumpAndSettle();
+      expect(find.text('Restart Editor?'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
 }

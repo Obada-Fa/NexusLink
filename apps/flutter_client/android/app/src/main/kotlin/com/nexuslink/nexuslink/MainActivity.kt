@@ -103,7 +103,7 @@ class MainActivity : FlutterActivity() {
                         val allowed=(Build.VERSION.SDK_INT<33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED) && manager.areNotificationsEnabled()
                         if(allowed)manager.notify("watch-test",9003,NotificationCompat.Builder(this,"task_attention")
                             .setSmallIcon(R.mipmap.ic_launcher).setContentTitle("NexusLink watch test")
-                            .setContentText("Check whether this appears on your TicWatch.")
+                            .setContentText("Check whether this appears on your watch.")
                             .setContentIntent(android.app.PendingIntent.getActivity(this,9003,Intent(this,MainActivity::class.java),android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE))
                             .setAutoCancel(true).build())
                         result.success(mapOf("posted" to allowed))
@@ -114,7 +114,13 @@ class MainActivity : FlutterActivity() {
                         if(Build.VERSION.SDK_INT>=26)startForegroundService(intent) else startService(intent)
                         result.success(null)
                     }
-                    "live.stop" -> {stopService(Intent(this,LiveActivityService::class.java));result.success(null)}
+                    "live.stop" -> {
+                        // An explicit stop: do not restart after reboot. Alerts stay unless asked.
+                        getSharedPreferences("live",0).edit().putBoolean("requested",false).apply()
+                        LiveActivityService.clearAlertsOnStop=args["clearAlerts"]==true
+                        stopService(Intent(this,LiveActivityService::class.java))
+                        result.success(null)
+                    }
                     "live.pendingTask" -> {val target=intent.getStringExtra("host");val id=intent.getStringExtra("taskId");intent.removeExtra("taskId");intent.removeExtra("host");result.success(if(target==null)null else mapOf("taskId" to id,"host" to target))}
                     else -> result.notImplemented()
                 }
@@ -122,7 +128,18 @@ class MainActivity : FlutterActivity() {
         }
     }
     override fun onNewIntent(intent:Intent) {super.onNewIntent(intent);setIntent(intent);if(::channel.isInitialized)channel.invokeMethod("openTask",mapOf("taskId" to intent.getStringExtra("taskId"),"host" to intent.getStringExtra("host")))}
-    override fun onResume(){super.onResume();LiveActivityService.visible=true;LiveActivityService.instance?.updateOverlay()}
+    override fun onResume(){super.onResume();LiveActivityService.visible=true;LiveActivityService.instance?.updateOverlay();resumeMonitoring()}
+    /** Monitoring the user left on but Android stopped (or refused to restart in the background) resumes when the app is opened. */
+    private fun resumeMonitoring(){
+        val live=getSharedPreferences("live",0)
+        val host=live.getString("host","").orEmpty()
+        if(LiveActivityService.running || !live.getBoolean("requested",false) || host.isEmpty())return
+        if(Credentials.get(this,host)==null)return
+        try{
+            val intent=Intent(this,LiveActivityService::class.java).putExtra("host",host)
+            if(Build.VERSION.SDK_INT>=26)startForegroundService(intent) else startService(intent)
+        }catch(e:Exception){LiveActivityService.lastError="Could not resume monitoring: ${e.message}"}
+    }
     override fun onPause(){super.onPause();LiveActivityService.visible=false;LiveActivityService.instance?.updateOverlay()}
     private fun enqueue(args:Map<String,Any?>,result:MethodChannel.Result) {
         val name=(args["name"] as String).replace(Regex("[\\\\/\\u0000-\\u001f]"),"_")

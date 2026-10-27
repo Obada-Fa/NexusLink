@@ -349,8 +349,9 @@ class _EmbeddedTerminalState extends ConsumerState<EmbeddedTerminal>
     if (!mounted ||
         _remote?.ready != true ||
         !TickerMode.valuesOf(context).enabled ||
-        ModalRoute.of(context)?.isCurrent == false)
+        ModalRoute.of(context)?.isCurrent == false) {
       return;
+    }
     _terminalViewKey.currentState?.requestKeyboard();
   }
 

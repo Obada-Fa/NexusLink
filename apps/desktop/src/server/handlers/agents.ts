@@ -1,6 +1,8 @@
 import { sessionActivity } from '../workspace/session-activity';
 import { persistAgent, loadedAgentRows } from '../workspace/agent-store';
 import { CodexAppServer } from '../../../../../packages/chat-core/src/providers/codex';
+import { clip, describeTool } from '../../../../../packages/chat-core/src/providers/live';
+import type { ChatLive } from '../../../../../packages/rpc-types/src/chat';
 // Agent gateway: run AI coding agents (Claude Code, Cursor CLI, OpenCode,
 // Antigravity) on the host and expose them to the phone as chat sessions with a
 // normalized event stream — the phone renders a native chat UI, never a terminal.
@@ -327,7 +329,7 @@ export function listAgents(): AgentInfo[] {
         // Include Go plan status for OpenCode so the phone can show a badge.
         // Uses cached value (populated during warm-up) — no extra blocking call.
         ...(d.id === 'opencode' && bin
-          ? { plan: ocPlanCache.get(bin) ?? 'unknown' }
+          ? { plan: fetchOpencodeGoStatus(bin) }
           : {}),
       },
     };
@@ -496,62 +498,74 @@ export function pickModelVariant(
 }
 
 /**
- * Detect whether the user has an OpenCode Go subscription configured by
- * parsing `opencode auth list` output. Result is cached with the same TTL
- * as the model list so we don't block every RPC call.
+ * Run a short catalog command off the RPC thread. Output is only ever read
+ * from cache by agent.list / agent.listModels, so a slow or offline CLI can
+ * never block the host.
  */
-export function fetchOpencodeGoStatus(bin: string): 'go' | 'byok' | 'unknown' {
-  const now = Date.now();
-  const cacheTime = ocPlanCacheTime.get(bin) ?? 0;
-  const cached = ocPlanCache.get(bin);
-  if (cached !== undefined && now - cacheTime < MODEL_CACHE_TTL_MS) return cached;
-
-  let status: 'go' | 'byok' | 'unknown' = 'unknown';
+async function runCatalogCommand(argv: string[], timeoutMs: number): Promise<string> {
+  const proc = Bun.spawn(spawnArgv(argv), {
+    stdin: 'ignore',
+    stdout: 'pipe',
+    stderr: 'ignore',
+    env: process.env as Record<string, string>,
+  } as unknown as SpawnOpts);
+  const timer = setTimeout(() => { try { proc.kill(); } catch { /* exited */ } }, timeoutMs);
   try {
-    const proc = Bun.spawnSync(spawnArgv([bin, 'auth', 'list']), {
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeout: 5000,
-      env: process.env as Record<string, string>,
-    });
-    const text = (proc.stdout?.toString() ?? '').toLowerCase();
-    // OpenCode Go appears as a provider named "opencode" or "opencode-go"
-    // in the auth list. Look for the domain too as a fallback.
-    if (
-      /\bopencode\b/.test(text) ||
-      text.includes('opencode.ai') ||
-      text.includes('go.opencode')
-    ) {
-      status = 'go';
-    } else if (text.trim().length > 0) {
-      // Some providers configured, but not Go
-      status = 'byok';
-    }
-  } catch {
-    status = 'unknown';
+    const [text] = await Promise.all([new Response(proc.stdout as ReadableStream).text(), proc.exited]);
+    return text;
+  } finally {
+    clearTimeout(timer);
   }
-
-  ocPlanCache.set(bin, status);
-  ocPlanCacheTime.set(bin, now);
-  return status;
 }
 
-function fetchLiveModels(agentId: string, bin: string): AgentModelOption[] {
-  if (agentId === 'claude' || agentId === 'mock') return [];
-  // For opencode: use --refresh flag so we always get the latest from the registry
-  const argv = agentId === 'opencode' ? [bin, 'models', '--refresh'] : [bin, 'models'];
-  try {
-    const proc = Bun.spawnSync(spawnArgv(argv), {
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeout: 8000,
-      env: process.env as Record<string, string>,
-    });
-    const text = proc.stdout?.toString() ?? '';
-    return parseAgentModelList(text);
-  } catch {
-    return [];
+const catalogRefreshes = new Map<string, Promise<void>>();
+
+/**
+ * OpenCode Go plan status from `opencode auth list`, cached. Returns the cached
+ * value immediately and refreshes in the background when stale.
+ */
+export function fetchOpencodeGoStatus(bin: string): 'go' | 'byok' | 'unknown' {
+  const cached = ocPlanCache.get(bin);
+  if (cached === undefined || Date.now() - (ocPlanCacheTime.get(bin) ?? 0) >= MODEL_CACHE_TTL_MS) {
+    const key = `plan:${bin}`;
+    if (!catalogRefreshes.has(key) && (process.env.NODE_ENV !== 'test' || process.env.NEXUSLINK_TEST_AGENT_CATALOG === '1')) {
+      catalogRefreshes.set(key, runCatalogCommand([bin, 'auth', 'list'], 5000).then((raw) => {
+        const text = raw.toLowerCase();
+        // OpenCode Go appears as a provider named "opencode"/"opencode-go", or by domain.
+        const status = /\bopencode\b/.test(text) || text.includes('opencode.ai') || text.includes('go.opencode')
+          ? 'go' : text.trim().length > 0 ? 'byok' : 'unknown';
+        ocPlanCache.set(bin, status);
+        ocPlanCacheTime.set(bin, Date.now());
+      }).catch(() => {}).finally(() => catalogRefreshes.delete(key)));
+    }
   }
+  return cached ?? 'unknown';
+}
+
+/** Refresh one agent's live model list in the background (never on the RPC thread). */
+function refreshAgentModels(agentId: string, network = false): Promise<void> {
+  const def = AGENT_DEFS.find((d) => d.id === agentId);
+  if (!def?.bin || agentId === 'claude' || agentId === 'mock') return Promise.resolve();
+  // Unit tests never shell out to the developer's real agent CLIs.
+  if (process.env.NODE_ENV === 'test' && process.env.NEXUSLINK_TEST_AGENT_CATALOG !== '1') return Promise.resolve();
+  const running = catalogRefreshes.get(agentId);
+  if (running) return running;
+  const bin = which(def.bin);
+  if (!bin) return Promise.resolve();
+  // `opencode models --refresh` hits the network; only an explicit refresh asks for it.
+  const argv = agentId === 'opencode' && network ? [bin, 'models', '--refresh'] : [bin, 'models'];
+  const job = runCatalogCommand(argv, 8000).then((text) => {
+    const live = parseAgentModelList(text);
+    if (live.length) {
+      modelCache.set(agentId, augmentAgentModels(agentId, live));
+      modelCacheLive.set(agentId, true);
+    }
+    modelCacheTime.set(agentId, Date.now());
+  }).catch(() => {
+    modelCacheTime.set(agentId, Date.now());
+  }).finally(() => catalogRefreshes.delete(agentId));
+  catalogRefreshes.set(agentId, job);
+  return job;
 }
 
 function augmentAgentModels(agentId: string, models: AgentModelOption[]): AgentModelOption[] {
@@ -561,61 +575,37 @@ function augmentAgentModels(agentId: string, models: AgentModelOption[]): AgentM
   }));
 }
 
+/**
+ * Cached model catalog. Always answers immediately (live list when known,
+ * built-in fallback otherwise) and refreshes stale entries in the background.
+ */
 export function listAgentModels(agentId: string, forceRefresh = false): AgentModelOption[] {
   const def = AGENT_DEFS.find((d) => d.id === agentId);
   if (!def) return [];
+  const stale = Date.now() - (modelCacheTime.get(agentId) ?? 0) > MODEL_CACHE_TTL_MS;
+  if (def.bin && (forceRefresh || stale)) void refreshAgentModels(agentId, forceRefresh);
+  if (!modelCache.has(agentId)) modelCache.set(agentId, augmentAgentModels(agentId, def.capabilities.models));
+  return augmentAgentModels(agentId, modelCache.get(agentId)!);
+}
 
-  // Return cached result if it's still fresh and refresh wasn't forced
-  const cacheTime = modelCacheTime.get(agentId) ?? 0;
-  const cacheStale = Date.now() - cacheTime > MODEL_CACHE_TTL_MS;
-  if (!forceRefresh && modelCacheLive.get(agentId) && modelCache.has(agentId) && !cacheStale) {
-    return augmentAgentModels(agentId, modelCache.get(agentId)!);
-  }
-
-  if (def.bin) {
-    const bin = which(def.bin);
-    if (bin) {
-      const live = fetchLiveModels(agentId, bin);
-      if (live.length) {
-        const augmented = augmentAgentModels(agentId, live);
-        modelCache.set(agentId, augmented);
-        modelCacheLive.set(agentId, true);
-        modelCacheTime.set(agentId, Date.now());
-        return augmented;
-      }
-    }
-  }
-
-  if (modelCache.has(agentId)) {
-    return augmentAgentModels(agentId, modelCache.get(agentId)!);
-  }
-
-  const augmented = augmentAgentModels(agentId, def.capabilities.models);
-  modelCache.set(agentId, augmented);
-  modelCacheLive.set(agentId, false);
-  modelCacheTime.set(agentId, Date.now());
-  return augmented;
+/** Await the background catalog refresh (tests and diagnostics). */
+export async function refreshAgentCatalogs(): Promise<void> {
+  await Promise.all(AGENT_DEFS.map((d) => refreshAgentModels(d.id)));
 }
 
 function warmAgentModelCatalogs(): void {
-  for (const def of AGENT_DEFS) {
-    if (!def.bin) continue;
-    const bin = which(def.bin);
-    if (!bin) continue;
-    try {
-      listAgentModels(def.id);
-    } catch {
-      // Offline host — fallback catalog still works.
+  // Test runs and headless tools must not spawn every agent CLI at import time.
+  if (process.env.NODE_ENV === 'test' || process.env.NEXUSLINK_DISABLE_CHAT_DISCOVERY === '1') return;
+  const timer = setTimeout(() => {
+    for (const def of AGENT_DEFS) {
+      if (!def.bin) continue;
+      const bin = which(def.bin);
+      if (!bin) continue;
+      void refreshAgentModels(def.id);
+      if (def.id === 'opencode') fetchOpencodeGoStatus(bin);
     }
-    // Prime the Go plan cache for OpenCode so listAgents() has it ready.
-    if (def.id === 'opencode') {
-      try {
-        fetchOpencodeGoStatus(bin);
-      } catch {
-        // Auth list unavailable — 'unknown' will be served.
-      }
-    }
-  }
+  }, 2000);
+  (timer as { unref?: () => void }).unref?.();
 }
 
 warmAgentModelCatalogs();
@@ -811,6 +801,9 @@ export function claudeSpawnArgs(opts: {
     '--output-format', 'stream-json',
     '--verbose',
     '--permission-mode', opts.mode === 'plan' ? 'plan' : 'acceptEdits',
+    // Route permission prompts to us over stdin/stdout (control_request
+    // can_use_tool). Without it --print silently denies anything that would ask.
+    '--permission-prompt-tool', 'stdio',
   ];
   if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
   if (opts.resumeId) argv.push('--resume', opts.resumeId);
@@ -1036,7 +1029,49 @@ function loadAgentSessionsFromDisk(): void {
   } catch (_) {}
 }
 
+/**
+ * Streamed text arrives token by token. Each chunk is broadcast live, but
+ * storage keeps one coalesced event per message (flushed on the next
+ * non-text event, a new message, or after a second of quiet).
+ */
+const pendingDeltas = new Map<string, { session: AgentSession; event: AgentEvent; timer: ReturnType<typeof setTimeout> }>();
+function flushDelta(agentSessionId: string): void {
+  const pending = pendingDeltas.get(agentSessionId);
+  if (!pending) return;
+  pendingDeltas.delete(agentSessionId);
+  clearTimeout(pending.timer);
+  const { session, event } = pending;
+  session.history.push(event);
+  if (session.history.length > HISTORY_CAP) session.history.splice(0, 100);
+  savedSequences.set(agentSessionId, Math.max(savedSequences.get(agentSessionId) ?? 0, session.seq));
+  void persistAgent({ info: { ...session.info }, events: [event] }).catch((error) => console.error('[agents] Persistence failed:', error.message));
+}
+/** Persist any buffered streamed text now (before history reads). */
+export function flushAgentDeltas(agentSessionId?: string): void {
+  for (const id of agentSessionId ? [agentSessionId] : [...pendingDeltas.keys()]) flushDelta(id);
+}
+function emitDelta(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): void {
+  const id = session.info.agentSessionId;
+  const full: AgentEvent = { ...event, seq: ++session.seq, ts: Date.now(), turnId: session.info.turnId };
+  session.info.updatedAt = full.ts;
+  const activityChanged = session.info.activity !== 'responding';
+  if (activityChanged) { session.info.activity = 'responding'; session.info.activityAt = full.ts; }
+  const pending = pendingDeltas.get(id);
+  if (pending && pending.event.refId === full.refId) {
+    pending.event = { ...pending.event, text: (pending.event.text ?? '') + (full.text ?? '') };
+    clearTimeout(pending.timer);
+    pending.timer = setTimeout(() => flushDelta(id), 1000);
+  } else {
+    flushDelta(id);
+    pendingDeltas.set(id, { session, event: full, timer: setTimeout(() => flushDelta(id), 1000) });
+  }
+  broadcast({ type: 'agent-event', agentSessionId: id, event: full });
+  if (activityChanged) broadcast({ type: 'agent-session-update', session: { ...session.info } });
+}
+
 function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): void {
+  if (event.kind === 'text-delta') { emitDelta(session, event); return; }
+  flushDelta(session.info.agentSessionId);
   if (isRedundantToolStart(session.history, event)) return;
   const full: AgentEvent = { ...event, seq: ++session.seq, ts: Date.now(), turnId: session.info.turnId };
   session.info.updatedAt=full.ts;
@@ -1243,59 +1278,65 @@ export function listHostChats(agent?: string): AgentHostChat[] {
     .slice(0, 80);
 }
 
+/** Parent PID from /proc (Linux), or undefined. */
+function parentPid(pid: number): number | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // Field 4, after the parenthesised command name (which may contain spaces).
+    const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+    return Number.isFinite(ppid) ? ppid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+function isOwnDescendant(pid: number): boolean {
+  let current: number | undefined = pid;
+  for (let depth = 0; current && current > 1 && depth < 32; depth++) {
+    current = parentPid(current);
+    if (current === process.pid) return true;
+  }
+  return false;
+}
+
+/**
+ * Processes NexusLink itself started for this chat. A chat ID appearing in some
+ * other process's command line (e.g. Claude Desktop keeping `claude --resume=<id>`
+ * alive while idle) is neither "busy" nor ours to signal.
+ */
 export function findHostChatProcesses(agent: string, hostChatId: string): number[] {
   const pids: number[] = [];
-  if (!hostChatId) return pids;
-  if (process.platform === 'linux') {
-    try {
-      const entries = readdirSync('/proc');
-      for (const entry of entries) {
-        if (!/^[0-9]+$/.test(entry)) continue;
-        const pid = Number(entry);
-        if (pid === process.pid) continue;
-        try {
-          const cmd = readFileSync(`/proc/${entry}/cmdline`, 'utf8');
-          if (cmd.includes(hostChatId)) {
-            pids.push(pid);
-          }
-        } catch {}
-      }
-    } catch {}
-  } else if (process.platform === 'win32') {
-    try {
-      const proc = Bun.spawnSync(
-        ['powershell.exe', '-NoProfile', '-Command', `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*${hostChatId}*" } | Select-Object -ExpandProperty ProcessId`],
-        { stdout: 'pipe' },
-      );
-      const text = proc.stdout.toString('utf8');
-      for (const line of text.split('\n')) {
-        const num = Number(line.trim());
-        if (num > 0 && num !== process.pid) pids.push(num);
-      }
-    } catch {}
-  }
+  if (!hostChatId || process.platform !== 'linux') return pids;
+  try {
+    for (const entry of readdirSync('/proc')) {
+      if (!/^[0-9]+$/.test(entry)) continue;
+      const pid = Number(entry);
+      if (pid === process.pid) continue;
+      try {
+        const args = readFileSync(`/proc/${entry}/cmdline`, 'utf8').split('\0');
+        if (!args.some((arg) => arg === hostChatId || arg.endsWith(`=${hostChatId}`))) continue;
+        if (isOwnDescendant(pid)) pids.push(pid);
+      } catch { /* exited */ }
+    }
+  } catch { /* no procfs */ }
   return pids;
 }
 
-export function isHostChatBusy(agent: string, hostChatId: string, cwd?: string): boolean {
+/** Busy only when NexusLink is running a turn; native activity comes from the chat library's live status. */
+export function isHostChatBusy(agent: string, hostChatId: string, _cwd?: string): boolean {
   loadAgentSessionsFromDisk();
-  const managed = [...agentSessions.values()].find(
-    (s) => (s.info.hostChatId === hostChatId || s.info.agentSessionId === hostChatId) && s.info.status === 'running',
+  return [...agentSessions.values()].some(
+    (s) => s.info.agent === agent && (s.info.hostChatId === hostChatId || s.info.agentSessionId === hostChatId) && s.info.status === 'running' && s.info.busy,
   );
-  if (managed && managed.info.busy) return true;
-
-  const pids = findHostChatProcesses(agent, hostChatId);
-  return pids.length > 0;
 }
 
+/** Interrupt only processes NexusLink spawned for this chat. */
 export function killHostChatProcesses(agent: string, hostChatId: string): boolean {
-  const pids = findHostChatProcesses(agent, hostChatId);
   let killed = false;
-  for (const pid of pids) {
+  for (const pid of findHostChatProcesses(agent, hostChatId)) {
     try {
       process.kill(pid, 'SIGINT');
       killed = true;
-    } catch {}
+    } catch { /* exited */ }
   }
   return killed;
 }
@@ -1305,6 +1346,10 @@ export function openHostChat(params: {
   hostChatId: string;
   cwd?: string;
   title?: string;
+  /** Pre-parsed native transcript (from the chat library worker); skips the synchronous parse. */
+  history?: HostChatDelta[];
+  /** Native activity time, so attaching never makes an old chat look brand new. */
+  updatedAt?: number;
 }): AgentSessionInfo {
   loadAgentSessionsFromDisk();
   const { agent, hostChatId } = params;
@@ -1346,9 +1391,10 @@ export function openHostChat(params: {
   if (busy) {
     session.info.busy = true;
   }
+  if (params.updatedAt && Number.isFinite(params.updatedAt)) session.info.updatedAt = params.updatedAt;
   const def = AGENT_DEFS.find((d) => d.id === agent);
   const bin = def?.bin ? which(def.bin) : null;
-  const history = loadHostChatHistory(agent, hostChatId, bin);
+  const history = params.history ?? loadHostChatHistory(agent, hostChatId, bin);
   seedHistory(session, history);
   if (!history.length) {
     seedHistory(session, [{
@@ -1373,6 +1419,7 @@ export function agentHistory(agentSessionId: string): AgentEvent[] {
   loadAgentSessionsFromDisk();
   const session = agentSessions.get(agentSessionId);
   if (!session) return [];
+  flushDelta(agentSessionId);
   if (session.history.length === 0 && session.info.hostChatId) {
     const def = AGENT_DEFS.find((d) => d.id === session.info.agent);
     const bin = def?.bin ? which(def.bin) : null;
@@ -1395,10 +1442,10 @@ export function promptAgent(
   agentSessionId: string,
   text: string,
   opts: AgentPromptOpts = {},
-): { ok: boolean } {
+): { ok: boolean; reason?: string } {
   loadAgentSessionsFromDisk();
   const session = agentSessions.get(agentSessionId);
-  if (!session || session.info.status !== 'running') return { ok: false };
+  if (!session || session.info.status !== 'running') return { ok: false, reason: 'This task is closed. Start a new chat.' };
   if (session.info.hostChatId?.startsWith('ide:')) throw new Error('Cursor IDE chats are read only. Start a new chat to use Cursor CLI.');
   if(session.info.busy) throw new Error('This task is already working. Stop it before sending another prompt.');
   if (session.info.agent === 'codex' && opts.mode === 'plan') throw new Error('Codex Plan mode is unavailable. Select Agent mode.');
@@ -1407,7 +1454,7 @@ export function promptAgent(
   const key = parseEnvApiKey(text, ['CURSOR_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENAI_API_KEY']);
   const display = (key ? `${key.name}=••••` : text.trim())
     || (materialized.files.length ? 'Attached photo(s)' : '');
-  if (!display) return { ok: false };
+  if (!display) return { ok: false, reason: 'Type a message or attach a photo.' };
 
   // Auto-name the session if it still has the default/generic name
   if (isDefaultSessionTitle(session.info.title, session.info.agent)) {
@@ -1433,6 +1480,43 @@ export function promptAgent(
     images: materialized.files,
   });
   return { ok: true };
+}
+
+/**
+ * What a turn NexusLink is driving is doing right now, in the same shape the
+ * chat library reports for chats running in other apps.
+ */
+export function agentSessionLive(agentSessionId: string): ChatLive | undefined {
+  const session = agentSessions.get(agentSessionId);
+  if (!session || !(session.info.busy || session.info.taskState === 'waiting')) return undefined;
+  const recent = session.history.slice(-300);
+  const waiting = pendingAgentApprovals(agentSessionId).at(-1);
+  const open = unmatchedToolStarts(recent).at(-1);
+  let lastText = pendingDeltas.get(agentSessionId)?.event.text;
+  let turnStartedAt: number | undefined;
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const e = recent[i]!;
+    if (lastText === undefined && (e.kind === 'text' || e.kind === 'text-delta') && e.text?.trim()) lastText = e.text;
+    if (e.kind === 'user') { turnStartedAt = e.ts; break; }
+  }
+  const last = recent.at(-1);
+  const current = waiting ?? open;
+  const described = current
+    ? describeTool(current.toolName ?? 'tool', current.toolInput)
+    : last?.kind === 'thinking' ? { step: 'Thinking', activity: 'thinking' } : { step: lastText ? 'Responding' : 'Thinking', activity: lastText ? 'responding' : 'thinking' };
+  const live: ChatLive = {
+    state: waiting ? 'waiting' : 'working',
+    step: described.step,
+    activity: waiting ? 'waiting' : described.activity,
+    via: 'nexuslink',
+  };
+  if (current?.toolName) live.tool = current.toolName;
+  if (waiting) live.waitingFor = clip(waiting.text || `Approve ${waiting.toolName ?? 'action'}`, 200);
+  if (turnStartedAt) live.turnStartedAt = turnStartedAt;
+  if (session.info.updatedAt) live.updatedAt = session.info.updatedAt;
+  const text = clip(lastText);
+  if (text) live.lastText = text;
+  return live;
 }
 
 export function renameAgentSession(
@@ -1486,6 +1570,7 @@ export function cancelAgent(agentSessionId: string): { ok: boolean } {
 export function closeAgentSession(agentSessionId: string): { ok: boolean } {
   const session = agentSessions.get(agentSessionId);
   if (!session) return { ok: false };
+  flushDelta(agentSessionId);
   clearAllPermissionTimeouts(agentSessionId);
   session.adapter?.close?.();
   session.info.status = 'exited';
@@ -2609,24 +2694,29 @@ class ClaudeAdapter implements AgentAdapter {
       }, this.streamedText));
     } else if (type === 'system' && msg.subtype === 'init') {
       emit(s, { kind: 'status', text: 'ready' });
-    } else if (type === 'control_request' || msg.subtype === 'can_use_tool') {
-      const requestId = String(msg.request_id ?? msg.id ?? crypto.randomUUID());
-      const tool = (msg.request as Record<string, unknown> | undefined) ?? msg;
-      
-      const toolName = String(tool.tool_name ?? tool.name ?? 'tool');
-      const toolInput = (tool.input ?? tool.tool_input ?? {}) as Record<string, unknown>;
-      const toolInputStr = JSON.stringify(toolInput, null, 2);
-
+    } else if (type === 'control_cancel_request') {
+      // Claude withdrew a prompt (turn interrupted or answered elsewhere).
+      const requestId = String(msg.request_id ?? '');
+      if (s.pendingPermissions.delete(requestId)) {
+        clearPermissionTimeout(s.info.agentSessionId, requestId);
+        settleApproval(s, requestId, 'canceled');
+      }
+    } else if (type === 'control_request') {
+      const requestId = String(msg.request_id ?? crypto.randomUUID());
+      const request = (msg.request as Record<string, unknown> | undefined) ?? {};
+      if (request.subtype !== 'can_use_tool') {
+        // Hooks, MCP and other host callbacks are not offered by this client.
+        this.writeControl({ type: 'control_response', response: { subtype: 'error', request_id: requestId, error: `Unsupported request: ${String(request.subtype ?? 'unknown')}` } });
+        return;
+      }
+      const toolName = String(request.tool_name ?? 'tool');
+      const toolInput = (request.input ?? {}) as Record<string, unknown>;
       const respond = (allow: boolean) => {
-        try {
-          const stdin = this.proc?.stdin as unknown as { write(s: string): unknown; flush?: () => void } | undefined;
-          stdin?.write(JSON.stringify({
-            type: 'control_response',
-            request_id: requestId,
-            response: { allowed: allow },
-          }) + '\n');
-          stdin?.flush?.();
-        } catch {
+        // Claude's SDK control protocol: allow must echo the (possibly edited) input.
+        const decision = allow
+          ? { behavior: 'allow', updatedInput: toolInput }
+          : { behavior: 'deny', message: 'The user denied this action from NexusLink.' };
+        if (!this.writeControl({ type: 'control_response', response: { subtype: 'success', request_id: requestId, response: decision } })) {
           emit(s, { kind: 'error', text: 'failed to send permission response' });
         }
       };
@@ -2654,11 +2744,23 @@ class ClaudeAdapter implements AgentAdapter {
         kind: 'permission-request',
         refId: requestId,
         toolName,
-        toolInput: toolInputStr,
+        toolInput: JSON.stringify(toolInput, null, 2),
         text: safety.reason || `Allow ${toolName}?`,
       });
       s.pendingPermissions.set(requestId, respond);
       trackPermissionTimeout(s, requestId);
+    }
+  }
+
+  private writeControl(message: unknown): boolean {
+    try {
+      const stdin = this.proc?.stdin as unknown as { write(s: string): unknown; flush?: () => void } | undefined;
+      if (!stdin) return false;
+      stdin.write(JSON.stringify(message) + '\n');
+      stdin.flush?.();
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -3537,6 +3639,8 @@ export function parseCodexStreamEvent(msg: Record<string, unknown>): AgentDelta[
   return [];
 }
 
+/** An app-server kept for a continued Codex chat is closed after this much idle time. */
+const CODEX_IDLE_CLOSE_MS = 10 * 60 * 1000;
 class CodexAppServerAdapter implements AgentAdapter {
   private server?: CodexAppServer;
   private initialization?: Promise<void>;
@@ -3544,8 +3648,18 @@ class CodexAppServerAdapter implements AgentAdapter {
   private turnId?: string;
   private generation=0;
   private streamed = new Set<string>();
+  private idleTimer?: ReturnType<typeof setTimeout>;
   constructor(private session: AgentSession) {}
   bindHostChat(id:string) {this.threadId=id;}
+  /** Each continued chat holds a codex app-server; release it when the chat goes quiet. */
+  private scheduleIdleClose() {
+    clearTimeout(this.idleTimer);
+    this.idleTimer=setTimeout(()=>{
+      if(this.session.info.busy || this.session.pendingPermissions.size)return this.scheduleIdleClose();
+      this.server?.close();this.server=undefined;this.initialization=undefined;
+    },CODEX_IDLE_CLOSE_MS);
+    (this.idleTimer as {unref?:()=>void}).unref?.();
+  }
   private async ready() {
     if(!this.initialization) {
       const server=new CodexAppServer({
@@ -3564,6 +3678,7 @@ class CodexAppServerAdapter implements AgentAdapter {
   }
   prompt(text:string,options:AdapterPromptOpts={}) {
     const generation=++this.generation;
+    clearTimeout(this.idleTimer);
     this.streamed.clear();
     void this.start(text,options,generation).catch(()=>{
       if(generation!==this.generation)return;
@@ -3587,7 +3702,8 @@ class CodexAppServerAdapter implements AgentAdapter {
   }
   private notification(method:string,params:any) {
     if(params?.threadId && params.threadId!==this.threadId)return;
-    if(!this.session.info.busy)return;
+    // Late items after turn/completed (or a turn started by another client on this
+    // thread) are still part of the conversation; keep them instead of dropping.
     if(method==='item/agentMessage/delta') {
       this.streamed.add(params.itemId);emit(this.session,{kind:'text-delta',text:params.delta,refId:params.itemId});
     } else if(method==='item/started' || method==='item/completed') {
@@ -3597,9 +3713,13 @@ class CodexAppServerAdapter implements AgentAdapter {
     } else if(method==='turn/started') {this.turnId=params.turn?.id;}
     else if(method==='turn/completed') {
       const failed=params.turn?.status==='failed';
-      emit(this.session,{kind:failed?'error':'result',text:failed?'Codex reply failed. Check the app on the PC.':''});setBusy(this.session,false);this.turnId=undefined;
+      emit(this.session,{kind:failed?'error':'result',text:failed?'Codex reply failed. Check the app on the PC.':''});
+      if(this.session.info.busy)setBusy(this.session,false);
+      this.turnId=undefined;this.scheduleIdleClose();
     } else if(method==='error' && params.willRetry!==true) {
-      emit(this.session,{kind:'error',text:'Codex reported an error. Check sign-in and configuration on the PC.'});setBusy(this.session,false);
+      emit(this.session,{kind:'error',text:'Codex reported an error. Check sign-in and configuration on the PC.'});
+      if(this.session.info.busy)setBusy(this.session,false);
+      this.scheduleIdleClose();
     }
   }
   private request(id:string|number,method:string,params:any) {
@@ -3610,15 +3730,18 @@ class CodexAppServerAdapter implements AgentAdapter {
       emit(this.session,{kind:'status',text:'Codex requested an interaction this phone does not support. Open the chat on the PC.'});return;
     }
     if(getAgentApprovalMode('codex')==='auto'){this.server?.respond(id,{decision:'accept'});return;}
-    this.session.pendingPermissions.set(ref,allow=>this.server?.respond(id,{decision:allow?'accept':'decline'}));
+    const server=this.server;
+    this.session.pendingPermissions.set(ref,allow=>server?.respond(id,{decision:allow?'accept':'decline'}));
     emit(this.session,{kind:'permission-request',refId:ref,toolName:method==='item/commandExecution/requestApproval'?'Command':'File changes',toolInput:JSON.stringify(params),text:params.reason || 'Codex needs your approval.'});
+    // Unanswered approvals are declined after the standard timeout instead of wedging the turn.
+    trackPermissionTimeout(this.session,ref);
   }
   permission(id:string,allow:boolean) {const callback=this.session.pendingPermissions.get(id);this.session.pendingPermissions.delete(id);callback?.(allow);}
   cancel() {
     ++this.generation;
     if(this.server && this.threadId && this.turnId)void this.server.request('turn/interrupt',{threadId:this.threadId,turnId:this.turnId}).catch(()=>{});
   }
-  close() {this.cancel();this.server?.close();this.server=undefined;this.initialization=undefined;}
+  close() {clearTimeout(this.idleTimer);this.cancel();this.server?.close();this.server=undefined;this.initialization=undefined;}
 }
 
 export function archiveAgentSession(id:string,archived:boolean) {

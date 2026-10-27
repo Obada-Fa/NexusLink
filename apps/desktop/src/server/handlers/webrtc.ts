@@ -35,6 +35,9 @@ const streams = new Map<string, WebRtcStream>();
 
 let availabilityCache: { available: boolean; reason?: string } | null = null;
 
+/** Gst.init() can rescan the plugin registry on first run; bounded so a wedged python can't freeze the host. */
+const PROBE_TIMEOUT_MS = 5000;
+
 /** GStreamer WebRTC needs python3 + PyGObject + webrtcbin; probe once. */
 export function webrtcAvailability(): { available: boolean; reason?: string } {
   if (availabilityCache) return availabilityCache;
@@ -46,8 +49,12 @@ export function webrtcAvailability(): { available: boolean; reason?: string } {
         "from gi.repository import Gst; Gst.init(None); " +
         "import sys; sys.exit(0 if Gst.ElementFactory.find('webrtcbin') else 1)",
       ],
-      { stderr: 'ignore', stdout: 'ignore' } as unknown as SpawnOpts,
+      { stdin: 'ignore', stderr: 'ignore', stdout: 'ignore', timeout: PROBE_TIMEOUT_MS, killSignal: 'SIGKILL' } as unknown as SpawnOpts,
     );
+    if (probe.exitCode === null) {
+      // Timed out: answer "unavailable" now (MJPEG fallback) but probe again next time.
+      return { available: false, reason: 'GStreamer probe timed out on the host' };
+    }
     availabilityCache =
       probe.exitCode === 0
         ? { available: true }

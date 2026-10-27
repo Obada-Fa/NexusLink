@@ -7,6 +7,7 @@ import { readdir } from 'node:fs/promises';
 import { existsSync, watch, type FSWatcher } from 'node:fs';
 import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { launchDetached } from './agent-apps';
 import type { WindowInfo, AppInfo, CaptureRegion, WsMessage } from '@nexuslink/rpc-types';
 import { getScreenMetadata, getPrimaryMonitor } from './capture';
 import { listProfiles } from './app-profiles';
@@ -24,9 +25,11 @@ type SpawnOpts = Parameters<typeof Bun.spawn>[1];
 
 function run(cmd: string[]): string {
   try {
+    // A hung app can stall xprop/wmctrl forever; never let that freeze the host.
     const out = Bun.spawnSync(cmd, {
       env: { ...process.env, DISPLAY },
       stderr: 'ignore',
+      timeout: 3000,
     } as unknown as SpawnOpts);
     return out.stdout?.toString() ?? '';
   } catch {
@@ -302,26 +305,13 @@ export async function launchApp(appId: string): Promise<{ ok: boolean; wmClass?:
   const app = catalog.apps.find((a) => a.appId === appId);
   if (!app) return { ok: false };
 
-  // gio launch handles Exec field codes, DBusActivatable, working dirs, etc.
+  // gio launch handles Exec field codes, DBusActivatable, working dirs, etc. It runs in its
+  // own user scope so restarting NexusLink never takes the launched app down with it.
   try {
-    Bun.spawn(['gio', 'launch', app.path], {
-      stdout: 'ignore',
-      stderr: 'ignore',
-      env: { ...process.env, DISPLAY },
-    } as unknown as SpawnOpts);
+    launchDetached(['gio', 'launch', app.path], app.appId);
     return { ok: true, wmClass: app.wmClass ?? app.appId };
   } catch {
-    // Fallback: strip field codes and run Exec directly.
-    const exec = (app.exec ?? '').replace(/%[fFuUdDnNickvm]/g, '').trim();
-    if (!exec) return { ok: false };
-    try {
-      Bun.spawn(['sh', '-c', `setsid ${exec} >/dev/null 2>&1 &`], {
-        env: { ...process.env, DISPLAY },
-      } as unknown as SpawnOpts);
-      return { ok: true, wmClass: app.wmClass ?? app.appId };
-    } catch {
-      return { ok: false };
-    }
+    return { ok: false };
   }
 }
 
@@ -570,7 +560,8 @@ export function closeWindow(windowId: string): { ok: boolean } {
   const result = Bun.spawnSync(['wmctrl', '-i', '-c', windowId], {
     env: { ...process.env, DISPLAY },
     stderr: 'pipe',
-  });
+    timeout: 3000,
+  } as unknown as SpawnOpts);
   if (result.exitCode !== 0) throw new Error('Could not close the window.');
   return { ok: true };
 }

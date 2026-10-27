@@ -60,6 +60,8 @@ export function accessToken(token?: string): Access | undefined {
   return access;
 }
 export function downloadToken(deviceId: string, path: string) {
+  // Download tokens live 24 h; purge expired ones here too, not only on resume().
+  for (const [key, access] of tokens) if (access.expires < Date.now()) tokens.delete(key);
   const token = randomBytes(32).toString('base64url');
   const expires = Date.now() + 24 * 60 * 60 * 1000;
   tokens.set(token, { deviceId, path, expires, role: 'download' });

@@ -39,6 +39,12 @@ interface CaptureSession {
   lastQosAt: number;
   /** Consecutive congested reportStats samples before a quality step. */
   qosBadStreak: number;
+  /** Monitor a full-desktop capture follows (undefined = primary). */
+  monitorName?: string;
+  /** Frames skipped because the socket was backed up (diagnostics). */
+  droppedFrames: number;
+  /** Virtual sessions already match the phone: never rescale them. */
+  nativeScale: boolean;
 }
 
 /** Binary frame header: u32 magic 'NLF1' | u32 streamKey | f64 timestampMs (LE). */
@@ -107,49 +113,174 @@ export class MjpegRing {
   }
 }
 
-/** True when the WS outbound buffer already holds more than one frame. */
-export function socketBackedUp(ws: WebSocket, lastFrameBytes: number): boolean {
-  const buffered = (ws as WebSocket & { bufferedAmount?: number }).bufferedAmount ?? 0;
-  return buffered > Math.max(lastFrameBytes, 32_768);
+/**
+ * Outbound bytes queued on a socket. Bun's ServerWebSocket exposes
+ * getBufferedAmount(); the `bufferedAmount` property only exists on browser-style
+ * sockets (and test doubles), and is undefined on the server.
+ */
+export function socketBufferedAmount(ws: WebSocket): number {
+  const sock = ws as WebSocket & { getBufferedAmount?: () => number; bufferedAmount?: number };
+  try {
+    if (typeof sock.getBufferedAmount === 'function') return Number(sock.getBufferedAmount()) || 0;
+  } catch {
+    return 0;
+  }
+  return typeof sock.bufferedAmount === 'number' ? sock.bufferedAmount : 0;
 }
 
-let cachedGeometry: { width: number; height: number } | null = null;
-let cachedPrimary: { x: number; y: number; width: number; height: number } | null = null;
+/**
+ * Hard ceiling for queued video on the control socket. index.ts closes the
+ * socket ("Client too slow") once 4 MB is buffered when it sends JSON, so video
+ * must never push the queue anywhere near that.
+ */
+export const CAPTURE_MAX_BUFFERED_BYTES = 1_500_000;
+
+/**
+ * True when the next frame should be dropped: the socket already holds more
+ * than one frame (keeps latency at ~1 frame), or sending would cross the hard
+ * ceiling that protects the control socket.
+ */
+export function socketBackedUp(ws: WebSocket, lastFrameBytes: number, nextFrameBytes = 0): boolean {
+  const buffered = socketBufferedAmount(ws);
+  if (buffered > Math.min(Math.max(lastFrameBytes, 32_768), CAPTURE_MAX_BUFFERED_BYTES)) return true;
+  return buffered > 0 && buffered + nextFrameBytes > CAPTURE_MAX_BUFFERED_BYTES * 2;
+}
+
+/** Called for every outgoing frame; returning false stops the capture. */
+export type CaptureAuthorizer = (ws: WebSocket) => boolean;
+let captureAuthorizer: CaptureAuthorizer = () => true;
+
+/**
+ * Install the per-frame credential check (token expiry, device revocation).
+ * Binary frames bypass index.ts send(), so without this a stream would outlive
+ * its 1 h access token. Must be O(1): it runs up to 30x/s per stream.
+ */
+export function setCaptureAuthorizer(fn: CaptureAuthorizer | null): void {
+  captureAuthorizer = fn ?? (() => true);
+}
+
+export interface MonitorInfo {
+  /** RandR output/monitor name, e.g. "HDMI-A-0". */
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  primary: boolean;
+}
+
+interface ScreenGeometry {
+  at: number;
+  screen: { width: number; height: number };
+  monitors: MonitorInfo[];
+}
+
+/** Monitor layouts change (hotplug, resolution, rotation); never trust them for long. */
+export const GEOMETRY_TTL_MS = 10_000;
+let geometry: ScreenGeometry | null = null;
+
+type GeometryProbe = (args: string[]) => string;
+
+const defaultProbe: GeometryProbe = (args) => {
+  const out = Bun.spawnSync(args, {
+    env: { ...process.env, DISPLAY },
+    stdout: 'pipe',
+    stderr: 'ignore',
+    timeout: 2000,
+  } as unknown as Parameters<typeof Bun.spawnSync>[1]);
+  return out.exitCode === 0 ? (out.stdout?.toString() ?? '') : '';
+};
+let geometryProbe: GeometryProbe = defaultProbe;
+
+/** Test hook: replace the xrandr/xdotool runner (null restores the real one). */
+export function setGeometryProbeForTests(probe: GeometryProbe | null): void {
+  geometryProbe = probe ?? defaultProbe;
+  geometry = null;
+}
+
+/**
+ * Parse `xrandr --current` (no output re-probe, ~1 ms). Every output line with
+ * a geometry is an active monitor, connected or not; "connected (normal ...)"
+ * lines without one are inactive and skipped.
+ */
+export function parseXrandrCurrent(text: string): {
+  screen: { width: number; height: number } | null;
+  monitors: MonitorInfo[];
+} {
+  const sm = text.match(/current\s+(\d+)\s+x\s+(\d+)/);
+  const screen = sm ? { width: Number(sm[1]), height: Number(sm[2]) } : null;
+  const monitors: MonitorInfo[] = [];
+  const re = /^(\S+)\s+(?:connected|disconnected)(\s+primary)?\s+(\d+)x(\d+)\+(\d+)\+(\d+)/;
+  for (const line of text.split('\n')) {
+    const m = re.exec(line);
+    if (!m) continue;
+    const mon = { name: m[1]!, primary: !!m[2], width: Number(m[3]), height: Number(m[4]), x: Number(m[5]), y: Number(m[6]) };
+    if (mon.width > 0 && mon.height > 0) monitors.push(mon);
+  }
+  return { screen, monitors };
+}
+
+/** Parse `xrandr --listactivemonitors`: " 0: +*HDMI-A-0 1920/508x1080/286+0+0  HDMI-A-0". */
+export function parseListActiveMonitors(text: string): MonitorInfo[] {
+  const out: MonitorInfo[] = [];
+  const re = /^\s*\d+:\s+\+?(\*?)(\S+)\s+(\d+)\/\d+x(\d+)\/\d+\+(-?\d+)\+(-?\d+)/;
+  for (const line of text.split('\n')) {
+    const m = re.exec(line);
+    if (!m) continue;
+    out.push({ name: m[2]!, primary: m[1] === '*', width: Number(m[3]), height: Number(m[4]), x: Number(m[5]), y: Number(m[6]) });
+  }
+  return out;
+}
+
+function loadGeometry(force = false): ScreenGeometry {
+  if (!force && geometry && Date.now() - geometry.at < GEOMETRY_TTL_MS) return geometry;
+  let screen: { width: number; height: number } | null = null;
+  let monitors: MonitorInfo[] = [];
+  try {
+    const parsed = parseXrandrCurrent(geometryProbe(['xrandr', '--current']));
+    screen = parsed.screen;
+    monitors = parsed.monitors;
+  } catch { /* fall through */ }
+  if (!monitors.length) {
+    try { monitors = parseListActiveMonitors(geometryProbe(['xrandr', '--listactivemonitors'])); } catch { /* fall through */ }
+  }
+  if (!screen) {
+    try {
+      const [w, h] = geometryProbe(['xdotool', 'getdisplaygeometry']).trim().split(/\s+/).map((n) => parseInt(n, 10));
+      if (w && h) screen = { width: w, height: h };
+    } catch { /* fall through */ }
+  }
+  if (!screen && monitors.length) {
+    screen = {
+      width: Math.max(...monitors.map((m) => m.x + m.width)),
+      height: Math.max(...monitors.map((m) => m.y + m.height)),
+    };
+  }
+  // A transient probe failure (X busy, timeout) keeps the last good layout
+  // instead of snapping to a made-up 1080p screen.
+  if (!screen && geometry) return geometry;
+  screen ??= { width: 1920, height: 1080 };
+  if (!monitors.length) monitors = [{ name: 'screen', x: 0, y: 0, width: screen.width, height: screen.height, primary: true }];
+  if (!monitors.some((m) => m.primary)) monitors[0] = { ...monitors[0]!, primary: true };
+  geometry = { at: Date.now(), screen, monitors };
+  return geometry;
+}
 
 /**
  * Full X11 virtual-screen size (spans ALL monitors — e.g. 1920x2280 for two
  * stacked 1080p/1200p displays). This is the coordinate space xdotool injects
- * into and the bound x11grab must never overflow.
+ * into and the bound x11grab must never overflow. Cached for GEOMETRY_TTL_MS.
  */
 export function getScreenMetadata(): { width: number; height: number } {
-  if (cachedGeometry) return cachedGeometry;
-  try {
-    const out = Bun.spawnSync(['xrandr', '--query'], {
-      env: { ...process.env, DISPLAY },
-    });
-    // "Screen 0: minimum 320 x 200, current 1920 x 2280, maximum ..."
-    const m = out.stdout.toString().match(/current\s+(\d+)\s+x\s+(\d+)/);
-    if (m) {
-      cachedGeometry = { width: parseInt(m[1]!, 10), height: parseInt(m[2]!, 10) };
-      return cachedGeometry;
-    }
-  } catch {
-    // fall through
-  }
-  try {
-    const out = Bun.spawnSync(['xdotool', 'getdisplaygeometry'], {
-      env: { ...process.env, DISPLAY },
-    });
-    const [w, h] = out.stdout.toString().trim().split(/\s+/).map((n) => parseInt(n, 10));
-    if (w && h) {
-      cachedGeometry = { width: w, height: h };
-      return cachedGeometry;
-    }
-  } catch {
-    // fall through to default
-  }
-  cachedGeometry = { width: 1920, height: 1080 };
-  return cachedGeometry;
+  return { ...loadGeometry().screen };
+}
+
+/**
+ * Active monitors in virtual-screen coordinates, primary flagged. `fresh`
+ * bypasses the TTL cache (startCapture always does).
+ */
+export function listMonitors(opts: { fresh?: boolean } = {}): MonitorInfo[] {
+  return loadGeometry(opts.fresh === true).monitors.map((m) => ({ ...m }));
 }
 
 /**
@@ -158,32 +289,14 @@ export function getScreenMetadata(): { width: number; height: number } {
  * the screen the user actually works on.
  */
 export function getPrimaryMonitor(): { x: number; y: number; width: number; height: number } {
-  if (cachedPrimary) return cachedPrimary;
-  try {
-    const out = Bun.spawnSync(['xrandr', '--query'], {
-      env: { ...process.env, DISPLAY },
-    });
-    const lines = out.stdout.toString().split('\n');
-    // "DisplayPort-0 connected primary 1920x1080+0+1200 (..."
-    const geoRe = /(\d+)x(\d+)\+(\d+)\+(\d+)/;
-    const primary = lines.find((l) => l.includes(' connected primary'));
-    const anyConnected = lines.find((l) => l.includes(' connected'));
-    const m = (primary ?? anyConnected)?.match(geoRe);
-    if (m) {
-      cachedPrimary = {
-        width: parseInt(m[1]!, 10),
-        height: parseInt(m[2]!, 10),
-        x: parseInt(m[3]!, 10),
-        y: parseInt(m[4]!, 10),
-      };
-      return cachedPrimary;
-    }
-  } catch {
-    // fall through
-  }
-  const screen = getScreenMetadata();
-  cachedPrimary = { x: 0, y: 0, width: screen.width, height: screen.height };
-  return cachedPrimary;
+  const mons = loadGeometry().monitors;
+  const m = mons.find((x) => x.primary) ?? mons[0]!;
+  return { x: m.x, y: m.y, width: m.width, height: m.height };
+}
+
+/** Resolve a monitor by RandR name (exact, then case-insensitive). */
+function findMonitor(name: string, mons: MonitorInfo[]): MonitorInfo | undefined {
+  return mons.find((m) => m.name === name) ?? mons.find((m) => m.name.toLowerCase() === name.toLowerCase());
 }
 
 function qualitySettings(quality: 'low' | 'medium' | 'high' | 'full'): { scaleW: number; q: number } {
@@ -261,6 +374,17 @@ function regionsDiffer(a: Region, b: Region): boolean {
   );
 }
 
+export interface CaptureOptions {
+  /**
+   * RandR monitor name (see listMonitors()) for a full-desktop capture.
+   * Ignored when a region/window or virtual display is given. Unknown names throw.
+   */
+  monitor?: string;
+}
+
+/** Full-desktop captures re-check the monitor layout this often (hotplug / mode change). */
+const MONITOR_WATCH_MS = 5000;
+
 export function startCapture(
   quality: 'low' | 'medium' | 'high' | 'full',
   fps: number,
@@ -268,7 +392,11 @@ export function startCapture(
   region?: Region,
   resolveRegion?: () => Region | null,
   display?: string,
-): { streamId: string; streamKey: number; region: Region } {
+  options: CaptureOptions = {},
+): { streamId: string; streamKey: number; region: Region; monitor?: string } {
+  if (process.platform === 'win32') {
+    throw new Error('Screen capture is not available on Windows yet. Use Agents from the dock.');
+  }
   const id = crypto.randomUUID();
   const key = nextStreamKey++;
   const clampedFps = Math.max(1, Math.min(30, Math.round(fps || 24)));
@@ -278,8 +406,12 @@ export function startCapture(
   const ffArgs = { fps: clampedFps, scaleW: display ? 0 : scaleW, q };
 
   // Virtual app sessions grab their whole (phone-shaped) screen exactly as
-  // given; the physical path clamps against the real desktop geometry.
+  // given; the physical path clamps against the real desktop geometry, which
+  // is re-read on every start so resolution/monitor changes are picked up.
   let grab: Region;
+  let monitorName: string | undefined;
+  const validRegion = region && region.width > 16 && region.height > 16 ? region : undefined;
+  const fullDesktop = !display && !validRegion;
   if (display && region) {
     grab = {
       x: region.x,
@@ -288,14 +420,25 @@ export function startCapture(
       height: region.height & ~1,
     };
   } else {
-    const want =
-      region && region.width > 16 && region.height > 16 ? region : getPrimaryMonitor();
+    const mons = loadGeometry(true).monitors;
+    let want: Region;
+    if (validRegion) {
+      want = validRegion;
+    } else if (options.monitor && fullDesktop) {
+      const mon = findMonitor(options.monitor, mons);
+      if (!mon) {
+        throw new Error(`Unknown monitor "${options.monitor}". Available: ${mons.map((m) => m.name).join(', ')}`);
+      }
+      monitorName = mon.name;
+      want = mon;
+    } else {
+      const primary = mons.find((m) => m.primary) ?? mons[0]!;
+      monitorName = primary.name;
+      want = primary;
+    }
     grab = clampRegion(want);
   }
 
-  if (process.platform === 'win32') {
-    throw new Error('Screen capture is not available on Windows yet. Use Agents from the dock.');
-  }
   const proc = spawnGrabber(grab, ffArgs, display);
   const session: CaptureSession = {
     id, key, proc, ws, region: grab, ffArgs, resolveRegion,
@@ -305,33 +448,46 @@ export function startCapture(
     quality: qualityName,
     lastQosAt: 0,
     qosBadStreak: 0,
+    monitorName: fullDesktop && options.monitor ? monitorName : undefined,
+    droppedFrames: 0,
+    nativeScale: !!display,
   };
   sessions.set(id, session);
 
   void pumpFrames(session, session.gen).catch(() => {});
 
+  const regrab = (current: Region | null) => {
+    if (!sessions.has(id) || !current) return;
+    const next = clampRegion(current);
+    if (next.width < 32 || next.height < 32) return;
+    if (!session.region || !regionsDiffer(session.region, next)) return;
+    restartGrabber(session, next);
+    if (sendFn && ws.readyState === 1) {
+      sendFn(ws, { type: 'stream-region', streamId: id, region: next });
+    }
+  };
+
   // Window-tracked captures follow the window: if the WM (or the user at the
   // desk) moves/resizes it, re-grab the new rect and tell the client so touch
   // mapping stays aligned.
   if (resolveRegion) {
+    session.watchdog = setInterval(() => regrab(resolveRegion()), 2000);
+  } else if (fullDesktop) {
+    // Full-desktop captures follow their monitor: a resolution change or
+    // unplug would otherwise leave x11grab dead (out-of-bounds grab) and touch
+    // mapping wrong. Falls back to the primary if the chosen monitor is gone.
     session.watchdog = setInterval(() => {
       if (!sessions.has(id)) return;
-      const current = resolveRegion();
-      if (!current) return;
-      const next = clampRegion(current);
-      if (next.width < 32 || next.height < 32) return;
-      if (!session.region || !regionsDiffer(session.region, next)) return;
-      restartGrabber(session, next);
-      if (sendFn && ws.readyState === 1) {
-        sendFn(ws, { type: 'stream-region', streamId: id, region: next });
-      }
-    }, 2000);
+      const mons = loadGeometry(true).monitors;
+      const mon = (session.monitorName && findMonitor(session.monitorName, mons)) || mons.find((m) => m.primary) || mons[0];
+      regrab(mon ?? null);
+    }, MONITOR_WATCH_MS);
   }
 
   // Always return the grabbed region — the client maps touch coordinates
   // through it (critical on multi-monitor hosts where the primary monitor
   // does not start at 0,0).
-  return { streamId: id, streamKey: key, region: grab };
+  return { streamId: id, streamKey: key, region: grab, ...(fullDesktop && monitorName ? { monitor: monitorName } : {}) };
 }
 
 const QUALITY_LADDER = ['low', 'medium', 'high', 'full'] as const;
@@ -415,16 +571,32 @@ export function reportStreamStats(streamId: string, decodeFps: number, frameAgeM
   });
   session.qosBadStreak = planned.badStreak;
   if (!planned.restart) return;
+  applyQuality(session, planned.quality);
+}
 
-  session.quality = planned.quality;
-  const { scaleW, q } = qualitySettings(session.quality);
+function applyQuality(session: CaptureSession, quality: CaptureQuality): void {
+  session.quality = quality;
+  const { scaleW, q } = qualitySettings(quality);
   session.ffArgs = {
     fps: session.ffArgs.fps,
-    scaleW: session.ffArgs.scaleW === 0 ? 0 : scaleW,
+    scaleW: session.nativeScale ? 0 : scaleW,
     q,
   };
   const grab = session.region;
   if (grab) restartGrabber(session, grab);
+}
+
+/**
+ * Client asks for a quality step now (e.g. the phone zoomed in and needs
+ * native-resolution frames). QoS may still step it back down if congested.
+ */
+export function setStreamQuality(streamId: string, quality: CaptureQuality): void {
+  const session = sessions.get(streamId);
+  if (!session || !QUALITY_LADDER.includes(quality) || session.quality === quality) return;
+  session.qosBadStreak = 0;
+  // Hold off the next QoS sample so it judges the new quality, not the old one.
+  session.lastQosAt = Date.now();
+  applyQuality(session, quality);
 }
 
 async function pumpFrames(
@@ -464,7 +636,19 @@ async function pumpFrames(
 function emitFrame(session: CaptureSession, frame: Buffer): void {
   const { ws, key } = session;
   if (ws.readyState !== 1) return;
-  if (socketBackedUp(ws, session.lastFrameBytes)) return;
+  // Binary frames skip index.ts send(), so re-check the credential per frame:
+  // an expired token or revoked device stops the stream instead of leaking it.
+  let allowed = false;
+  try { allowed = captureAuthorizer(ws) === true; } catch { allowed = false; }
+  if (!allowed) {
+    stopCapture(session.id);
+    return;
+  }
+  const bytes = FRAME_HEADER_BYTES + frame.length;
+  if (socketBackedUp(ws, session.lastFrameBytes, bytes)) {
+    session.droppedFrames++;
+    return;
+  }
   const header = Buffer.allocUnsafe(FRAME_HEADER_BYTES);
   header.writeUInt32LE(FRAME_MAGIC, 0);
   header.writeUInt32LE(key >>> 0, 4);
@@ -476,6 +660,12 @@ function emitFrame(session: CaptureSession, frame: Buffer): void {
   } catch {
     // socket going down; close handler tears the session down
   }
+}
+
+/** Live diagnostics for one stream (null once stopped). */
+export function getCaptureInfo(streamId: string): { region?: Region; monitor?: string; droppedFrames: number; quality: CaptureQuality } | null {
+  const s = sessions.get(streamId);
+  return s ? { region: s.region, monitor: s.monitorName, droppedFrames: s.droppedFrames, quality: s.quality } : null;
 }
 
 export function stopCapture(streamId: string): void {

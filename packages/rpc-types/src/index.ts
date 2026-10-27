@@ -1,6 +1,7 @@
 import type { WorkspaceRpc } from './workspace';
 import type { ChatRpc } from './chat';
 export * from './chat';
+export * from './monitor';
 export * from './workspace';
 export type RpcMethod = keyof WorkspaceRpc | keyof ChatRpc
   | 'fs.list'
@@ -22,6 +23,7 @@ export type RpcMethod = keyof WorkspaceRpc | keyof ChatRpc
   | 'screen.stopCapture'
   | 'screen.getMetadata'
   | 'screen.reportStats'
+  | 'screen.setQuality'
   | 'input.mouseMove'
   | 'input.mouseClick'
   | 'input.buttonDown'
@@ -97,7 +99,7 @@ export type Params<M extends RpcMethod> =
     : M extends 'fs.write'
     ? { path: string; content: string }
     : M extends 'fs.delete'
-    ? { path: string }
+    ? { path: string; recursive?: boolean }
     : M extends 'fs.move'
     ? { from: string; to: string }
     : M extends 'fs.mkdir'
@@ -107,9 +109,9 @@ export type Params<M extends RpcMethod> =
     : M extends 'fs.gitStatus'
     ? { cwd: string }
     : M extends 'process.list'
-    ? {}
+    ? { limit?: number }
     : M extends 'process.kill'
-    ? { pid: number }
+    ? { pid: number; force?: boolean }
     : M extends 'process.spawn'
     ? { command: string; args?: string[] }
     : M extends 'terminal.create'
@@ -128,6 +130,8 @@ export type Params<M extends RpcMethod> =
     ? {}
     : M extends 'screen.reportStats'
     ? { streamId: string; fps: number; frameAgeMs: number }
+    : M extends 'screen.setQuality'
+    ? { streamId: string; quality: 'low' | 'medium' | 'high' | 'full' }
     : M extends 'input.mouseMove'
     ? { dx: number; dy: number; sessionId?: string }
     : M extends 'input.mouseClick'
@@ -247,9 +251,9 @@ export type Result<M extends RpcMethod> =
     : M extends 'fs.write'
     ? void
     : M extends 'fs.delete'
-    ? void
+    ? { ok: boolean; path: string; trashed: boolean }
     : M extends 'fs.move'
-    ? void
+    ? { path: string }
     : M extends 'fs.mkdir'
     ? { path: string; name: string }
     : M extends 'fs.listProjects'
@@ -259,7 +263,7 @@ export type Result<M extends RpcMethod> =
     : M extends 'process.list'
     ? ProcessEntry[]
     : M extends 'process.kill'
-    ? void
+    ? { ok: boolean; message: string; signal?: string; exited?: boolean }
     : M extends 'process.spawn'
     ? { pid: number }
     : M extends 'terminal.create'
@@ -277,6 +281,8 @@ export type Result<M extends RpcMethod> =
     : M extends 'screen.getMetadata'
     ? ScreenMetadata
     : M extends 'screen.reportStats'
+    ? void
+    : M extends 'screen.setQuality'
     ? void
     : M extends 'input.mouseMove'
     ? { ok: boolean }
@@ -620,6 +626,7 @@ export type WsMessage =
   | { type: 'terminal-gap'; terminalId:string;oldestSeq:number }
   | { type: 'terminal-exit';terminalId:string;exitCode:number|null;error?:string }
   | { type: 'perf-update'; data: PerfSnapshot }
+  | { type: 'monitor-update'; snapshot: import('./monitor').MonitorSnapshot }
   | { type: 'webrtc-signal'; webrtcId: string; data: WebRtcSignal }
   | { type: 'app-session-update'; session: AppSessionInfo }
   | { type: 'app-session-ready'; sessionId: string }

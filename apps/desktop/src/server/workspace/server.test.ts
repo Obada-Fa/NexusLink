@@ -164,3 +164,25 @@ test('cursor hints require control access and reject invalid stream targets', as
     expect((await control.call('input.cursorHint', {windowId: 'not-a-window'})).code).toBe('INVALID_ARGUMENT');
   } finally {control.ws.close(); monitor.ws.close();}
 });
+
+test('mission-control snapshot and monitor push carry vitals, agent apps and remote health',async()=>{
+  const {ws,events,call}=await client();
+  try {
+    await call('session.enroll',{code:enableEnrollment(),name:'monitor phone'});
+    const capabilities=(await call('session.getCapabilities')).result;
+    expect(capabilities.features).toContain('monitor.v1');
+    expect(capabilities.methods).toContain('monitor.snapshot');
+    const snapshot=(await call('monitor.snapshot')).result;
+    expect(snapshot.vitals.cpu.cores).toBeGreaterThan(0);
+    expect(snapshot.vitals.memory.totalBytes).toBeGreaterThan(0);
+    expect(Array.isArray(snapshot.apps)).toBe(true);
+    expect(snapshot.remote.map((s:any)=>s.id)).toEqual(['rustdesk','tailscale','nexuslink']);
+    expect((await call('monitor.appAction',{appId:'antigravity',action:'explode'})).code).toBe('INVALID_ARGUMENT');
+    expect((await call('monitor.remoteAction',{service:'ssh',action:'restart'})).code).toBe('INVALID_ARGUMENT');
+    expect((await call('session.subscribe',{topics:['monitor'],monitorInterval:1000})).result.ok).toBe(true);
+    const deadline=Date.now()+4000;
+    while(!events.some(e=>e.type==='monitor-update') && Date.now()<deadline) await Bun.sleep(100);
+    const update=events.find(e=>e.type==='monitor-update');
+    expect(update?.snapshot.vitals.timestamp).toBeNumber();
+  } finally {ws.close();}
+},15000);
