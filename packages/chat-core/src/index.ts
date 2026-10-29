@@ -69,6 +69,7 @@ export function scanSummary(hostId: string, source: string, row: any): ChatSumma
   if(live) summary.live=live;
   if(live?.activity) summary.activity=live.activity;
   if(live?.state === 'failed') summary.taskState='failed';
+  if(row.parentHostChatId) summary.parentId=identity(hostId,source,row.parentHostChatId);
   if(summary.preview === undefined) delete summary.preview;
   return summary;
 }

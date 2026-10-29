@@ -194,9 +194,11 @@ export function commandRunning(command: string, now = Date.now()): boolean {
     } catch { /* no procfs */ }
     procCache = { at: now, lines };
   }
-  const needle = command.replace(/\s+/g, ' ').trim().slice(0, 48);
+  // Claude Code runs commands as `eval '…'` with each ' escaped as '"'"', so compare without quoting.
+  const plain = (text: string) => text.replace(/['"\\]/g, '').replace(/\s+/g, ' ').trim();
+  const needle = plain(command).slice(0, 48);
   if (needle.length < 4) return false;
-  return procCache.lines.some(line => line.replace(/\s+/g, ' ').includes(needle) && !line.includes('nexuslink-probe'));
+  return procCache.lines.some(line => plain(line).includes(needle) && !line.includes('nexuslink-probe'));
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +220,8 @@ export interface ClaudeLiveOptions {
   /** Background sub-agent transcripts of this session (mtime + description). */
   subagents?: Array<{ mtimeMs: number; description?: string }>;
   isRunning?: (command: string) => boolean;
+  /** Read a sub-agent's own transcript, whose rows are all marked isSidechain. */
+  sidechain?: boolean;
 }
 const CLAUDE_UNGATED = /^(read|grep|glob|ls|todowrite|taskcreate|taskupdate|tasklist|taskget|toolsearch|agent|task|websearch|exitplanmode|askuserquestion|skill|bashoutput|monitor|sendmessage|subagenthandback|mcp__ccd_turn__.*|mcp__ccd_session__.*)$/i;
 function claudeGated(tool: string, mode: string | undefined): boolean {
@@ -245,7 +249,7 @@ export function claudeLive(text: string, options: ClaudeLiveOptions): ClaudeTail
     if (type === 'agent-name' && typeof row.agentName === 'string' && !out.title) { out.title = row.agentName; continue; }
     if (type === 'summary' && typeof row.summary === 'string' && !out.title) { out.title = row.summary; continue; }
     if (type === 'last-prompt' && typeof row.lastPrompt === 'string') { out.lastPrompt = row.lastPrompt; continue; }
-    if (row.isSidechain === true) continue;
+    if (row.isSidechain === true && !options.sidechain) continue;
     if (typeof row.cwd === 'string' && row.cwd) out.cwd = row.cwd;
     const message = row.message || {};
     const content = message.content;
@@ -302,11 +306,12 @@ export function claudeLive(text: string, options: ClaudeLiveOptions): ClaudeTail
     const { step, activity } = describeTool(latest.name, latest.input);
     Object.assign(live, { state: 'working', step, activity, tool: latest.name });
     if (/^(askuserquestion|exitplanmode)$/i.test(latest.name)) {
-      Object.assign(live, { state: 'waiting', activity: 'waiting', waitingFor: latest.name.toLowerCase() === 'exitplanmode' ? 'Approve the plan' : question(latest.input) || 'Answer the question' });
+      const plan = latest.name.toLowerCase() === 'exitplanmode';
+      Object.assign(live, { state: 'waiting', activity: 'waiting', waitKind: plan ? 'plan' : 'question', waitingFor: plan ? 'Approve the plan' : question(latest.input) || 'Answer the question' });
     } else if (age > LIVE.waitingMs && claudeGated(latest.name, mode)) {
       const command = /^bash$/i.test(latest.name) ? String(parseInput(latest.input).command || '') : '';
       if (!(command && (options.isRunning || commandRunning)(command, now))) {
-        Object.assign(live, { state: 'waiting', activity: 'waiting', waitingFor: `Approve: ${step.replace(/^Running: /, '')}`, via: 'transcript-heuristic' });
+        Object.assign(live, { state: 'waiting', activity: 'waiting', waitKind: 'approval', waitingFor: `Approve: ${step.replace(/^Running: /, '')}`, via: 'transcript-heuristic' });
       }
     }
     if (live.state === 'working' && age > LIVE.staleMs && !subagent) Object.assign(live, { state: 'idle', step: 'No activity for 20+ min', activity: undefined });
@@ -402,8 +407,8 @@ export function codexLive(text: string, options: { mtimeMs: number; now?: number
   const working = open === true || (open === undefined && (pending.size > 0 || age < 60_000));
   if (working) {
     const latest = [...pending.values()].at(-1);
-    if (waitingFor) Object.assign(live, { state: 'waiting', activity: 'waiting', waitingFor });
-    else if (latest && /request_user_input/.test(latest.name)) Object.assign(live, { state: 'waiting', activity: 'waiting', step: 'Asking you a question', tool: latest.name, waitingFor: question(latest.input) || 'Answer the question' });
+    if (waitingFor) Object.assign(live, { state: 'waiting', activity: 'waiting', waitKind: 'approval', waitingFor });
+    else if (latest && /request_user_input/.test(latest.name)) Object.assign(live, { state: 'waiting', activity: 'waiting', waitKind: 'question', step: 'Asking you a question', tool: latest.name, waitingFor: question(latest.input) || 'Answer the question' });
     else if (latest) Object.assign(live, { state: 'working', ...codexTool(latest.name, latest.input), tool: latest.name });
     else if (thinking) Object.assign(live, { state: 'working', step: 'Thinking', activity: 'thinking' });
     else if (lastStep) Object.assign(live, { state: 'working', step: lastStep.step, activity: lastStep.activity, tool: lastStep.tool });
@@ -471,9 +476,9 @@ export function agyLive(text: string, options: { mtimeMs: number; now?: number; 
     const c = call();
     Object.assign(live, { state: 'working', ...c, tool: lastCall?.name });
     if (/^(ask_question|ask_permission)$/.test(lastCall?.name || '')) {
-      Object.assign(live, { state: 'waiting', activity: 'waiting', waitingFor: question(lastCall?.args) || c.step });
+      Object.assign(live, { state: 'waiting', activity: 'waiting', waitKind: lastCall?.name === 'ask_permission' ? 'approval' : 'question', waitingFor: question(lastCall?.args) || c.step });
     } else if (age > LIVE.waitingMs + 2_000 && /^(run_command|write_to_file|replace_file_content|multi_replace_file_content|read_url_content)$/.test(lastCall?.name || '') && !runningInApp) {
-      Object.assign(live, { state: 'waiting', activity: 'waiting', waitingFor: `Approve: ${c.step.replace(/^Running: /, '')}`, via: 'transcript-heuristic' });
+      Object.assign(live, { state: 'waiting', activity: 'waiting', waitKind: 'approval', waitingFor: `Approve: ${c.step.replace(/^Running: /, '')}`, via: 'transcript-heuristic' });
     }
   } else if (last.status === 'RUNNING') Object.assign(live, { state: 'working', ...call(), tool: lastCall?.name });
   else if (last.type === 'PLANNER_RESPONSE') live.state = runningInApp ? 'working' : 'done';
@@ -526,7 +531,7 @@ export function opencodeLive(messages: OpencodeMessage[], options: { updatedMs: 
     if (tool) {
       const { step, activity } = describeTool(String(tool.tool || 'tool'), tool.state?.input);
       Object.assign(live, { state: 'working', step, activity, tool: tool.tool });
-      if (tool.state?.status === 'pending' && age > LIVE.waitingMs) Object.assign(live, { state: 'waiting', activity: 'waiting', waitingFor: `Approve: ${step.replace(/^Running: /, '')}`, via: 'app-db-heuristic' });
+      if (tool.state?.status === 'pending' && age > LIVE.waitingMs) Object.assign(live, { state: 'waiting', activity: 'waiting', waitKind: 'approval', waitingFor: `Approve: ${step.replace(/^Running: /, '')}`, via: 'app-db-heuristic' });
     } else {
       const reasoning = last.parts.at(-1)?.type === 'reasoning';
       Object.assign(live, { state: 'working', step: reasoning ? 'Thinking' : 'Responding', activity: reasoning ? 'thinking' : 'responding' });

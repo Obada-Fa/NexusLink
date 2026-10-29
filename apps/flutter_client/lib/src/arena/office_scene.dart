@@ -329,6 +329,11 @@ class _PuppetPainter extends CustomPainter {
       box(13, 0, 5, 7, ink);
       box(15, 1, 1, 3, c);
       box(15, 5, 1, 1, c);
+    } else if (state == 'turn') {
+      // Speech bubble: finished, with a follow-up for you.
+      box(13, 0, 6, 4, ink);
+      box(14, 1, 4, 2, NX.accent);
+      box(14, 4, 1, 1, ink);
     } else if (state == 'done') {
       box(13, 2, 2, 2, NX.done);
       box(15, 0, 2, 3, NX.done);

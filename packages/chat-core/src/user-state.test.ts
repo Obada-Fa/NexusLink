@@ -79,3 +79,19 @@ test('hidden chats leave the Monitor and come back when unhidden', () => {
   expect((s.page({}).items as ChatSummary[]).map(r => r.id)).toEqual(['noise']);
   expect(() => s.setState('missing', { hidden: true })).toThrow();
 });
+
+test('a soft after-turn ask is not needs-you, and marking it done clears it', () => {
+  const s = store();
+  const now = Date.now();
+  s.upsert([chat('asks', now - 60_000, { execution: 'idle', live: { state: 'done', ask: 'Should I commit it?' } })], 'claude');
+  expect(attention(s)).toEqual([]);
+  expect(s.get('asks')!.live?.ask).toBe('Should I commit it?');
+  const { row } = s.setState('asks', { acknowledged: true });
+  expect(row?.attentionCleared).toBe('acknowledged');
+  expect(row?.live?.ask).toBeUndefined();
+  expect(row?.live?.state).toBe('done');
+  // Old asks age out like inferred needs-you.
+  s.upsert([chat('old-ask', now - STALE_ATTENTION_MS - 60_000, { execution: 'idle', live: { state: 'done', ask: 'Push?' } })], 'claude');
+  expect(s.get('old-ask')!.attentionCleared).toBe('stale');
+  expect(s.get('old-ask')!.live?.ask).toBeUndefined();
+});
