@@ -11,7 +11,7 @@ import '../workspace/project.dart';
 import '../workspace/files_screen.dart';
 import 'chat_models.dart';
 import 'chat_repository.dart';
-import '../arena/arena_view.dart';
+import '../arena/arena_world.dart';
 import '../monitor/mission_control.dart';
 import '../monitor/approvals.dart';
 import '../monitor/monitor_provider.dart';
@@ -871,16 +871,15 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
       else if (_folders)
         ..._folderSlivers(emptyText)
       else if (_arena)
-        SliverToBoxAdapter(
-          child: ArenaView(
-            chats: _arenaChats(
-              _monitorFilter == 'all'
-                  ? [...attention, ...running, ...rest]
-                  : all.where((c) => c.matchesMonitor(_monitorFilter)).toList(),
-            ),
+        SliverFillRemaining(
+          hasScrollBody: true,
+          child: ArenaWorld(
+            chats: _monitorFilter == 'all'
+                ? all
+                : all.where((c) => c.matchesMonitor(_monitorFilter)).toList(),
             offline: offline || _saved,
             onOpen: _open,
-            onLongPress: _chatActions,
+            onActions: _chatActions,
           ),
         )
       else ...[
@@ -999,7 +998,10 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
       child: CustomScrollView(
         key: PageStorageKey('chat-library:${widget.folder?.id}:$_folders'),
         controller: _scroll,
-        physics: const AlwaysScrollableScrollPhysics(),
+        // The Arena pans and zooms itself; the list must not steal its drags.
+        physics: _arena
+            ? const NeverScrollableScrollPhysics()
+            : const AlwaysScrollableScrollPhysics(),
         slivers: slivers,
       ),
     );
@@ -1068,22 +1070,6 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
       ),
       body: body,
     );
-  }
-
-  /// Keep all active agents visible; include recent work and a few quiet desks.
-  List<ChatSummary> _arenaChats(List<ChatSummary> chats) {
-    final active = chats.where((c) => c.needsAttention || c.running).toList();
-    final cutoff = DateTime.now().subtract(const Duration(hours: 24));
-    final recent = chats
-        .where((c) => !c.needsAttention && !c.running)
-        .where((c) => c.activity?.isAfter(cutoff) == true)
-        .toList();
-    final others = chats.where(
-      (c) => !active.contains(c) && !recent.contains(c),
-    );
-    final office = [...active, ...recent];
-    if (office.length < 4) office.addAll(others.take(4 - office.length));
-    return office;
   }
 
   List<Widget> _recentSlivers(List<ChatSummary> rest) {

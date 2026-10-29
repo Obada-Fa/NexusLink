@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:nexuslink/src/chats/chat_cache.dart';
+import 'package:nexuslink/src/arena/arena_world.dart';
 import 'package:nexuslink/src/chats/chat_models.dart';
 import 'package:nexuslink/src/chats/chat_repository.dart';
 import 'package:nexuslink/src/chats/chat_library_screen.dart';
@@ -171,15 +172,15 @@ void main() {
     },
   );
 
-  testWidgets('arena groups agents in the office and remembers the view', (
-    tester,
-  ) async {
+  testWidgets('arena shows the campus and remembers the view', (tester) async {
     await tester.pumpWidget(_app());
     await tester.pumpAndSettle();
     await tester.tap(find.text('Arena'));
     await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('THE OFFICE'), findsOneWidget);
-    expect(find.textContaining('needs you'), findsWidgets);
+    expect(find.byType(ArenaWorld), findsOneWidget);
+    expect(find.textContaining('need you'), findsOneWidget);
+    await tester.tap(find.byTooltip('List everyone'));
+    await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('Refactor the login flow'), findsOneWidget);
     expect(find.text('Approve: rm -rf build'), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -194,13 +195,9 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Arena'));
       await tester.pump(const Duration(milliseconds: 300));
-      expect(find.text('17 agents'), findsOneWidget);
-      await tester.scrollUntilVisible(
-        find.text('Busy task 16'),
-        400,
-        scrollable: find.byType(Scrollable).first,
-      );
-      expect(find.text('Busy task 16'), findsOneWidget);
+      final arena = tester.state<ArenaWorldState>(find.byType(ArenaWorld));
+      expect(arena.world!.agents.length, 17);
+      expect(find.text('17 working'), findsOneWidget);
       expect(tester.takeException(), isNull);
     },
   );
