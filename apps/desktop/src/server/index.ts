@@ -4,6 +4,9 @@ import { archiveAgentSession, pendingAgentApprovals } from './handlers/agents';
 import { enroll, resume, accessToken, hostId, WorkspaceError, stringParam, isPrivatePeer } from './workspace/security';
 import { workspaceRequest, validateRequest, once } from './workspace/protocol';
 import { createChatLibrary } from './workspace/chat-library';
+import { ApprovalBridge } from './handlers/approval-bridge';
+import { roots as providerRoots } from '../../../../packages/chat-core/src/paths';
+import { join as joinPath } from 'node:path';
 import { petSummaries } from './workspace/pet-monitor';
 import { dataDirectory } from './workspace/security';
 import { closeSecurityStore } from './workspace/security';
@@ -48,7 +51,7 @@ import { startSidecarReader } from './sidecar-reader';
 import { startMdns } from './mdns';
 import { handleFileDownload, handleFileUpload } from './handlers/files-http';
 import {
-  registerPushToken, listPushTokens, removePushToken, sendTestPush, setPushActiveSessionsCheck,
+  registerPushToken, listPushTokens, removePushToken, sendTestPush, setPushActiveSessionsCheck, sendAgentPushNotification,
 } from './handlers/push';
 
 type Params = Record<string, unknown>;
@@ -204,6 +207,17 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   setAppsBroadcast(broadcastAll);
   setWindowsBroadcast(broadcastAll);
   setPushActiveSessionsCheck(() => getAuthenticatedSessions().length > 0);
+  // Phone approvals for Claude sessions started outside NexusLink (opt-in hook, loopback only).
+  const approvals = new ApprovalBridge({
+    dataDir: dataDirectory(), hostId: hostId(),
+    claudeSettingsPath: joinPath(providerRoots().claude, 'settings.json'),
+    desktopSessionsDir: joinPath(providerRoots().claudeDesktop, 'claude-code-sessions'),
+    onChange: items => broadcastAll({ type: 'approvals-changed', items }),
+    push: item => void sendAgentPushNotification({
+      title: item.kind === 'question' ? 'Claude is asking you' : item.kind === 'plan' ? 'Claude has a plan to approve' : 'Claude needs approval',
+      body: item.title, kind: 'external-approval',
+    }),
+  }).start();
 
 
   // Agent icons load only when requested; normal coding startup does no desktop work.
@@ -703,6 +717,23 @@ export async function startRpcServer(port = 45678, hostname?: string) {
       case 'push.removeToken':
         result = removePushToken(params.token as string);
         break;
+      case 'approvals.list':
+        result = { items: approvals.list() };
+        break;
+      case 'approvals.resolve':
+        result = approvals.resolve(stringParam(params, 'id'), params.decision === 'allow' ? 'allow' : 'deny',
+          params.answers && typeof params.answers === 'object' ? params.answers as Record<string, string> : undefined,
+          typeof params.message === 'string' ? params.message : undefined);
+        break;
+      case 'approvals.status':
+        result = approvals.status();
+        break;
+      case 'approvals.configure':
+        result = approvals.configure({
+          claude: typeof params.claude === 'boolean' ? params.claude : undefined,
+          holdTerminal: typeof params.holdTerminal === 'boolean' ? params.holdTerminal : undefined,
+        });
+        break;
       case 'push.sendTest':
         result = await sendTestPush({
           title: params.title as string | undefined,
@@ -814,7 +845,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   const servesClient = await staticAvailable();
   printLaunchBanner(server.port, servesClient);
   console.log(`[rpc-server] listening on ${bindHost}:${server.port}`);
-  return { port: server.port, stop: async () => { setChatLibraryReady(false); await chats.close(); await closeAgentStore(); clearInterval(metricTimer); clearInterval(windowTimer); clearInterval(monitorTimer); stopWatchdog(); stopAllTerminals(); unloadMicDevice(); server.stop(true); closeSecurityStore(); } };
+  return { port: server.port, stop: async () => { setChatLibraryReady(false); await chats.close(); await closeAgentStore(); clearInterval(metricTimer); clearInterval(windowTimer); clearInterval(monitorTimer); approvals.stop(); stopWatchdog(); stopAllTerminals(); unloadMicDevice(); server.stop(true); closeSecurityStore(); } };
 }
 
 // Start the server if this file is run directly

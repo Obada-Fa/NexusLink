@@ -8,6 +8,7 @@ import '../widgets/agent_activity_icon.dart';
 import '../workspace/project.dart';
 import 'monitor_models.dart';
 import 'monitor_provider.dart';
+import 'approvals.dart';
 
 /// One shared 1 Hz tick for every running timer on screen.
 final secondTickerProvider = StreamProvider.autoDispose<int>(
@@ -295,6 +296,43 @@ IconData activityIcon(String? activity) => switch (activity) {
   _ => Icons.auto_awesome_rounded,
 };
 
+/// "2 sub-agents · 1 working: Deploy check" under a chat that delegated.
+class _SubagentLine extends StatelessWidget {
+  const _SubagentLine(this.subagents);
+  final List<ChatSubagent> subagents;
+  @override
+  Widget build(BuildContext context) {
+    final busy = subagents.where((s) => s.state != 'done').toList();
+    final waiting = busy.any((s) => s.state == 'waiting');
+    final parts = [
+      '${subagents.length} sub-agent${subagents.length == 1 ? '' : 's'}',
+      if (busy.isNotEmpty)
+        '${busy.length} ${waiting ? 'waiting' : 'working'}: ${busy.first.name}',
+    ];
+    return Row(
+      children: [
+        Icon(
+          Icons.account_tree_outlined,
+          size: 13,
+          color: waiting ? NX.waiting : NX.textFaint,
+        ),
+        const SizedBox(width: 5),
+        Expanded(
+          child: Text(
+            parts.join(' · '),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: waiting ? NX.waiting : NX.textDim,
+              fontSize: 12,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 /// A chat that is working, waiting for the owner, or just failed.
 class LiveAgentCard extends ConsumerWidget {
   const LiveAgentCard({
@@ -317,6 +355,9 @@ class LiveAgentCard extends ConsumerWidget {
     final started = chat.turnStartedAt;
     final todos = live?.todos ?? const [];
     final last = chat.lastWriteAt;
+    final approvals = offline
+        ? const <ExternalApproval>[]
+        : ref.watch(approvalsProvider.select((s) => s.forChat(chat.id)));
     return Padding(
       padding: const EdgeInsets.fromLTRB(NX.pad, 0, NX.pad, 10),
       child: NxCard(
@@ -390,46 +431,59 @@ class LiveAgentCard extends ConsumerWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-              decoration: BoxDecoration(
-                color: color.withValues(alpha: .08),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(
-                    state == 'waiting'
-                        ? Icons.front_hand_rounded
-                        : state == 'turn'
-                        ? Icons.chat_bubble_outline_rounded
-                        : state == 'failed'
-                        ? Icons.error_outline_rounded
-                        : activityIcon(
-                            live?.activity ?? chat.json['activity'] as String?,
-                          ),
-                    size: 17,
-                    color: color,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      chat.stepLabel,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: state == 'waiting' ? NX.waiting : NX.text,
-                        fontSize: 13.5,
-                        height: 1.3,
-                        fontWeight: FontWeight.w500,
+            // A phone approval panel already says what it is waiting for.
+            if (approvals.isEmpty) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: .08),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      state == 'waiting'
+                          ? Icons.front_hand_rounded
+                          : state == 'turn'
+                          ? Icons.chat_bubble_outline_rounded
+                          : state == 'failed'
+                          ? Icons.error_outline_rounded
+                          : activityIcon(
+                              live?.activity ??
+                                  chat.json['activity'] as String?,
+                            ),
+                      size: 17,
+                      color: color,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        chat.stepLabel,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: state == 'waiting' ? NX.waiting : NX.text,
+                          fontSize: 13.5,
+                          height: 1.3,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
+            ],
+            for (final approval in approvals)
+              ApprovalPanel(key: ValueKey(approval.id), approval: approval),
+            if (live != null && live.subagents.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              _SubagentLine(live.subagents),
+            ],
             if (todos.isNotEmpty) ...[
               const SizedBox(height: 10),
               _TodoProgress(

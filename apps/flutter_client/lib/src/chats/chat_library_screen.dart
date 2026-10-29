@@ -13,6 +13,7 @@ import 'chat_models.dart';
 import 'chat_repository.dart';
 import '../arena/arena_view.dart';
 import '../monitor/mission_control.dart';
+import '../monitor/approvals.dart';
 import '../monitor/monitor_provider.dart';
 import '../theme/nexus_theme.dart';
 import '../theme/nx_widgets.dart';
@@ -678,11 +679,14 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
             .map(ChatSummary.new)
             .toList()
           ..sort(compareMonitorChats);
-    final attention = all.where((c) => c.needsAttention).toList();
-    final running = all.where((c) => c.running).toList();
-    final turn = all.where((c) => c.yourTurn).toList();
+    // A prompt waiting on the phone is certain, so it outranks what the transcript says.
+    final asking = ref.watch(approvalsProvider.select((s) => s.chatIds));
+    bool blocked(ChatSummary c) => c.needsAttention || asking.contains(c.id);
+    final attention = all.where(blocked).toList();
+    final running = all.where((c) => c.running && !blocked(c)).toList();
+    final turn = all.where((c) => c.yourTurn && !blocked(c)).toList();
     final rest = all
-        .where((c) => !c.needsAttention && !c.running && !c.yourTurn)
+        .where((c) => !blocked(c) && !c.running && !c.yourTurn)
         .toList();
     final now = DateTime.now();
     final doneToday = rest.where((c) {
