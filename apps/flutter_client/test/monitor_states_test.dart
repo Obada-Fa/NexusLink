@@ -22,7 +22,10 @@ ChatSummary chat(
 
 void main() {
   test('an after-turn ask is your turn, not needs-you', () {
-    final c = chat('asks', live: {'state': 'done', 'ask': 'Should I commit it?'});
+    final c = chat(
+      'asks',
+      live: {'state': 'done', 'ask': 'Should I commit it?'},
+    );
     expect(c.needsAttention, isFalse);
     expect(c.yourTurn, isTrue);
     expect(c.liveState, 'turn');
@@ -61,9 +64,11 @@ void main() {
   });
 
   test('wait kinds and guesses read differently', () {
-    String status(Map<String, dynamic> live) =>
-        chat('x', execution: 'needsReply', live: {'state': 'waiting', ...live})
-            .monitorStatus;
+    String status(Map<String, dynamic> live) => chat(
+      'x',
+      execution: 'needsReply',
+      live: {'state': 'waiting', ...live},
+    ).monitorStatus;
     expect(status({'waitKind': 'question'}), 'Asking you');
     expect(status({'waitKind': 'plan'}), 'Plan to approve');
     expect(status({'waitKind': 'approval'}), 'Needs approval');
@@ -83,9 +88,19 @@ void main() {
   test('sort order: needs you, your turn, running, recent', () {
     final rows = [
       chat('recent', at: 400),
-      chat('running', execution: 'working', live: {'state': 'working'}, at: 300),
+      chat(
+        'running',
+        execution: 'working',
+        live: {'state': 'working'},
+        at: 300,
+      ),
       chat('turn', live: {'state': 'done', 'ask': 'Push?'}, at: 200),
-      chat('blocked', execution: 'needsReply', live: {'state': 'waiting'}, at: 100),
+      chat(
+        'blocked',
+        execution: 'needsReply',
+        live: {'state': 'waiting'},
+        at: 100,
+      ),
     ]..sort(compareMonitorChats);
     expect(rows.map((c) => c.id), ['blocked', 'turn', 'running', 'recent']);
   });
@@ -97,7 +112,13 @@ void main() {
       live: {
         'state': 'working',
         'subagents': [
-          {'name': 'Deploy check', 'kind': 'general-purpose', 'state': 'waiting', 'step': 'Approve: deploy', 'updatedAt': 5},
+          {
+            'name': 'Deploy check',
+            'kind': 'general-purpose',
+            'state': 'waiting',
+            'step': 'Approve: deploy',
+            'updatedAt': 5,
+          },
           {'name': 'Read changelog', 'state': 'done'},
           {'state': 'done'},
         ],

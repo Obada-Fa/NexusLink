@@ -2,6 +2,7 @@ import type { WorkspaceRpc } from './workspace';
 import type { ChatRpc } from './chat';
 export * from './chat';
 export * from './monitor';
+export * from './approvals';
 export * from './workspace';
 export type RpcMethod = keyof WorkspaceRpc | keyof ChatRpc
   | 'fs.list'
@@ -627,6 +628,7 @@ export type WsMessage =
   | { type: 'terminal-exit';terminalId:string;exitCode:number|null;error?:string }
   | { type: 'perf-update'; data: PerfSnapshot }
   | { type: 'monitor-update'; snapshot: import('./monitor').MonitorSnapshot }
+  | { type: 'approvals-changed'; items: import('./approvals').ExternalApproval[] }
   | { type: 'webrtc-signal'; webrtcId: string; data: WebRtcSignal }
   | { type: 'app-session-update'; session: AppSessionInfo }
   | { type: 'app-session-ready'; sessionId: string }

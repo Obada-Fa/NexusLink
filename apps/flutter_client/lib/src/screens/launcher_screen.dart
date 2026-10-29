@@ -10,6 +10,7 @@ import '../pc/pc_actions.dart';
 import '../pc/pc_sections.dart';
 import '../pc/phone_mic.dart';
 import '../pc/remote_access_section.dart';
+import '../pc/phone_approvals_section.dart';
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
@@ -385,6 +386,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
                     const PcHeroSection(key: ValueKey('pc-hero')),
                     const PcFlowSection(key: ValueKey('pc-flow')),
                     const AgentAppsSection(key: ValueKey('pc-agents')),
+                    const PhoneApprovalsSection(key: ValueKey('pc-approvals')),
                     const PhoneMicSection(key: ValueKey('pc-mic')),
                     const RemoteAccessSection(key: ValueKey('pc-remote')),
                     const TopProcessesSection(key: ValueKey('pc-top')),
