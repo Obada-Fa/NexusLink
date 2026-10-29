@@ -9,6 +9,9 @@ class ChatSummary {
   String get preview => json['preview'] as String? ?? '';
   String? get sessionId => json['agentSessionId'] as String?;
   String? get folderId => json['folderId'] as String?;
+
+  /// Library id of the orchestrator that started this chat (a worker session).
+  String? get parentId => json['parentId'] as String?;
   String? get folderPath => json['folderPath'] as String?;
   String get folderName => json['folderName'] as String? ?? 'No folder';
   DateTime? get activity => json['activityAt'] is num
@@ -90,6 +93,20 @@ class ChatLive {
   DateTime? get updatedAt => _time(json['updatedAt']);
   String? get lastText => _text(json['lastText']);
   String? get waitingFor => _text(json['waitingFor']);
+
+  /// approval | question | plan, for a `waiting` chat.
+  String? get waitKind => _text(json['waitKind']);
+
+  /// True when "waiting" was inferred from silence, not reported by the app.
+  bool get guessed => (json['via'] as String? ?? '').endsWith('-heuristic');
+
+  /// The turn ended and left an optional follow-up ("Should I commit it?").
+  String? get ask => _text(json['ask']);
+  List<ChatSubagent> get subagents => [
+    for (final s in (json['subagents'] as List? ?? const []))
+      if (s is Map && s['name'] is String)
+        ChatSubagent(Map<String, dynamic>.from(s)),
+  ];
   String? get model => _text(json['model']);
   int? get steps => (json['steps'] as num?)?.toInt();
   List<({String text, String state})> get todos => [
@@ -106,6 +123,19 @@ class ChatLive {
       v is num && v > 0 ? DateTime.fromMillisecondsSinceEpoch(v.toInt()) : null;
 }
 
+/// A sub-agent a chat delegated to (host `ChatSubagent`).
+class ChatSubagent {
+  ChatSubagent(this.json);
+  final Map<String, dynamic> json;
+  String get name => json['name'] as String;
+  String? get kind => ChatLive._text(json['kind']);
+
+  /// working | waiting | done
+  String get state => json['state'] as String? ?? 'done';
+  String? get step => ChatLive._text(json['step']);
+  DateTime? get updatedAt => ChatLive._time(json['updatedAt']);
+}
+
 extension AgentMonitorSummary on ChatSummary {
   ChatLive? get live => json['live'] is Map
       ? ChatLive(Map<String, dynamic>.from(json['live'] as Map))
@@ -114,8 +144,9 @@ extension AgentMonitorSummary on ChatSummary {
   /// Set when needs-you was cleared on the PC: 'acknowledged' (marked done) or 'stale'.
   String? get attentionCleared => json['attentionCleared'] as String?;
 
-  /// One state vocabulary for the whole app: working | waiting | failed | done | idle.
+  /// One state vocabulary for the whole app: working | waiting | turn | failed | done | idle.
   String get liveState {
+    if (yourTurn) return 'turn';
     final cleared = attentionCleared;
     if (cleared != null && execution != 'working' && live?.state != 'working') {
       return cleared == 'acknowledged' ? 'done' : 'idle';
@@ -134,6 +165,7 @@ extension AgentMonitorSummary on ChatSummary {
   /// The best one-line description of the current step.
   String get stepLabel =>
       live?.waitingFor ??
+      (yourTurn ? live?.ask : null) ??
       live?.step ??
       (running || needsAttention ? monitorStatus : (live?.lastText ?? preview));
 
@@ -148,19 +180,44 @@ extension AgentMonitorSummary on ChatSummary {
           ['failed', 'interrupted'].contains(json['taskState']));
   bool get running =>
       (execution == 'working' || live?.state == 'working') && !needsAttention;
+
+  /// Started by an orchestrator session: its reports go to that session, not to you.
+  bool get isWorker => parentId != null;
+
+  /// Finished with an optional follow-up for you. A worker's follow-up is its orchestrator's.
+  bool get yourTurn =>
+      attentionCleared == null &&
+      live?.ask != null &&
+      !isWorker &&
+      !running &&
+      !needsAttention;
   int get monitorPriority => needsAttention
       ? 0
-      : running
+      : yourTurn
       ? 1
-      : 2;
+      : running
+      ? 2
+      : 3;
   String get monitorSection => needsAttention
       ? 'Needs attention'
+      : yourTurn
+      ? 'Your turn'
       : running
       ? 'Running'
       : 'Recent';
   String get monitorStatus {
     if (execution == 'needsReply' || live?.state == 'waiting') {
-      return 'Waiting for you';
+      return switch (live?.waitKind) {
+        'approval' when live!.guessed => 'Probably needs approval',
+        'approval' => 'Needs approval',
+        'question' => 'Asking you',
+        'plan' => 'Plan to approve',
+        _ => 'Waiting for you',
+      };
+    }
+    if (yourTurn) return 'Your turn';
+    if (isWorker && live?.ask != null && !running) {
+      return 'Reported to its orchestrator';
     }
     if (json['taskState'] == 'failed' || live?.state == 'failed') {
       return 'Failed';

@@ -680,7 +680,10 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
           ..sort(compareMonitorChats);
     final attention = all.where((c) => c.needsAttention).toList();
     final running = all.where((c) => c.running).toList();
-    final rest = all.where((c) => !c.needsAttention && !c.running).toList();
+    final turn = all.where((c) => c.yourTurn).toList();
+    final rest = all
+        .where((c) => !c.needsAttention && !c.running && !c.yourTurn)
+        .toList();
     final now = DateTime.now();
     final doneToday = rest.where((c) {
       final t = c.activity?.toLocal();
@@ -901,6 +904,30 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
             ],
           ),
         ],
+        if (showRecent && turn.isNotEmpty) ...[
+          SliverToBoxAdapter(
+            child: NxSectionHeader(
+              'Your turn',
+              count: turn.length,
+              color: NX.accent,
+            ),
+          ),
+          SliverList.list(
+            children: [
+              for (final chat in turn)
+                _dismissible(
+                  chat,
+                  LiveAgentCard(
+                    key: ValueKey(chat.id),
+                    chat: chat,
+                    offline: offline || _saved,
+                    onOpen: () => _open(chat),
+                    onLongPress: () => _chatActions(chat),
+                  ),
+                ),
+            ],
+          ),
+        ],
         if (showRunning && running.isNotEmpty) ...[
           SliverToBoxAdapter(
             child: NxSectionHeader(
@@ -927,7 +954,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
         if (showRecent && rest.isNotEmpty) ..._recentSlivers(rest),
         if ((showAttention ? attention.length : 0) +
                 (showRunning ? running.length : 0) +
-                (showRecent ? rest.length : 0) ==
+                (showRecent ? rest.length + turn.length : 0) ==
             0)
           SliverToBoxAdapter(
             child: Padding(

@@ -403,6 +403,8 @@ class LiveAgentCard extends ConsumerWidget {
                   Icon(
                     state == 'waiting'
                         ? Icons.front_hand_rounded
+                        : state == 'turn'
+                        ? Icons.chat_bubble_outline_rounded
                         : state == 'failed'
                         ? Icons.error_outline_rounded
                         : activityIcon(
@@ -1147,7 +1149,7 @@ Future<ChatAction?> showChatActions(
             title: const Text('Open chat'),
             onTap: () => Navigator.pop(ctx, ChatAction.open),
           ),
-          if (canEdit && chat.needsAttention)
+          if (canEdit && (chat.needsAttention || chat.yourTurn))
             ListTile(
               leading: const Icon(
                 Icons.check_circle_rounded,

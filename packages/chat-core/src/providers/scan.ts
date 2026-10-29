@@ -5,7 +5,7 @@
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync, type Stats } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Database } from 'bun:sqlite';
-import type { ChatLive } from '../../../rpc-types/src/chat';
+import type { ChatLive, ChatSubagent } from '../../../rpc-types/src/chat';
 import { roots } from '../paths';
 import { LIVE, agyFirstPrompt, agyHeadCwd, agyLive, claudeLive, clip, codexLive, freshnessLive, opencodeLive, parseJsonLines, type AgySummaryState, type OpencodeMessage } from './live';
 import {
@@ -26,6 +26,8 @@ export interface ScanRow {
   archived?: boolean;
   live?: ChatLive;
   readOnlyReason?: string;
+  /** Native id of the orchestrator chat that started this one. */
+  parentHostChatId?: string;
 }
 export interface ScanResult { result: ScanRow[]; reason?: string; complete: boolean }
 export interface HistoryResult { result: any[]; fingerprint: string; unchanged?: boolean; reason?: string }
@@ -64,7 +66,7 @@ function openDb(path: string): Database | undefined {
 }
 const fileKey = (st: Stats | undefined) => st ? `${st.mtimeMs}:${st.size}` : 'missing';
 
-interface ClaudeDesktopMeta { title?: string; archived: boolean; cwd?: string; permissionMode?: string; blocked?: string; interrupted?: boolean }
+interface ClaudeDesktopMeta { title?: string; archived: boolean; cwd?: string; permissionMode?: string; ask?: string; interrupted?: boolean; parentId?: string }
 interface AgySummary extends AgySummaryState { title?: string; preview?: string; workspaceUris?: string; projectId?: string; updated: number; parent: boolean; appDir: string }
 
 export class Scanner {
@@ -147,6 +149,8 @@ export class Scanner {
   // -------------------------------------------------------------------------
   private claudeDesktop(): Map<string, ClaudeDesktopMeta> {
     const out = new Map<string, ClaudeDesktopMeta>();
+    const locals = new Map<string, string>();
+    const parents = new Map<string, string>();
     const base = join(roots().claudeDesktop, 'claude-code-sessions');
     for (const account of list(base)) for (const org of list(join(base, account))) for (const name of list(join(base, account, org))) {
       if (!/^local_.*\.json$/.test(name)) continue;
@@ -156,21 +160,26 @@ export class Scanner {
       const meta = this.headed(path, st, () => {
         try {
           const d = JSON.parse(readFileSync(path, 'utf8'));
+          const parent = d.spawnedFrom && typeof d.spawnedFrom.sessionId === 'string' ? d.spawnedFrom.sessionId : undefined;
           const summary = d.postTurnSummary || {};
           const current = !d.postTurnSummaryFor || !d.lastAssistantUuid || d.postTurnSummaryFor === d.lastAssistantUuid;
           return {
             id: typeof d.cliSessionId === 'string' ? d.cliSessionId : undefined,
+            local: name.slice(0, -5), parent,
             meta: {
               title: typeof d.title === 'string' ? d.title : undefined, archived: d.isArchived === true,
               cwd: typeof d.cwd === 'string' ? d.cwd : undefined, permissionMode: typeof d.permissionMode === 'string' ? d.permissionMode : undefined,
-              blocked: current && summary.status_category === 'blocked' && typeof summary.needs_action === 'string' && summary.needs_action.trim() ? summary.needs_action.trim() : undefined,
+              // `blocked` is the app's after-turn summary: the turn is over and left a follow-up, not a paused agent.
+              ask: current && summary.status_category === 'blocked' && typeof summary.needs_action === 'string' && summary.needs_action.trim() ? summary.needs_action.trim() : undefined,
               interrupted: !!d.interruptedAwaitingPerson,
             } satisfies ClaudeDesktopMeta,
           };
-        } catch { return { id: undefined, meta: undefined }; }
+        } catch { return { id: undefined, local: undefined, parent: undefined, meta: undefined }; }
       }, Number.MAX_SAFE_INTEGER);
-      if (meta.id && meta.meta) out.set(meta.id, meta.meta);
+      if (meta.id && meta.meta) { out.set(meta.id, meta.meta); if (meta.local) locals.set(meta.local, meta.id); }
+      if (meta.id && meta.parent) parents.set(meta.id, meta.parent);
     }
+    for (const [id, parent] of parents) { const meta = out.get(id); const cli = locals.get(parent); if (meta && cli) meta.parentId = cli; }
     return out;
   }
   private claudeRow(slug: string, path: string, id: string, now: number, desktop: Map<string, ClaudeDesktopMeta>): ScanRow | undefined {
@@ -191,31 +200,56 @@ export class Scanner {
     });
     let tail: ReturnType<typeof claudeLive> | undefined;
     if (now - st.mtimeMs < LIVE.warmMs) {
-      const subagents: Array<{ mtimeMs: number; description?: string }> = [];
-      const subDir = join(dirname(path), id, 'subagents');
-      for (const name of list(subDir)) {
-        if (!name.endsWith('.jsonl')) continue;
-        const s = stat(join(subDir, name));
-        if (!s || now - s.mtimeMs > 120_000) continue;
-        const metaPath = join(subDir, name.replace(/\.jsonl$/, '.meta.json'));
-        let description: string | undefined;
-        try { description = JSON.parse(readFileSync(metaPath, 'utf8')).description; } catch { /* optional */ }
-        subagents.push({ mtimeMs: s.mtimeMs, description });
-      }
+      const helpers = this.claudeSubagents(join(dirname(path), id, 'subagents'), now, d?.permissionMode);
+      const subagents = helpers.filter(s => now - s.mtimeMs <= 120_000);
       const extra = `${subagents.map(s => s.mtimeMs).join(',')}|${d?.permissionMode || ''}`;
       tail = this.tailed(path, st, now, 262_144, extra, text => claudeLive(text, { mtimeMs: st.mtimeMs, now, permissionMode: d?.permissionMode, subagents }));
+      if (tail && helpers.length) {
+        const list: ChatSubagent[] = helpers.map(h => {
+          const state = h.live.state === 'working' || h.live.state === 'waiting' ? h.live.state : 'done';
+          const item: ChatSubagent = { name: h.description || 'Sub-agent', state, updatedAt: h.mtimeMs };
+          if (h.kind) item.kind = h.kind;
+          const step = state === 'waiting' ? h.live.waitingFor : state === 'working' ? h.live.step : undefined;
+          if (step) item.step = step;
+          return item;
+        });
+        const blocked = helpers.find(h => h.live.state === 'waiting');
+        let parentLive: ChatLive = { ...tail.live, subagents: list };
+        // A foreground sub-agent's permission prompt is the parent's prompt too.
+        if (blocked && parentLive.state === 'working') {
+          parentLive = { ...parentLive, state: 'waiting', activity: 'waiting', waitKind: blocked.live.waitKind, waitingFor: `${clip(blocked.description || 'Sub-agent', 40)}: ${blocked.live.waitingFor}`, via: blocked.live.via };
+        }
+        tail = { ...tail, live: parentLive };
+      }
     }
     let live = tail?.live;
     if (d && (!live || !['working', 'waiting'].includes(live.state))) {
-      if (d.blocked) live = { ...(live || { updatedAt: st.mtimeMs }), state: 'waiting', activity: 'waiting', waitingFor: clip(d.blocked, 200), via: 'claude-desktop' };
-      else if (d.interrupted && live) live = { ...live, state: 'waiting', activity: 'waiting', waitingFor: 'Interrupted — continue when ready', via: 'claude-desktop' };
+      if (d.ask) live = { ...(live || { updatedAt: st.mtimeMs }), state: live?.state === 'failed' ? 'failed' : 'done', ask: clip(d.ask, 200), via: 'claude-desktop' };
+      else if (d.interrupted && live) live = { ...live, state: 'idle', step: 'Interrupted', ask: 'Interrupted — continue when ready', via: 'claude-desktop' };
     }
     const title = clipTitle(d?.title || '') || clipTitle(tail?.title || '') || clipTitle(head.prompt || '') || clipTitle(tail?.lastPrompt || '') || 'Claude Code chat';
     const row: ScanRow = {
       hostChatId: id, title, preview: clip(cleanMessageText(tail?.lastPrompt || head.prompt || ''), 160), cwd: head.cwd || tail?.cwd || d?.cwd || cwdFromDashedSlug(slug),
       updatedAt: st.mtimeMs, resumable: true, source: d ? 'Claude Code · Desktop' : 'Claude Code', archived: d?.archived === true, live,
     };
+    if (d?.parentId) row.parentHostChatId = d.parentId;
     return this.remember('claude', row, { path, slug });
+  }
+  /** Sub-agent transcripts touched in the last 30 min, newest first (each a tail read, cached by mtime). */
+  private claudeSubagents(dir: string, now: number, permissionMode?: string) {
+    const out: Array<{ mtimeMs: number; description?: string; kind?: string; live: ChatLive }> = [];
+    for (const name of list(dir)) {
+      if (!name.endsWith('.jsonl')) continue;
+      const path = join(dir, name);
+      const s = stat(path);
+      if (!s || now - s.mtimeMs > 30 * 60_000) continue;
+      const meta = this.headed(join(dir, name.replace(/\.jsonl$/, '.meta.json')), s, text => {
+        try { const m = JSON.parse(text); return { description: typeof m.description === 'string' ? m.description : undefined, kind: typeof m.agentType === 'string' ? m.agentType : undefined }; } catch { return {}; }
+      }) as { description?: string; kind?: string };
+      const live = this.tailed(path, s, now, 65_536, 'sub', text => claudeLive(text, { mtimeMs: s.mtimeMs, now, sidechain: true, permissionMode }).live);
+      out.push({ mtimeMs: s.mtimeMs, description: meta.description, kind: meta.kind, live });
+    }
+    return out.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 12);
   }
   private scanClaude(now: number): ScanResult {
     const root = join(roots().claude, 'projects');

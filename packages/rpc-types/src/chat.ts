@@ -24,6 +24,18 @@ export interface ChatSummary {
   live?: ChatLive;
   /** Set when a needs-you state was cleared: the owner marked it done, or it went stale. */
   attentionCleared?: 'acknowledged' | 'stale';
+  /** Library id of the orchestrator session that started this one (a worker reports to it, not to the owner). */
+  parentId?: string;
+}
+export interface ChatSubagent {
+  /** What it was asked to do ("Port gesture engine to Dart"). */
+  name: string;
+  /** Agent type when known (Explore, general-purpose, …). */
+  kind?: string;
+  state: 'working' | 'waiting' | 'done';
+  /** Current step, or what it is waiting for. */
+  step?: string;
+  updatedAt?: number;
 }
 export interface ChatLive {
   /** working: actively producing; waiting: blocked on the user (approval/question); done: finished its last turn; failed: last turn errored. */
@@ -44,6 +56,15 @@ export interface ChatLive {
   lastText?: string;
   /** Why it is waiting, e.g. "Approve: rm -rf build" or the question text. */
   waitingFor?: string;
+  /** What a `waiting` chat is blocked on. A `via` ending in `-heuristic` means it is a guess. */
+  waitKind?: 'approval' | 'question' | 'plan';
+  /**
+   * The turn ended and left the owner an optional follow-up ("Should I commit it?").
+   * Not a block: state stays done/idle and the chat does not need attention.
+   */
+  ask?: string;
+  /** Sub-agents this chat delegated to recently (newest first). */
+  subagents?: ChatSubagent[];
   model?: string;
   /** Turns/steps so far in this chat, when cheap to know. */
   steps?: number;

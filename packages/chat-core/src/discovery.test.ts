@@ -101,7 +101,9 @@ describe('read-only discovery of native chats', () => {
     expect(editing.source).toBe('Claude Code · Desktop');
     expect(editing.live).toMatchObject({ state: 'working', step: 'Editing login.dart', activity: 'editing' });
     const blocked = rows.find(r => r.hostChatId === BLOCKED_ID)!;
-    expect(blocked.live).toMatchObject({ state: 'waiting', waitingFor: 'Run `gh auth login` on the PC', via: 'claude-desktop' });
+    // The Desktop's after-turn "blocked" summary is a follow-up for the owner, not a paused agent.
+    expect(blocked.live).toMatchObject({ state: 'done', ask: 'Run `gh auth login` on the PC', via: 'claude-desktop' });
+    expect(blocked.live?.waitingFor).toBeUndefined();
   });
 
   test('Codex Desktop threads come from the state DB: folders for pruned rollouts, no sub-agents, live from the rollout', () => {
@@ -210,7 +212,7 @@ describe('chat service', () => {
       expect(claude.execution).toBe('working');
       expect(claude.live.step).toBe('Editing login.dart');
       expect(claude.capabilities.safety).toBe('busy');
-      expect(page.items.find((row: any) => row.nativeId === BLOCKED_ID).execution).toBe('needsReply');
+      expect(page.items.find((row: any) => row.nativeId === BLOCKED_ID).execution).toBe('idle');
       expect(page.items.find((row: any) => row.nativeId === CODEX_ID).live.step).toBe('Running: cargo test');
       // Reading is read-only and stays current as the transcript grows.
       const first = await service.request('chat.historyPage', { chatId: claude.id }, {}, 'phone');

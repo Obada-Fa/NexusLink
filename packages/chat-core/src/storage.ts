@@ -28,11 +28,17 @@ export function needsAttention(row: ChatSummary): boolean {
  */
 export function applyUserState(row: ChatSummary, state: ChatUserState | undefined, now: number, pendingApproval: boolean): ChatSummary {
   let out: ChatSummary = state?.hidden ? { ...row, archived: true } : row;
-  if (!needsAttention(out)) return out;
+  const ask = !out.attentionCleared && !!out.live?.ask;
+  if (!needsAttention(out) && !ask) return out;
   const at = out.activityAt || 0;
   const acknowledged = state?.ackAt != null && state.ackAt >= at;
   const stale = !pendingApproval && at > 0 && now - at > STALE_ATTENTION_MS;
   if (!acknowledged && !stale) return out;
+  if (!needsAttention(out)) {
+    // A soft after-turn ask is dismissed the same way.
+    const { ask: _a, ...live } = out.live!;
+    return { ...out, live, attentionCleared: acknowledged ? 'acknowledged' : 'stale' };
+  }
   out = { ...out, attentionCleared: acknowledged ? 'acknowledged' : 'stale' };
   if (out.execution === 'needsReply') out.execution = 'idle';
   if (out.live && (out.live.state === 'waiting' || out.live.state === 'failed')) {
@@ -201,7 +207,7 @@ export class LibraryStorage {
   }
   /** Re-evaluate attention that may have gone stale since the row was written. */
   decay(now = Date.now()): number {
-    const rows = this.db.query(`SELECT id,scan,owned,body FROM chats WHERE ${ATTENTION_SQL} AND activity IS NOT NULL AND activity < ?`).all(now - STALE_ATTENTION_MS) as any[];
+    const rows = this.db.query(`SELECT id,scan,owned,body FROM chats WHERE (${ATTENTION_SQL} OR (json_extract(body,'$.attentionCleared') IS NULL AND json_extract(body,'$.live.ask') IS NOT NULL)) AND activity IS NOT NULL AND activity < ?`).all(now - STALE_ATTENTION_MS) as any[];
     if (!rows.length) return this.revision();
     this.db.transaction(() => {
       let changed = false;

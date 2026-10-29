@@ -90,6 +90,7 @@ abstract final class Status {
     'waiting' || 'needsReply' || 'attention' || 'degraded' => NX.waiting,
     'failed' || 'error' || 'down' => NX.failed,
     'stuck' => NX.stuck,
+    'turn' => NX.accent,
     'done' || 'completed' || 'active' => NX.done,
     _ => NX.idle,
   };
@@ -98,6 +99,7 @@ abstract final class Status {
     'waiting' || 'needsReply' || 'attention' => 'Needs you',
     'failed' || 'error' => 'Failed',
     'stuck' => 'Frozen?',
+    'turn' => 'Your turn',
     'done' || 'completed' => 'Done',
     'active' => 'Active',
     'healthy' => 'Healthy',
