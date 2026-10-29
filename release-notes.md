@@ -1,3 +1,30 @@
+## NexusLink Test 1.0.40+46 — Agent campus and phone approvals
+
+**Arena: a pannable pixel campus**
+- Each project you worked on in the last 7 days (or that has an agent running now) gets its own room. Rooms that need you come first.
+- Every agent is a pixel character at its own desk, styled by app (Claude, Codex, Antigravity, Cursor, OpenCode). It types while editing, goes to the bookshelf while reading or browsing, works at the server rack while running commands, waits by the door when it needs you, relaxes in the lounge when it's done, and sleeps after a few quiet hours. Agents walk between spots when their state changes.
+- Orchestrators wear a red tie and a crown, and their workers sit right next to them. Sub-agents show up as small robots beside their agent.
+- Drag to pan and pinch to zoom. Use the bottom-left buttons to zoom or fit the whole campus, and the minimap to jump around. Tap a name plate to list a room's agents, or use **List everyone**.
+- Tap the **Needs you / Your turn / Working** chips to fly to the next agent in that state.
+- Tap anyone to open their sheet with **Open chat**, the current step, plan, sub-agents and, if one is waiting, the approval.
+- Confetti when an agent finishes, smoke when it fails, desk lamps at night.
+
+**Answer Claude from the phone (PC tab → Phone approvals)**
+- Turn on **Approve Claude from this phone** to see Claude's permission prompts on the phone: **Allow**, **Deny** or **Deny with a note**.
+- Answer Claude's multiple-choice questions (or type your own answer), and approve a plan or send it back with feedback.
+- This uses Claude Code's official permission hook. Whichever answers first, the phone or the PC, wins, and the PC dialog closes when you answer on the phone. If the phone isn't reachable, Claude asks on the PC as usual.
+- Claude Desktop sessions always show up. Terminal `claude` sessions only show up with **Hold terminal prompts for me** turned on.
+- You get a notification if a prompt is still waiting after 10 seconds.
+- Codex isn't supported yet: it needs its hook trusted once in Codex's `/hooks` screen.
+
+**Monitor accuracy**
+- A finished agent no longer shows "Needs you". Claude Desktop's after-turn summary now shows as **Your turn**, a separate section you can swipe away. "Needs you" is kept for agents that are really blocked on an approval, a question or a plan.
+- Workers are linked to the orchestrator that started them, and "Reported to its orchestrator" no longer asks for you.
+- Sub-agents are tracked with their own state. A sub-agent waiting on approval flags its parent.
+- Running commands are detected more reliably.
+
+Needs the updated PC host: on Linux run `bash scripts/deploy-host.sh`, on Windows install `NexusLink-Host-Setup.exe` from this release. Then restart NexusLink on the PC.
+
 ## NexusLink Test 1.0.39+45 — Phone mic
 
 **Phone mic (PC tab)**
