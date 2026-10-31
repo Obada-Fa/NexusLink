@@ -62,7 +62,7 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
   int _staticNight = -1;
   final _movers = <String, _Mover>{};
   final _bursts = <Burst>[];
-  final _tags = <String, TextPainter>{};
+  final _tags = <String, AgentTag>{};
   String? _selected;
   Size _viewport = Size.zero;
   bool _placed = false;
@@ -171,30 +171,54 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
       }
     }
     _movers.removeWhere((id, _) => !alive.contains(id));
+    for (final id in _tags.keys.where((id) => !alive.contains(id)).toList()) {
+      _tags.remove(id)?.dispose();
+    }
   }
 
-  TextPainter _tag(WorldAgent a) {
-    final title = a.chat.title.length > 18
-        ? '${a.chat.title.substring(0, 17)}…'
-        : a.chat.title;
+  AgentTag _tag(WorldAgent a) {
+    final status = switch (a.pose) {
+      Pose.typing =>
+        a.chat.live?.activity == 'thinking' ? 'Thinking' : 'Working',
+      Pose.researching => switch (a.chat.live?.activity ??
+          a.chat.json['activity']) {
+        'browsing' => 'Browsing',
+        'searching' => 'Searching',
+        _ => 'Reading',
+      },
+      Pose.running => 'Running',
+      Pose.asking => 'Needs you',
+      Pose.yourTurn => 'Your turn',
+      Pose.failed => 'Failed',
+      Pose.resting => 'Done',
+      Pose.sleeping => 'Idle',
+    };
+    final color = switch (a.pose) {
+      Pose.asking => NX.waiting,
+      Pose.failed => NX.failed,
+      Pose.yourTurn => NX.accent,
+      Pose.typing ||
+      Pose.researching ||
+      Pose.running => const Color(0xFFA8DBC4),
+      _ => const Color(0xFFB8C6CB),
+    };
+    // Keep text readable at the initial room-fit zoom without enlarging sprites.
+    final fontSize =
+        (MediaQuery.textScalerOf(context).scale(11) / (2 * _zoom.clamp(.4, 3)))
+            .clamp(6.5, 16.0);
+    final width = _selected == a.id ? 96.0 : 42.0;
+    final key = '${a.chat.title}|$status|$fontSize|$width';
     final existing = _tags[a.id];
-    if (existing != null && existing.text?.toPlainText() == title) {
-      return existing;
-    }
+    if (existing != null && existing.key == key) return existing;
     existing?.dispose();
-    return _tags[a.id] = TextPainter(
-      text: TextSpan(
-        text: title,
-        style: const TextStyle(
-          fontFamily: 'Roboto',
-          color: Color(0xFFF2F4FA),
-          fontSize: 5.5,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-      maxLines: 1,
-    )..layout();
+    return _tags[a.id] = AgentTag(
+      key: key,
+      title: a.chat.title,
+      status: status,
+      color: color,
+      fontSize: fontSize,
+      maxWidth: width,
+    );
   }
 
   Frame _frame() {
@@ -524,7 +548,7 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
           children: [
             Positioned.fill(
               child: ColoredBox(
-                color: const Color(0xFF2E5B39),
+                color: const Color(0xFF294A42),
                 child: InteractiveViewer(
                   transformationController: _camera,
                   constrained: false,
@@ -826,7 +850,7 @@ class _MinimapPainter extends CustomPainter {
     canvas.clipRect(Offset.zero & size);
     canvas.drawRect(
       Offset.zero & size,
-      Paint()..color = const Color(0xFF2E5B39),
+      Paint()..color = const Color(0xFF294A42),
     );
     for (final r in world.rooms) {
       final color = r.needsYou + r.failed > 0
@@ -842,7 +866,7 @@ class _MinimapPainter extends CustomPainter {
         r.rect.right * scale,
         r.rect.bottom * scale,
       );
-      canvas.drawRect(rect, Paint()..color = const Color(0xFF3B3552));
+      canvas.drawRect(rect, Paint()..color = const Color(0xFF35454D));
       canvas.drawRect(
         rect,
         Paint()
