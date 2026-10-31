@@ -15,85 +15,93 @@ class Sprite {
   int get height => rows.length;
 }
 
-/// Left halves are mirrored into symmetric 12-pixel rows; full rows pass through.
-List<String> _m(List<String> rows) => [
-  for (final r in rows) r.length == 6 ? r + r.split('').reversed.join() : r,
-];
-
 // Palette keys: o outline, h hair, H hair highlight, s skin, S skin shadow, r blush,
 // e eye, c shirt, C shirt shadow, k shirt highlight, t tie, p pants, P pants
 // shadow, b shoes, L light, w white.
+// Twelve-pixel silhouettes keep every animation frame aligned. A larger face,
+// asymmetrical hair highlight and visible cuffs read at phone scale.
 final _frontTop = [
-  '...ooo',
-  '..ohhh',
-  '.ohhHH',
-  '.ohhhh',
-  '.ohsss',
-  '.osess',
-  '.orsss',
-  '..osss',
-  '..oCck',
-  '.oCcct',
-  'osCcct',
-  'osCcct',
-  '.oCcct',
-  '..oppp',
-  '..oppP',
+  '....oooo....',
+  '...ohHHho...',
+  '..ohHHhhho..',
+  '..ohhhhSho..',
+  '..osssSsso..',
+  '..oseSesso..',
+  '..osssSsso..',
+  '...osSSo....',
+  '...ocwco....',
+  '..oCctcCo...',
+  '.osCctcCso..',
+  '.oSCcccCSo..',
+  '..oCcccCo...',
+  '...opPpo....',
+  '...opPpo....',
 ];
-final front = Sprite('front', _m([..._frontTop, '..oppo', '..obbo', '..ooo.']));
-final walkA = Sprite(
-  'walkA',
-  _m([..._frontTop, '..oppooppo..', '..obbooppo..', '..ooo.obbo..']),
-);
-final walkB = Sprite(
-  'walkB',
-  _m([..._frontTop, '..oppooppo..', '..oppoobbo..', '..obbo.ooo..']),
-);
+final front = Sprite('front', [
+  ..._frontTop,
+  '...opopo....',
+  '...obobo....',
+  '...oo.oo....',
+]);
+final walkA = Sprite('walkA', [
+  ..._frontTop,
+  '..opp.opo...',
+  '..obb.obo...',
+  '..ooo.ooo...',
+]);
+final walkB = Sprite('walkB', [
+  ..._frontTop,
+  '...opo.oppo.',
+  '...obo.bbo..',
+  '...ooo.ooo..',
+]);
 final _backTop = [
-  '...ooo',
-  '..ohhh',
-  '.ohhhH',
-  '.ohhhh',
-  '.ohhhh',
-  '.ohhhh',
-  '..ohhh',
-  '..oCcc',
-  '.oCccc',
+  '....oooo....',
+  '...ohHHho...',
+  '..ohHHhhho..',
+  '..ohHhhhho..',
+  '..ohhhhhho..',
+  '..ohhhhhho..',
+  '...ohhho....',
+  '...oSSSo....',
+  '..oCkkcCo...',
 ];
-final back = Sprite(
-  'back',
-  _m([
-    ..._backTop,
-    'oCcccc',
-    'oCcccc',
-    '.oCccc',
-    '.oCccc',
-    '..oppp',
-    '..oppo',
-    '..obbo',
-    '..ooo.',
-  ]),
-);
-final typeA = Sprite(
-  'typeA',
-  _m([..._backTop, 'osCccc', 'oCcccc', '.oCccc', '.oPppp', '..oooo']),
-);
-final typeB = Sprite(
-  'typeB',
-  _m([
-    ..._backTop.sublist(0, 8),
-    '.osCcccccCo.',
-    'oCcccccccCso',
-    'oCcccccccCo.',
-    '.oCccccccCo.',
-    '.oPpppppppo.',
-    '..oooooooo..',
-  ]),
-);
-final sit = Sprite(
-  'sit',
-  _m([..._frontTop.sublist(0, 13), '.opppp', 'obbopp', 'ooo.oo']),
-);
+final back = Sprite('back', [
+  ..._backTop,
+  '.oCccccCCo..',
+  '.osCcccCso..',
+  '.oSCcccCSo..',
+  '..oCcccCo...',
+  '...opPpo....',
+  '...opPpo....',
+  '...opopo....',
+  '...obobo....',
+  '...oo.oo....',
+]);
+final typeA = Sprite('typeA', [
+  ..._backTop.take(8),
+  '..sCkkcCo...',
+  '.oCCcccCso..',
+  '.oCCcccCCo..',
+  '..oCcccCo...',
+  '..oPpppPo...',
+  '...ooooo....',
+]);
+final typeB = Sprite('typeB', [
+  ..._backTop.take(8),
+  '..oCkkcCs...',
+  '.osCcccCCo..',
+  '.oCCcccCCo..',
+  '..oCcccCo...',
+  '..oPpppPo...',
+  '...ooooo....',
+]);
+final sit = Sprite('sit', [
+  ..._frontTop.take(13),
+  '..oppppPo...',
+  '..obbobbo...',
+  '..ooo.ooo...',
+]);
 final bot = Sprite('bot', [
   '...LL...',
   '...oo...',
@@ -165,7 +173,7 @@ Look lookFor(ChatSummary chat, {bool boss = false}) {
     key: '${chat.source}:${seed % 24}:$boss',
     accessory: accessory,
     palette: {
-      'o': const Color(0xFF14121C),
+      'o': const Color(0xFF25363E),
       'h': hair,
       'H': _tint(hair, .25),
       's': skin.$1,
@@ -176,8 +184,8 @@ Look lookFor(ChatSummary chat, {bool boss = false}) {
       'C': _shade(shirt, .72),
       'k': _tint(shirt, .3),
       't': boss ? const Color(0xFFE5484D) : shirt,
-      'p': const Color(0xFF353A52),
-      'P': const Color(0xFF262A3D),
+      'p': const Color(0xFF526679),
+      'P': const Color(0xFF3B4B60),
       'b': const Color(0xFF1E1A22),
       'L': NX.working,
       'w': const Color(0xFFFFFFFF),
@@ -297,7 +305,7 @@ class Px {
     Color fill, {
     bool outline = true,
   }) {
-    if (outline) r(x - 1, y - 1, w + 2, h + 2, const Color(0xFF14121C));
+    if (outline) r(x - 1, y - 1, w + 2, h + 2, const Color(0xFF35454D));
     r(x, y, w, h, fill);
     r(x, y, w, 1, _tint(fill, .22));
     r(x, y + h - 1, w, 1, _shade(fill, .7));

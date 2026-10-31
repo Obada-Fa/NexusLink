@@ -11,17 +11,17 @@ import 'pixel_art.dart';
 import 'world.dart';
 
 const _ink = Color(0xFF14121C);
-const _wall = Color(0xFF3B3552);
-const _wallFace = Color(0xFF5D5679);
-const _wainscot = Color(0xFF4A4364);
-const _wood = Color(0xFF8D5D3E);
-const _woodDark = Color(0xFF6E452D);
-const _carpet = Color(0xFF34546A);
-const _tileA = Color(0xFF59606E);
-const _tileB = Color(0xFF4F5562);
-const _rug = Color(0xFF7B3E5C);
-const _grass = Color(0xFF2E5B39);
-const _path = Color(0xFF8F8573);
+const _wall = Color(0xFF35454D);
+const _wallFace = Color(0xFFD4D3BE);
+const _wainscot = Color(0xFF779591);
+const _wood = Color(0xFFB59A79);
+const _woodDark = Color(0xFFA48A6D);
+const _carpet = Color(0xFF466B6D);
+const _tileA = Color(0xFF6B8184);
+const _tileB = Color(0xFF667C7F);
+const _rug = Color(0xFF577D78);
+const _grass = Color(0xFF294A42);
+const _path = Color(0xFF8F9887);
 
 int _hash(int a, [int b = 0, int c = 0]) {
   var h = a * 73856093 ^ b * 19349663 ^ c * 83492791;
@@ -55,11 +55,13 @@ ui.Picture recordStatic(World world, {required double night}) {
   for (var y = 0.0; y < size.height; y += 8) {
     for (var x = 0.0; x < size.width; x += 8) {
       final h = _hash(x.toInt(), y.toInt());
-      if (h % 5 == 0) px.r(x + h % 7, y + h % 5, 2, 1, const Color(0xFF3B7046));
-      if (h % 11 == 0) {
-        px.r(x + h % 6, y + h % 4, 1, 2, const Color(0xFF244A2D));
+      if (h % 17 == 0) {
+        px.r(x + h % 7, y + h % 5, 2, 1, const Color(0xFF35594D));
       }
-      if (h % 97 == 0) {
+      if (h % 31 == 0) {
+        px.r(x + h % 6, y + h % 4, 1, 2, const Color(0xFF234339));
+      }
+      if (h % 257 == 0) {
         px.r(
           x + 2,
           y + 2,
@@ -150,9 +152,9 @@ void _tree(Px px, Offset p, int h) {
   px.r(x - 9, y + 9, 20, 4, const Color(0x55000000));
   px.r(x - 2, y + 2, 4, 9, const Color(0xFF5B3A26));
   final leaf = [
-    const Color(0xFF3F8A4C),
-    const Color(0xFF4C9A55),
-    const Color(0xFF357A41),
+    const Color(0xFF52806A),
+    const Color(0xFF65947B),
+    const Color(0xFF416C5D),
   ][h % 3];
   px.r(x - 9, y - 10, 18, 13, _ink);
   px.r(x - 8, y - 12, 16, 15, leaf);
@@ -187,23 +189,26 @@ void _room(Canvas canvas, Px px, WorldRoom room, double night) {
   px.r(left, r.top + 4, r.width - 8, room.wallHeight - 4, _wallFace);
   px.r(left, top - 10, r.width - 8, 8, _wainscot);
   px.r(left, top - 3, r.width - 8, 3, shade(_wainscot, .7));
-  for (var x = left + 3; x < r.right - 6; x += 8) {
+  for (var x = left + 3; x < r.right - 6; x += 24) {
     px.r(x, top - 9, 1, 6, shade(_wainscot, .8));
   }
 
   // Floors per zone.
   final floor = Rect.fromLTRB(left, top, r.right - 4, r.bottom - 4);
   px.r(floor.left, floor.top, floor.width, floor.height, _wood);
-  for (var y = floor.top; y < floor.bottom; y += 5) {
-    px.r(floor.left, y + 4, floor.width, 1, _woodDark);
-    final row = ((y - floor.top) / 5).floor();
-    for (var x = floor.left + (row.isEven ? 0 : 9); x < floor.right; x += 18) {
-      px.r(x, y, 1, 4, _woodDark);
+  canvas.save();
+  canvas.clipRect(floor);
+  for (var y = floor.top; y < floor.bottom; y += 10) {
+    px.r(floor.left, y + 9, floor.width, 1, _woodDark);
+    final row = ((y - floor.top) / 10).floor();
+    for (var x = floor.left + (row.isEven ? 0 : 18); x < floor.right; x += 36) {
+      px.r(x, y, 1, 9, _woodDark);
       if (_hash(x.toInt(), y.toInt()) % 7 == 0) {
         px.r(x + 6, y + 2, 2, 1, tint(_wood, .15));
       }
     }
   }
+  canvas.restore();
   final research = Rect.fromLTWH(
     left,
     top,
@@ -211,9 +216,9 @@ void _room(Canvas canvas, Px px, WorldRoom room, double night) {
     floor.height - tile * 1.6,
   );
   px.r(research.left, research.top, research.width, research.height, _carpet);
-  for (var y = research.top + 3; y < research.bottom; y += 6) {
-    for (var x = research.left + 3; x < research.right; x += 6) {
-      px.r(x, y, 1, 1, tint(_carpet, .18));
+  for (var y = research.top + 3; y < research.bottom; y += 12) {
+    for (var x = research.left + 3; x < research.right; x += 12) {
+      px.r(x, y, 1, 1, tint(_carpet, .07));
     }
   }
   final server = Rect.fromLTWH(
@@ -333,17 +338,17 @@ void _room(Canvas canvas, Px px, WorldRoom room, double night) {
     lounge.top - 6,
     lounge.width - 26,
     9,
-    const Color(0xFF3E6E8E),
+    const Color(0xFFC08B52),
   );
   px.r(
     lounge.left + 6,
     lounge.top - 6,
     lounge.width - 26,
     3,
-    const Color(0xFF4F86AA),
+    const Color(0xFFD8AB70),
   );
-  px.block(lounge.left + 4, lounge.top - 4, 4, 9, const Color(0xFF345D78));
-  px.block(lounge.right - 24, lounge.top - 4, 4, 9, const Color(0xFF345D78));
+  px.block(lounge.left + 4, lounge.top - 4, 4, 9, const Color(0xFF996C44));
+  px.block(lounge.right - 24, lounge.top - 4, 4, 9, const Color(0xFF996C44));
   _coffee(px, Offset(lounge.right - 9, lounge.top - 2));
   _plant(px, Offset(lounge.right - 8, lounge.bottom - 6), 2);
 
@@ -435,22 +440,32 @@ void _bookcase(Px px, double x, double y, int seed) {
 }
 
 void _desk(Px px, Offset o, int i) {
-  // o is the desk's top-left; 2 tiles wide, monitor on top.
-  px.r(o.dx - 1, o.dy + 11, tile * 2 + 2, 15, const Color(0x44000000));
-  px.block(o.dx, o.dy + 10, tile * 2, 12, const Color(0xFFB98A5A));
-  px.r(o.dx, o.dy + 10, tile * 2, 3, const Color(0xFFCFA273));
-  px.r(o.dx + 2, o.dy + 22, 2, 4, _ink);
-  px.r(o.dx + tile * 2 - 4, o.dy + 22, 2, 4, _ink);
-  // Monitor frame (screen is live).
-  px.r(o.dx + 7, o.dy - 3, 18, 13, _ink);
-  px.r(o.dx + 8, o.dy - 2, 16, 11, const Color(0xFF2B2E3B));
-  px.r(o.dx + 15, o.dy + 10, 2, 2, _ink);
-  px.r(o.dx + 11, o.dy + 15, 10, 2, const Color(0xFF3B3F4E));
+  final x = o.dx, y = o.dy;
+  // Oak top, inset drawer and slim legs, with one consistent light direction.
+  px.r(x + 1, y + 14, 32, 13, const Color(0x260F2428));
+  px.r(x + 2, y + 20, 2, 6, const Color(0xFF394A50));
+  px.r(x + 28, y + 20, 2, 6, const Color(0xFF394A50));
+  px.block(x, y + 10, 32, 11, const Color(0xFFD2AF7C));
+  px.r(x + 1, y + 11, 30, 1, const Color(0xFFEBD2A4));
+  px.r(x + 1, y + 19, 30, 2, const Color(0xFFAE875B));
+  px.r(x + 23, y + 22, 7, 2, const Color(0xFFB38E63));
+  px.r(x + 25, y + 22, 3, 1, const Color(0xFFE4C899));
+  // Monitor bezel, stand and a small power indicator.
+  px.block(x + 6, y - 4, 20, 14, const Color(0xFF44565D));
+  px.r(x + 8, y - 2, 16, 11, const Color(0xFF20363F));
+  px.r(x + 23, y + 9, 1, 1, const Color(0xFF96CAB7));
+  px.r(x + 15, y + 10, 2, 3, const Color(0xFF44565D));
+  px.r(x + 12, y + 12, 8, 1, const Color(0xFF60777B));
+  px.r(x + 10, y + 15, 12, 3, const Color(0xFF738888));
+  px.r(x + 11, y + 15, 10, 1, const Color(0xFFB6C7BB));
+  px.r(x + 24, y + 16, 2, 2, const Color(0xFF61787A));
   if (i.isEven) {
-    px.r(o.dx + 25, o.dy + 13, 3, 3, const Color(0xFFEDEDED));
-    px.r(o.dx + 25, o.dy + 13, 3, 1, const Color(0xFF6B3F2A));
+    px.r(x + 3, y + 13, 3, 4, const Color(0xFFF2E4CA));
+    px.r(x + 6, y + 14, 1, 2, const Color(0xFFF2E4CA));
+    px.r(x + 3, y + 13, 3, 1, const Color(0xFF73533F));
   } else {
-    px.r(o.dx + 3, o.dy + 13, 5, 4, const Color(0xFFE9E1C9));
+    px.r(x + 3, y + 14, 5, 4, const Color(0xFF678F85));
+    px.r(x + 4, y + 14, 1, 4, const Color(0xFFB6CEB8));
   }
 }
 
@@ -476,7 +491,7 @@ void _coffee(Px px, Offset p) {
 void _plant(Px px, Offset p, int kind) {
   px.r(p.dx - 6, p.dy + 3, 12, 2, const Color(0x44000000));
   px.block(p.dx - 4, p.dy - 4, 8, 7, const Color(0xFFB5643D));
-  final leaf = kind.isEven ? const Color(0xFF4C9A55) : const Color(0xFF5DAE63);
+  final leaf = kind.isEven ? const Color(0xFF65947B) : const Color(0xFF5DAE63);
   px.r(p.dx - 6, p.dy - 13, 5, 9, leaf);
   px.r(p.dx + 1, p.dy - 15, 5, 11, leaf);
   px.r(p.dx - 2, p.dy - 17, 4, 12, tint(leaf, .15));
@@ -511,11 +526,12 @@ void _plate(Canvas canvas, Px px, WorldRoom room) {
   final w = text.width + 16;
   final x = r.left + 6;
   final y = r.top - 17;
-  px.block(x, y, w, 14, const Color(0xFF6A4630));
-  px.r(x + 2, y + 2, w - 4, 10, const Color(0xFF7D5539));
+  px.block(x, y, w, 14, const Color(0xFF354D52));
+  px.r(x + 2, y + 2, 2, 10, const Color(0xFFBBD6BE));
   px.r(x + 4, y + 14, 2, 3, _ink);
   px.r(x + w - 6, y + 14, 2, 3, _ink);
   text.paint(canvas, Offset(x + 8, y + 7 - text.height / 2));
+  text.dispose();
 }
 
 /// Where a person is drawn this frame, and how.
@@ -543,6 +559,57 @@ class Burst {
   final bool smoke;
 }
 
+/// Two independently ellipsized lines: long names never displace the status.
+class AgentTag {
+  AgentTag({
+    required this.key,
+    required String title,
+    required String status,
+    required this.color,
+    required double fontSize,
+    required double maxWidth,
+  }) : title = _line(title, const Color(0xFFF4F1E6), fontSize, maxWidth),
+       status = _line(status, color, fontSize * .9, maxWidth);
+
+  final String key;
+  final Color color;
+  final TextPainter title;
+  final TextPainter status;
+  double get width => math.max(title.width, status.width);
+  double get height => title.height + status.height + 1;
+
+  static TextPainter _line(
+    String text,
+    Color color,
+    double size,
+    double width,
+  ) => TextPainter(
+    text: TextSpan(
+      text: text,
+      style: TextStyle(
+        fontFamily: 'Roboto',
+        color: color,
+        fontSize: size,
+        fontWeight: FontWeight.w600,
+        height: 1.1,
+      ),
+    ),
+    textDirection: TextDirection.ltr,
+    maxLines: 1,
+    ellipsis: '…',
+  )..layout(maxWidth: width);
+
+  void paint(Canvas canvas, Offset offset) {
+    title.paint(canvas, offset);
+    status.paint(canvas, offset + Offset(0, title.height + 1));
+  }
+
+  void dispose() {
+    title.dispose();
+    status.dispose();
+  }
+}
+
 /// Everything the live layer needs for one frame.
 class Frame {
   Frame({
@@ -568,7 +635,7 @@ class Frame {
   final List<Burst> bursts;
 
   /// Pre-laid-out name tags by chat id.
-  final Map<String, TextPainter> tags;
+  final Map<String, AgentTag> tags;
 }
 
 class LivePainter extends CustomPainter {
@@ -595,17 +662,6 @@ class LivePainter extends CustomPainter {
     for (final b in f.bursts) {
       _burst(px, b, t);
     }
-    if (f.zoom >= .75) {
-      for (final a in actors) {
-        final tag = f.tags[a.agent.id];
-        if (tag == null) continue;
-        final w = tag.width + 6;
-        final x = (a.pos.dx - w / 2).roundToDouble();
-        final y = a.pos.dy + 2;
-        px.r(x, y, w, tag.height + 2, const Color(0xCC14121C));
-        tag.paint(canvas, Offset(x + 3, y + 1));
-      }
-    }
 
     // Night outside lit rooms, dim rooms with nobody working.
     if (f.night > 0) {
@@ -623,7 +679,7 @@ class LivePainter extends CustomPainter {
     }
     for (final room in f.world.rooms) {
       if (room.working + room.needsYou + room.failed == 0) {
-        canvas.drawRect(room.rect, Paint()..color = const Color(0x40000000));
+        canvas.drawRect(room.rect, Paint()..color = const Color(0x180F2428));
       }
     }
     if (f.offline) {
@@ -631,6 +687,31 @@ class LivePainter extends CustomPainter {
         Offset.zero & f.world.size,
         Paint()..color = const Color(0x88101218),
       );
+    }
+    if (f.zoom >= .4) {
+      final occupied = <Rect>[];
+      // The selected agent always gets its label; nearby labels never overlap it.
+      final labeled = [...actors]
+        ..sort((a, b) {
+          if (a.agent.id == b.agent.id) return 0;
+          if (a.agent.id == f.selected) return -1;
+          if (b.agent.id == f.selected) return 1;
+          return a.pos.dy.compareTo(b.pos.dy);
+        });
+      for (final a in labeled) {
+        final tag = f.tags[a.agent.id];
+        if (tag == null) continue;
+        final w = tag.width + 8;
+        final x = (a.pos.dx - w / 2).roundToDouble();
+        final y = a.pos.dy + 4;
+        final rect = Rect.fromLTWH(x, y, w, tag.height + 5);
+        if (occupied.any((other) => other.overlaps(rect.inflate(1)))) continue;
+        occupied.add(rect);
+        px.r(x, y + 1, w, rect.height, const Color(0x330C1B21));
+        px.r(x, y, w, rect.height, const Color(0xF023363D));
+        px.r(x, y, 1, rect.height, tag.color);
+        tag.paint(canvas, Offset(x + 4, y + 2));
+      }
     }
     canvas.restore();
   }
