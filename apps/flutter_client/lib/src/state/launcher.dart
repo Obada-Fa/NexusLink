@@ -95,6 +95,8 @@ final appSessionsProvider =
     >(AppSessionsNotifier.new);
 
 class AppSessionsNotifier extends Notifier<AsyncValue<List<AppSessionInfo>>> {
+  // Survives rebuilds; build() can't read `state`, which throws on first build.
+  List<AppSessionInfo>? _last;
   Timer? _timer;
   bool _disposed = false;
   void Function()? _unsub;
@@ -122,7 +124,7 @@ class AppSessionsNotifier extends Notifier<AsyncValue<List<AppSessionInfo>>> {
       Future.microtask(refresh);
     }
 
-    return AsyncValue.data(state.value ?? const []);
+    return AsyncValue.data(_last ?? const []);
   }
 
   Future<void> refresh() async {
@@ -135,6 +137,7 @@ class AppSessionsNotifier extends Notifier<AsyncValue<List<AppSessionInfo>>> {
           .map((e) => AppSessionInfo.fromJson(e as Map<String, dynamic>))
           .where((s) => s.status == 'running')
           .toList();
+      _last = list;
       if (!_disposed) state = AsyncValue.data(list);
     } catch (e, st) {
       if (!_disposed && state is! AsyncData) state = AsyncValue.error(e, st);
@@ -149,6 +152,8 @@ final windowsProvider =
     );
 
 class WindowsNotifier extends Notifier<AsyncValue<List<WindowInfo>>> {
+  // Survives rebuilds; build() can't read `state`, which throws on first build.
+  List<WindowInfo>? _last;
   Timer? _timer;
   bool _disposed = false;
   void Function()? _unsub;
@@ -174,17 +179,17 @@ class WindowsNotifier extends Notifier<AsyncValue<List<WindowInfo>>> {
       _unsub?.call();
       _unsub = client.subscribe('windows-update', (msg) {
         if (!_disposed && msg['windows'] is List) {
-          state = AsyncValue.data(
-            (msg['windows'] as List)
-                .map((e) => WindowInfo.fromJson(Map<String, dynamic>.from(e)))
-                .toList(),
-          );
+          final list = (msg['windows'] as List)
+              .map((e) => WindowInfo.fromJson(Map<String, dynamic>.from(e)))
+              .toList();
+          _last = list;
+          state = AsyncValue.data(list);
         }
       });
       Future.microtask(refresh);
     }
 
-    return AsyncValue.data(state.value ?? const []);
+    return AsyncValue.data(_last ?? const []);
   }
 
   Future<void> refresh() async {
@@ -196,6 +201,7 @@ class WindowsNotifier extends Notifier<AsyncValue<List<WindowInfo>>> {
       final list = raw
           .map((e) => WindowInfo.fromJson(e as Map<String, dynamic>))
           .toList();
+      _last = list;
       if (!_disposed) state = AsyncValue.data(list);
     } catch (e, st) {
       if (!_disposed && state is! AsyncData) state = AsyncValue.error(e, st);
