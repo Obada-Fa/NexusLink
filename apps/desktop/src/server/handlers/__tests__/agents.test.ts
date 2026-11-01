@@ -1,3 +1,4 @@
+import { parseCodexModels } from '../../../../../../packages/chat-core/src/providers/codex';
 // Agent gateway: session lifecycle, CLI stream parsers, and the mock adapter.
 
 import { describe, expect, test } from 'bun:test';
@@ -248,6 +249,18 @@ describe('composer flags and attachments', () => {
     expect(agy).toEqual([
       { id: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
       { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
+    ]);
+  });
+
+  test('reads Codex models from app-server rows and keeps hidden ones out', () => {
+    expect(parseCodexModels([
+      { id: 'gpt-6.1-sol', displayName: 'GPT-6.1-Sol', hidden: false, supportedReasoningEfforts: [{ reasoningEffort: 'low' }] },
+      { id: 'gpt-reserve', displayName: 'GPT-Reserve', hidden: true, supportedReasoningEfforts: [] },
+      { model: 'gpt-next', hidden: false, supportedReasoningEfforts: [] },
+      { hidden: false },
+    ])).toEqual([
+      { id: 'gpt-6.1-sol', name: 'GPT-6.1-Sol', supportsEffort: true },
+      { id: 'gpt-next', name: 'gpt-next', supportsEffort: false },
     ]);
   });
 

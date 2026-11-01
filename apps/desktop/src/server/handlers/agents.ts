@@ -204,12 +204,16 @@ const ANTIGRAVITY_MODELS: AgentModelOption[] = [
 ];
 
 
+/** Fallback when app-server `model/list` cannot run — ids must be valid CLI model slugs. */
 const CODEX_MODELS: AgentModelOption[] = [
-  { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', supportsEffort: true },
-  { id: 'gpt-5.6-sol-medium', name: 'GPT-5.6', supportsEffort: true },
-  { id: 'gpt-6-sol', name: 'GPT-6 Sol', supportsEffort: true },
-  { id: 'o3-mini', name: 'o3-mini', supportsEffort: true },
-  { id: 'o4-mini', name: 'o4-mini', supportsEffort: true },
+  { id: 'gpt-6.1-sol', name: 'GPT-6.1-Sol', supportsEffort: true },
+  { id: 'gpt-6-astra', name: 'GPT-6-Astra', supportsEffort: true },
+  { id: 'gpt-6.1-terra', name: 'GPT-6.1 Terra', supportsEffort: true },
+  { id: 'gpt-6-sol', name: 'GPT-6-Sol', supportsEffort: true },
+  { id: 'gpt-6-luna', name: 'GPT-6-Luna', supportsEffort: true },
+  { id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol', supportsEffort: true },
+  { id: 'gpt-5.6-terra', name: 'GPT-5.6-Terra', supportsEffort: true },
+  { id: 'gpt-5.6-luna', name: 'GPT-5.6-Luna', supportsEffort: true },
 ];
 
 const CLAUDE_MODELS: AgentModelOption[] = [
@@ -225,7 +229,7 @@ const AGENT_DEFS: AgentDef[] = [
     name: 'Codex',
     bin: 'codex',
     capabilities: {
-      modes: ['agent'],
+      modes: ['agent', 'plan'],
       thinkingLevels: ['low', 'medium', 'high'],
       models: CODEX_MODELS,
       images: true,
@@ -518,6 +522,16 @@ async function runCatalogCommand(argv: string[], timeoutMs: number): Promise<str
   }
 }
 
+async function fetchCodexModels(bin: string): Promise<AgentModelOption[]> {
+  const server = new CodexAppServer({});
+  try {
+    await server.initialize(bin);
+    return await server.models();
+  } finally {
+    server.close();
+  }
+}
+
 const catalogRefreshes = new Map<string, Promise<void>>();
 
 /**
@@ -554,8 +568,11 @@ function refreshAgentModels(agentId: string, network = false): Promise<void> {
   if (!bin) return Promise.resolve();
   // `opencode models --refresh` hits the network; only an explicit refresh asks for it.
   const argv = agentId === 'opencode' && network ? [bin, 'models', '--refresh'] : [bin, 'models'];
-  const job = runCatalogCommand(argv, 8000).then((text) => {
-    const live = parseAgentModelList(text);
+  // Codex has no `models` command; its catalog is only exposed through app-server.
+  const fetchLive = agentId === 'codex'
+    ? fetchCodexModels(bin)
+    : runCatalogCommand(argv, 8000).then(parseAgentModelList);
+  const job = fetchLive.then((live) => {
     if (live.length) {
       modelCache.set(agentId, augmentAgentModels(agentId, live));
       modelCacheLive.set(agentId, true);
@@ -1448,7 +1465,6 @@ export function promptAgent(
   if (!session || session.info.status !== 'running') return { ok: false, reason: 'This task is closed. Start a new chat.' };
   if (session.info.hostChatId?.startsWith('ide:')) throw new Error('Cursor IDE chats are read only. Start a new chat to use Cursor CLI.');
   if(session.info.busy) throw new Error('This task is already working. Stop it before sending another prompt.');
-  if (session.info.agent === 'codex' && opts.mode === 'plan') throw new Error('Codex Plan mode is unavailable. Select Agent mode.');
   session.info.turnId=crypto.randomUUID();
   const materialized = materializeAgentImages(session.info.agentSessionId, opts.images);
   const key = parseEnvApiKey(text, ['CURSOR_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENAI_API_KEY']);
@@ -3648,6 +3664,8 @@ class CodexAppServerAdapter implements AgentAdapter {
   private turnId?: string;
   private generation=0;
   private streamed = new Set<string>();
+  /** Collaboration mode sticks to the thread, so an Agent turn after a Plan turn must reset it. */
+  private planActive=false;
   private idleTimer?: ReturnType<typeof setTimeout>;
   constructor(private session: AgentSession) {}
   bindHostChat(id:string) {this.threadId=id;}
@@ -3696,7 +3714,13 @@ class CodexAppServerAdapter implements AgentAdapter {
     saveAgentSessionsToDisk();broadcast({type:'agent-session-update',session:{...this.session.info}});
     const input:any[]=[{type:'text',text}];
     for(const path of options.imagePaths || []) input.push({type:'localImage',path});
-    const turn=await this.server!.request('turn/start',{threadId:this.threadId,input,...(options.model?{model:options.model}:{}),...(options.thinking?{effort:options.thinking==='extra-high'?'xhigh':options.thinking}:{})});
+    const effort=options.thinking?(options.thinking==='extra-high'?'xhigh':options.thinking):undefined;
+    const plan=options.mode==='plan';
+    const model=options.model || result.model;
+    if(plan && !model)throw new Error('Codex returned no model for Plan mode');
+    const collaborationMode=plan || this.planActive?{collaborationMode:{mode:plan?'plan':'default',settings:{model,reasoning_effort:effort ?? null,developer_instructions:null}}}:{};
+    const turn=await this.server!.request('turn/start',{threadId:this.threadId,input,...(options.model?{model:options.model}:{}),...(effort?{effort}:{}),...collaborationMode});
+    this.planActive=plan;
     if(generation!==this.generation){if(turn.turn?.id)await this.server?.request('turn/interrupt',{threadId:this.threadId,turnId:turn.turn.id});return;}
     if(this.session.info.busy)this.turnId=turn.turn?.id;
   }
@@ -3704,11 +3728,11 @@ class CodexAppServerAdapter implements AgentAdapter {
     if(params?.threadId && params.threadId!==this.threadId)return;
     // Late items after turn/completed (or a turn started by another client on this
     // thread) are still part of the conversation; keep them instead of dropping.
-    if(method==='item/agentMessage/delta') {
+    if(method==='item/agentMessage/delta' || method==='item/plan/delta') {
       this.streamed.add(params.itemId);emit(this.session,{kind:'text-delta',text:params.delta,refId:params.itemId});
     } else if(method==='item/started' || method==='item/completed') {
       const item=params.item;
-      if(item?.type==='agentMessage' && method==='item/completed' && !this.streamed.has(item.id))emit(this.session,{kind:'text',text:item.text,refId:item.id});
+      if((item?.type==='agentMessage' || item?.type==='plan') && method==='item/completed' && !this.streamed.has(item.id))emit(this.session,{kind:'text',text:item.text,refId:item.id});
       else if(item?.type==='commandExecution' || item?.type==='fileChange')emit(this.session,{kind:method==='item/started'?'tool-start':'tool-end',toolName:item.type==='commandExecution'?'Command':'File changes',toolInput:item.command || JSON.stringify(item.changes),toolOutput:item.aggregatedOutput,refId:item.id});
     } else if(method==='turn/started') {this.turnId=params.turn?.id;}
     else if(method==='turn/completed') {
@@ -3726,7 +3750,10 @@ class CodexAppServerAdapter implements AgentAdapter {
     const ref=String(id);
     if(params?.threadId!==this.threadId || !this.session.info.busy) {this.server?.respond(id,{decision:'decline'});return;}
     if(!['item/commandExecution/requestApproval','item/fileChange/requestApproval'].includes(method)) {
-      if(method==='item/permissions/requestApproval')this.server?.respond(id,{permissions:{},scope:'turn'});else this.server?.reject(id);
+      if(method==='item/permissions/requestApproval')this.server?.respond(id,{permissions:{},scope:'turn'});
+      // Unanswered questions let a Plan turn carry on with its own assumptions.
+      else if(method==='item/tool/requestUserInput')this.server?.respond(id,{answers:{}});
+      else this.server?.reject(id);
       emit(this.session,{kind:'status',text:'Codex requested an interaction this phone does not support. Open the chat on the PC.'});return;
     }
     if(getAgentApprovalMode('codex')==='auto'){this.server?.respond(id,{decision:'accept'});return;}
