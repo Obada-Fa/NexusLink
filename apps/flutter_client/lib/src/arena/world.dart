@@ -189,6 +189,35 @@ int _poseRank(Pose p) => switch (p) {
 
 bool _active(Pose p) => _poseRank(p) <= 3;
 
+/// Reception counter beside the shared office entrance.
+Rect receptionRect(WorldRoom room) => Rect.fromLTWH(
+  room.door.dx + tile * 1.1,
+  room.rect.bottom - tile * 2.2 - 20,
+  30,
+  30,
+);
+
+/// One shared office, preserving the supplied priority/seat order without caps.
+World buildSharedOffice(
+  List<ChatSummary> chats, {
+  Set<String> asking = const {},
+  DateTime? now,
+  double viewportWidth = 400,
+}) {
+  final visible = chats.where((c) => !c.archived).toList();
+  final room = _layoutRoom(
+    'shared-office',
+    'Shared office',
+    null,
+    const Offset(32, 48),
+    visible,
+    0,
+    {for (final c in visible) c.id: poseFor(c, asking: asking, now: now)},
+    maxPerRow: viewportWidth < 500 ? 3 : 4,
+  );
+  return World([room], Size(room.rect.right + 32, room.rect.bottom + 48));
+}
+
 /// Groups chats into project rooms and lays the rooms out on a map.
 World buildWorld(
   List<ChatSummary> chats, {

@@ -28,37 +28,37 @@ Captures are written to `build/arena-review/`, including night, larger-text,
 long-title, and selected-agent views. The font path is optional for tests;
 supply it for readable review images instead of Flutter's test font.
 
-## Shared office — 2026-11-01
+## Shared office arena — 2026-11-01
 
-The library's Arena now opens a single vertically scrolling office with reception,
-readable task/project/status cards, and activity-specific pixel desk animations.
-Attention comes first; ordering within each priority group stays stable when live
-updates reorder the source list. Working and attention-needed chats remain visible;
-idle/completed chats collapse into a counted list. A completed working chat briefly
-shows a checkmark before leaving the active office. Archived chats are excluded.
-There is no active-agent cap, and an explicit Load more chats action exposes further
-library pages. Project filtering and status totals stay above the scrolling desks.
+Arena retains a spatial pixel-art office: drag to move around, pinch to zoom, use
++/− buttons, or fit the whole office. The earlier task-card dashboard has been
+replaced after user feedback that exploration and zoom must remain part of Arena.
 
-Reception opens a searchable project picker, loads all project pages from the
-connected host, and reuses AgentScreen's new-chat flow with the selected folder.
-It supports the default folder, cancellation, retry, offline disabling, and rejects
-a selection if the connected client changes while the picker is open. Agent cards
-reuse the existing details sheet and phone approval controls. Offline activity is
-marked last known, and animations stop offline or with reduced motion enabled.
+Active and attention-needed agents share one room, with no agent cap. Stable desk
+ordering survives live updates; agents move between desks, shelves, the server
+corner, and the help area according to activity. Tap agents for live details and
+existing approval controls. Selected labels include the project and current step.
+The status chips focus matching agents, and List everyone provides readable details
+without hunting around the room. Idle/completed chats stay in a counted drawer.
+
+A clickable receptionist stands at the entrance, and the permanently visible New
+chat button opens the same searchable project picker. Project selection, default
+folder, retry, offline disabling, host-change checks, and explicit pagination remain.
+The project filter stays above the scene. Reduced motion and offline mode stop the
+animation ticker entirely; camera movement remains available.
 
 Previews: [busy](shared-office-busy.png), [empty](shared-office-empty.png),
 [320 px / 1.8× text](shared-office-large-text.png).
 
-Validation: 45 tests passed across shared_office_test, arena_world_test,
+Validation: 46 tests passed across shared_office_test, arena_world_test,
 arena_graphics_test, chat_library_test, monitor_states_test, and agent_monitor_test.
-Targeted Flutter analysis reports no issues. Nine new widget tests include stable
-ordering, completion transitions, project selection/filtering, retry and default
-folder, cancellation/offline behavior, 40 agents and pagination, animation frame
-changes, and reduced-motion screenshot equality. Physical-phone acceptance and a
-new installable APK are not part of this check. The previous campus renderer is
-retained for its existing rendering tests, but is no longer the library entry point.
+Targeted analysis is clean. Tests cover drag/pinch/button zoom and fit, all 40 agents
+being retained and camera focus reaching the last one, project filtering/selection,
+retry, default folder, cancellation/offline behavior, stable ordering, completion,
+animation frame changes, and reduced-motion screenshot equality. Physical-phone
+acceptance and a new installable APK are still pending.
 
-To regenerate shared-office captures from apps/flutter_client:
+Regenerate shared-office captures from apps/flutter_client:
 
 ```sh
 flutter test --no-pub test/shared_office_test.dart --dart-define=OFFICE_CAPTURE=true
