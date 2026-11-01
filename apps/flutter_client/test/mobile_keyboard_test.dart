@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:nexuslink/src/screens/mirror_screen.dart';
+import 'package:nexuslink/src/screens/stream_keyboard.dart';
 import 'package:nexuslink/src/screens/terminal_screen.dart';
 import 'package:nexuslink/src/state/connection.dart';
 import 'workspace_terminal_test.dart' show TerminalHost;
@@ -83,4 +84,39 @@ void main() {
       },
     );
   }
+
+  testWidgets('open IME floats over the stream with the key bar above it', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [activeClientProvider.overrideWithValue(null)],
+        child: const MaterialApp(
+          home: MirrorScreen(target: MirrorTarget(title: 'Test app')),
+        ),
+      ),
+    );
+    await tester.pump();
+    final height = tester.getSize(find.byType(Scaffold)).height;
+    await tester.tap(find.byTooltip('Show or hide keyboard'));
+    await tester.pump();
+
+    addTearDown(tester.view.resetViewInsets);
+    tester.view.viewInsets = FakeViewPadding(
+      bottom: 300 * tester.view.devicePixelRatio,
+    );
+    await tester.pump();
+
+    final body = tester.getSize(find.byType(Stack).first);
+    expect(body.height, height);
+    final bar = tester.getRect(find.byType(StreamKeyBar));
+    expect(bar.bottom, height - 300);
+    expect(bar.height, streamKeyBarHeight);
+    expect(find.byTooltip('Show or hide keyboard'), findsNothing);
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.autocorrect, isTrue);
+    expect(field.enableSuggestions, isTrue);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
 }

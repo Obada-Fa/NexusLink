@@ -297,22 +297,41 @@ export function keyEvent(key: string, modifiers?: string[], display?: string): {
   const combo = [...(modifiers ?? []), key].join('+');
   if (!safeCombo(combo)) return { ok: false };
   const inj = forDisplay(display);
+  const pending = pendingText.get(display ?? '');
+  if (pending) {
+    void pending.then(() => {
+      inj.flush();
+      inj.send(`key ${combo}`);
+    });
+    return { ok: true };
+  }
   inj.flush();
   return { ok: inj.send(`key ${combo}`) };
 }
 
+/** Text still being typed per display; each call is its own xdotool process, so later input must wait or it overtakes. */
+const pendingText = new Map<string, Promise<void>>();
+
 export function typeText(text: string, display?: string): { ok: boolean } {
   if (!text) return { ok: false };
-  try {
-    Bun.spawn(['xdotool', 'type', '--delay', '8', '--', text.slice(0, 512)], {
-      stdout: 'ignore',
-      stderr: 'ignore',
-      env: { ...process.env, DISPLAY: display || DEFAULT_DISPLAY },
-    } as unknown as SpawnOpts);
-    return { ok: true };
-  } catch {
-    return { ok: false };
-  }
+  const key = display ?? '';
+  const run = async (): Promise<void> => {
+    try {
+      const proc = Bun.spawn(['xdotool', 'type', '--delay', '8', '--', text.slice(0, 512)], {
+        stdout: 'ignore',
+        stderr: 'ignore',
+        env: { ...process.env, DISPLAY: display || DEFAULT_DISPLAY },
+      } as unknown as SpawnOpts);
+      await proc.exited;
+    } catch {
+      // A failed xdotool must not block the input queued behind it.
+    }
+  };
+  const next: Promise<void> = (pendingText.get(key) ?? Promise.resolve()).then(run).finally(() => {
+    if (pendingText.get(key) === next) pendingText.delete(key);
+  });
+  pendingText.set(key, next);
+  return { ok: true };
 }
 
 export function stopInjector(): void {
