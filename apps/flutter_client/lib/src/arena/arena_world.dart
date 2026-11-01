@@ -414,7 +414,7 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
     isScrollControlled: true,
     showDragHandle: true,
     backgroundColor: NX.surface,
-    builder: (_) => _AgentSheet(
+    builder: (_) => ArenaAgentSheet(
       chatId: chat.id,
       lookup: () => _world?.agent(chat.id)?.chat ?? chat,
       room: _world?.roomOf(chat.id),
@@ -894,8 +894,9 @@ class _MinimapPainter extends CustomPainter {
 }
 
 /// What one agent is doing, with phone approvals right there.
-class _AgentSheet extends ConsumerWidget {
-  const _AgentSheet({
+class ArenaAgentSheet extends ConsumerWidget {
+  const ArenaAgentSheet({
+    super.key,
     required this.chatId,
     required this.lookup,
     required this.room,

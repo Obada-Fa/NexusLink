@@ -224,6 +224,13 @@ class SpriteBook {
         return recorder.endRecording();
       });
 
+  void dispose() {
+    for (final picture in _pictures.values) {
+      picture.dispose();
+    }
+    _pictures.clear();
+  }
+
   /// Draws [sprite] with its feet at [feet] (bottom-centre).
   void draw(
     Canvas canvas,

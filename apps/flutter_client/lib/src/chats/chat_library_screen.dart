@@ -11,7 +11,7 @@ import '../workspace/project.dart';
 import '../workspace/files_screen.dart';
 import 'chat_models.dart';
 import 'chat_repository.dart';
-import '../arena/arena_world.dart';
+import '../arena/shared_office.dart';
 import '../monitor/mission_control.dart';
 import '../monitor/approvals.dart';
 import '../monitor/monitor_provider.dart';
@@ -491,6 +491,33 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
     ),
   );
 
+  Future<List<ChatFolder>> _arenaProjects() async {
+    final host = _repo.client?.hostId;
+    final folders = <ChatFolder>[];
+    String? cursor;
+    final seen = <String>{};
+    do {
+      if (!_repo.online) throw StateError('PC offline');
+      final page = await _repo.list({
+        'limit': 100,
+        'cursor': ?cursor,
+      }, folders: true);
+      if (!mounted || host != _repo.client?.hostId || page['saved'] == true) {
+        throw StateError('PC changed or disconnected');
+      }
+      folders.addAll(
+        (page['items'] as List)
+            .map((row) => ChatFolder(Map<String, dynamic>.from(row as Map)))
+            .where((p) => p.path != null),
+      );
+      cursor = page['nextCursor'] as String?;
+      if (cursor != null && !seen.add(cursor)) {
+        throw StateError('Repeated project page');
+      }
+    } while (cursor != null);
+    return folders;
+  }
+
   bool get _canEditState =>
       _repo.online && _repo.client?.supports('chat.state.v1') == true;
 
@@ -873,13 +900,23 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
       else if (_arena)
         SliverFillRemaining(
           hasScrollBody: true,
-          child: ArenaWorld(
+          child: SharedOffice(
+            hostKey: _repo.client,
             chats: _monitorFilter == 'all'
                 ? all
                 : all.where((c) => c.matchesMonitor(_monitorFilter)).toList(),
             offline: offline || _saved,
             onOpen: _open,
             onActions: _chatActions,
+            onNewChat: (path) => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) =>
+                    AgentScreen(startNew: true, initialFolder: path),
+              ),
+            ),
+            loadProjects: _arenaProjects,
+            onLoadMore: _cursor == null ? null : () => _load(more: true),
+            loadingMore: _moreLoading,
           ),
         )
       else ...[
@@ -998,7 +1035,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
       child: CustomScrollView(
         key: PageStorageKey('chat-library:${widget.folder?.id}:$_folders'),
         controller: _scroll,
-        // The Arena pans and zooms itself; the list must not steal its drags.
+        // The office owns vertical scrolling and its explicit pagination action.
         physics: _arena
             ? const NeverScrollableScrollPhysics()
             : const AlwaysScrollableScrollPhysics(),
