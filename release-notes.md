@@ -1,3 +1,23 @@
+## NexusLink Test 1.0.43+49 — See every project's agents at once
+
+**Arena**
+- Each project now has its own room again, so you can see which project every agent is working on.
+- With two or more projects on a phone, the rooms shrink and sit two across, so about eight projects and their live agents fit on one screen. Pinch or tap a project chip to zoom in; the fit button returns to the full view.
+- Agent labels stay inside their own room and show the full status, such as **Needs you** or **Your turn**. When two labels would overlap, one is hidden until you tap that agent.
+- Finished agents walk to their room's lounge. Stopped sessions go there too, labelled **Stopped**, and after 3 hours agents sleep at their desk.
+- A strip of project chips shows each project's state. The small rooms have no reception desk, so use **New chat**.
+
+**Codex**
+- The model picker now lists the models your Codex install actually offers.
+- Codex chats can now use **Plan** mode.
+
+**Reliability**
+- The running apps and windows lists keep their last known contents when they refresh, instead of briefly emptying.
+
+Codex changes need the updated PC host: on Linux run `bash scripts/deploy-host.sh`, on Windows install `NexusLink-Host-Setup.exe` from this release. Then restart NexusLink on the PC.
+
+This is a test build. Physical-device acceptance is still pending.
+
 ## NexusLink Test 1.0.42+48 — New stream keyboard
 
 - The stream now stays full size when the keyboard opens, and slides up only if the keyboard would cover where you are typing.
