@@ -1,10 +1,13 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import {
   takeClicksFromAccum,
   SCROLL_PX_PER_CLICK,
   MAX_SCROLL_CLICKS_PER_FLUSH,
   ZOOM_PX_PER_CLICK,
   MAX_ZOOM_CLICKS_PER_FLUSH,
+  keyEvent,
+  stopInjector,
+  typeText,
 } from '../input';
 
 describe('takeClicksFromAccum', () => {
@@ -48,5 +51,44 @@ describe('takeClicksFromAccum', () => {
     );
     expect(clicks).toBe(-1);
     expect(rest).toBe(0);
+  });
+});
+
+describe('text and key ordering', () => {
+  const realSpawn = Bun.spawn;
+  afterEach(() => {
+    stopInjector();
+    (Bun as { spawn: unknown }).spawn = realSpawn;
+  });
+
+  test('a key waits for text still being typed, and text for earlier text', async () => {
+    const log: string[] = [];
+    const finish: Array<() => void> = [];
+    (Bun as { spawn: unknown }).spawn = (cmd: string[]) => {
+      if (cmd[1] === 'type') {
+        log.push(`type ${cmd[cmd.length - 1]}`);
+        return { exited: new Promise<void>((done) => finish.push(done)) };
+      }
+      return {
+        stdin: { write: (line: string) => log.push(line.trim()), flush() {} },
+        exited: new Promise(() => {}),
+        kill() {},
+      };
+    };
+    const flush = () => new Promise((done) => setTimeout(done, 0));
+
+    typeText('hello', ':order');
+    typeText('world', ':order');
+    keyEvent('Return', undefined, ':order');
+    await flush();
+    expect(log).toEqual(['type hello']);
+
+    finish[0]();
+    await flush();
+    expect(log).toEqual(['type hello', 'type world']);
+
+    finish[1]();
+    await flush();
+    expect(log).toEqual(['type hello', 'type world', 'key Return']);
   });
 });

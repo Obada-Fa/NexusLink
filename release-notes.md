@@ -1,3 +1,12 @@
+## NexusLink Test 1.0.42+48 — New stream keyboard
+
+- The stream now stays full size when the keyboard opens, and slides up only if the keyboard would cover where you are typing.
+- A small floating dock sits on top of your phone keyboard: Windows key, Ctrl, Alt, Shift, Esc and Tab, plus a slide-to-move arrow key, more keys (arrows, Home/End, PgUp/PgDn, Del, F1–F12) and hide.
+- Tap a modifier, then the next key, for shortcuts like Ctrl+C. Tap the Windows key twice to press it on its own.
+- Keyboard suggestions and autocorrect now work, and corrections are applied on the PC.
+
+This is a test build. Physical-device acceptance is still pending.
+
 ## NexusLink Test 1.0.41+47 — Shared Arena office
 
 - Explore one shared pixel-art office: drag to move, pinch to zoom, or use the zoom and fit controls.

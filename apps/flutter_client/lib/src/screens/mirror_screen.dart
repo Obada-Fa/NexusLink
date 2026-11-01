@@ -21,6 +21,7 @@ import '../widgets/mirror_frame_painter.dart';
 import '../widgets/not_connected_view.dart';
 import 'mirror_fit.dart';
 import 'cursor_keyboard_policy.dart';
+import 'stream_keyboard.dart';
 
 /// What to show: a virtual app session (sessionAppId launches a new one,
 /// sessionId re-attaches), an existing window (windowId), an app to launch on
@@ -135,7 +136,18 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   RTCVideoRenderer? _renderer;
   bool _rtcLive = false;
 
-  final _kbController = TextEditingController();
+  final _kbController = TextEditingController.fromValue(_kbEmpty);
+  static const _kbEmpty = TextEditingValue(
+    text: imeSentinel,
+    selection: TextSelection.collapsed(offset: imeSentinel.length),
+  );
+
+  /// The IME text the PC has already received.
+  String _kbSent = imeSentinel;
+  final Set<String> _kbModifiers = {};
+  bool _kbTrayOpen = false;
+
+  double get _kbBarHeight => streamKeyBarHeight * (_kbTrayOpen ? 2 : 1);
   final _kbFocus = FocusNode();
   StreamSubscription<MirrorFrame>? _frameSub;
   Timer? _fpsTimer;
@@ -183,6 +195,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           y < r.y + r.height;
       if (inside) {
         _hintCursor = Offset(x.toDouble() - r.x, y.toDouble() - r.y);
+        if (_keyboardOpen) _viewTick.value++;
       }
       if (_cursorKeyboard.observe(
         active: hint['textCursor'] == true && inside,
@@ -234,6 +247,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   @override
   void initState() {
     super.initState();
+    _kbController.addListener(_pinKbCaret);
     WidgetsBinding.instance.addObserver(this);
     _cursorTimer = Timer.periodic(
       const Duration(milliseconds: 750),
@@ -1010,13 +1024,15 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     _chromeHideTimer?.cancel();
     if (_phase != MirrorPhase.streaming) return;
     _chromeHideTimer = Timer(const Duration(milliseconds: 1600), () {
-      if (!mounted || _keyboardOpen) return;
+      if (!mounted) return;
       setState(() => _chromeVisible = false);
     });
   }
 
   void _onPointerDown(PointerDownEvent e) {
     _activePointers[e.pointer] = e.localPosition;
+    // A touch can move the PC's caret, so old words are no longer editable.
+    if (_keyboardOpen) _resetKbField();
     if (!_viewOnly && !_mouseMode) _pointerView.value = e.localPosition;
     // Each mouse-mode stroke starts from rest (no carried-over speed).
     if (_mouseMode && _activePointers.length == 1) _cursor.endStroke();
@@ -1060,7 +1076,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     setState(() {
       _keyboardOpen = true;
     });
-    _chromeHideTimer?.cancel();
+    _scheduleHideChrome();
     // The TextField is conditional: wait until it exists before attaching IME.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_keyboardOpen) return;
@@ -1074,7 +1090,12 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   void _hideKeyboard() {
     _kbFocus.unfocus();
     SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
-    setState(() => _keyboardOpen = false);
+    _resetKbField();
+    setState(() {
+      _keyboardOpen = false;
+      _kbTrayOpen = false;
+      _kbModifiers.clear();
+    });
     _scheduleHideChrome();
   }
 
@@ -1098,18 +1119,120 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   }
 
   void _onKbChanged(String value) {
-    if (value.isEmpty) return;
-    _client?.notify('input.typeText', _sid({'text': value}));
-    _kbController.clear();
+    final edit = diffImeText(_kbSent, value);
+    _kbSent = value;
+    for (var i = 0; i < edit.backspaces; i++) {
+      _sendKey('BackSpace');
+    }
+    if (edit.text.isNotEmpty) _sendKbText(edit.text);
+    // Keep typed words in the field so the IME can suggest from them.
+    if (!value.startsWith(imeSentinel) ||
+        (value.length > 256 && value.endsWith(' '))) {
+      _resetKbField();
+    }
+  }
+
+  void _sendKbText(String text) {
+    if (_kbModifiers.isEmpty) {
+      _client?.notify('input.typeText', _sid({'text': text}));
+      return;
+    }
+    final key = keysymForChar(text);
+    if (key == null) {
+      _client?.notify('input.typeText', _sid({'text': text}));
+    } else {
+      _sendKeyMods(key, _kbModifiers.toList());
+    }
+    _resetKbField();
+    setState(_kbModifiers.clear);
+  }
+
+  void _resetKbField() {
+    _kbSent = imeSentinel;
+    if (_kbController.value != _kbEmpty) _kbController.value = _kbEmpty;
+  }
+
+  /// Edits happen at the end of the field only, the one place the diff can map
+  /// to the PC, so caret moves from the IME's space bar snap back.
+  void _pinKbCaret() {
+    final value = _kbController.value;
+    final end = TextSelection.collapsed(offset: value.text.length);
+    if (value.text == _kbSent && value.selection != end) {
+      _kbController.selection = end;
+    }
+  }
+
+  void _onBarKey(String key) {
+    if (_kbModifiers.isEmpty) {
+      _sendKey(key);
+    } else {
+      _sendKeyMods(key, _kbModifiers.toList());
+      setState(_kbModifiers.clear);
+    }
+    _resetKbField();
+  }
+
+  void _toggleKbModifier(String name) {
+    // The Windows key also works alone: a second tap presses it (Start menu).
+    if (name == 'super' && _kbModifiers.contains(name)) {
+      _sendKey(name);
+      setState(() => _kbModifiers.remove(name));
+      return;
+    }
+    setState(() {
+      if (!_kbModifiers.remove(name)) _kbModifiers.add(name);
+    });
+  }
+
+  double get _kbCaretY {
+    final r = _region;
+    if (r == null) return 0;
+    final caret =
+        _hintCursor ?? _cursorHost ?? Offset(r.width / 2, r.height / 2);
+    return _hostToScreen(caret.dx, caret.dy).dy;
   }
 
   @override
   Widget build(BuildContext context) {
+    final imeHeight = MediaQuery.viewInsetsOf(context).bottom;
+    // Over the nav bar when Back has closed the IME but the bar is still up.
+    final barBottom = math.max(
+      imeHeight,
+      MediaQuery.viewPaddingOf(context).bottom,
+    );
+    final overlayBottom = _keyboardOpen ? barBottom + _kbBarHeight + 12 : 12.0;
     return Scaffold(
       backgroundColor: Colors.black,
+      // The keyboard floats over the stream, so the picture keeps its size.
+      resizeToAvoidBottomInset: false,
       body: Stack(
         children: [
-          Positioned.fill(child: _stage()),
+          Positioned.fill(
+            child: ValueListenableBuilder<int>(
+              valueListenable: _viewTick,
+              builder: (context, _, stage) {
+                final lift =
+                    _keyboardOpen &&
+                        imeHeight > 0 &&
+                        _phase == MirrorPhase.streaming
+                    ? keyboardLift(
+                        caretY: _kbCaretY,
+                        viewHeight: _viewSize.height,
+                        covered: imeHeight + _kbBarHeight,
+                      )
+                    : 0.0;
+                return TweenAnimationBuilder<double>(
+                  tween: Tween(end: lift),
+                  duration: const Duration(milliseconds: 160),
+                  curve: Curves.easeOut,
+                  builder: (context, y, stage) =>
+                      Transform.translate(offset: Offset(0, -y), child: stage),
+                  child: stage,
+                );
+              },
+              child: _stage(),
+            ),
+          ),
           if (_chromeVisible)
             Positioned(top: 0, left: 0, right: 0, child: _chromeBar()),
           if (!_chromeVisible && _phase == MirrorPhase.streaming)
@@ -1126,10 +1249,12 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                 },
               ),
             ),
-          if (!_viewOnly)
+          // While the IME is up the bar's own button closes it; this one is for
+          // reopening after Android Back.
+          if (!_viewOnly && imeHeight == 0)
             Positioned(
               right: 12,
-              bottom: _keyboardOpen ? 76 : 12,
+              bottom: overlayBottom,
               child: SafeArea(
                 child: IconButton.filled(
                   tooltip: 'Show or hide keyboard',
@@ -1141,11 +1266,16 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           if (_zoomBadgeShown && _phase == MirrorPhase.streaming)
             Positioned(
               left: 12,
-              bottom: _keyboardOpen ? 76 : 12,
+              bottom: overlayBottom,
               child: SafeArea(child: _zoomBadge()),
             ),
           if (_keyboardOpen)
-            Positioned(left: 0, right: 0, bottom: 0, child: _keyboardBar()),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: barBottom,
+              child: _keyboardBar(),
+            ),
         ],
       ),
     );
@@ -1274,6 +1404,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       if (_viewOnly && _keyboardOpen) {
         _kbFocus.unfocus();
         _keyboardOpen = false;
+        _kbTrayOpen = false;
+        _kbModifiers.clear();
       }
     });
     _pointerView.value = null;
@@ -1616,57 +1748,35 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   }
 
   Widget _keyboardBar() {
-    return Container(
-      color: const Color(0xFF0F0F1A),
-      // Scaffold already resizes above the IME; do not add its inset twice.
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _kbController,
-              focusNode: _kbFocus,
-              autocorrect: false,
-              enableSuggestions: false,
-              onChanged: _onKbChanged,
-              textInputAction: TextInputAction.send,
-              onEditingComplete: () {},
-              onSubmitted: (_) {
-                _sendKey('Return');
-                _showKeyboard();
-              },
-              decoration: InputDecoration(
-                isDense: true,
-                hintText: 'Type — sent to the PC',
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-              ),
-            ),
+    return StreamKeyBar(
+      modifiers: _kbModifiers,
+      trayOpen: _kbTrayOpen,
+      onToggleTray: () => setState(() => _kbTrayOpen = !_kbTrayOpen),
+      onToggleModifier: _toggleKbModifier,
+      onKey: _onBarKey,
+      onHide: _hideKeyboard,
+      field: IgnorePointer(
+        child: Opacity(
+          opacity: 0,
+          child: TextField(
+            controller: _kbController,
+            focusNode: _kbFocus,
+            autocorrect: true,
+            enableSuggestions: true,
+            onChanged: _onKbChanged,
+            textInputAction: TextInputAction.send,
+            onEditingComplete: () {},
+            onSubmitted: (_) {
+              _sendKey('Return');
+              _resetKbField();
+              _showKeyboard();
+            },
+            decoration: const InputDecoration.collapsed(hintText: null),
           ),
-          _kbKey('⌫', () => _sendKey('BackSpace')),
-          _kbKey('⏎', () => _sendKey('Return')),
-          _kbKey('Esc', () => _sendKey('Escape')),
-          IconButton(
-            tooltip: 'Hide keyboard',
-            onPressed: _hideKeyboard,
-            icon: const Icon(Icons.keyboard_hide),
-          ),
-        ],
+        ),
       ),
     );
   }
-
-  Widget _kbKey(String label, VoidCallback onTap) => Padding(
-    padding: const EdgeInsets.only(left: 6),
-    child: OutlinedButton(
-      onPressed: onTap,
-      style: OutlinedButton.styleFrom(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-      ),
-      child: Text(label),
-    ),
-  );
 }
 
 /// Classic arrow pointer, white with a dark outline, tip at [tip].
