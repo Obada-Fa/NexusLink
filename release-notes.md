@@ -1,3 +1,12 @@
+## NexusLink Test 1.0.41+47 — Shared Arena office
+
+- Explore one shared pixel-art office: drag to move, pinch to zoom, or use the zoom and fit controls.
+- Working agents and agents needing attention appear together; idle and completed chats are tucked into a list. Tap an agent to see its activity and existing approval controls.
+- Use reception or **New chat** to choose a project and start a conversation. Filter the office by project and load more chats when available.
+- Offline activity is marked as last known; reduced motion stops the animations.
+
+This is a test build. Physical-device acceptance is still pending.
+
 ## NexusLink Test 1.0.40+46 — Agent campus and phone approvals
 
 **Arena: a pannable pixel campus**
