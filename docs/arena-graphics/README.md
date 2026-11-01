@@ -28,37 +28,40 @@ Captures are written to `build/arena-review/`, including night, larger-text,
 long-title, and selected-agent views. The font path is optional for tests;
 supply it for readable review images instead of Flutter's test font.
 
-## Shared office arena — 2026-11-01
+## Project campus — 2026-11-01
 
-Arena retains a spatial pixel-art office: drag to move around, pinch to zoom, use
-+/− buttons, or fit the whole office. The earlier task-card dashboard has been
-replaced after user feedback that exploration and zoom must remain part of Arena.
+The single shared office was dropped because it hid which project each agent was
+on. Arena is a pannable campus again, with one room per project.
 
-Active and attention-needed agents share one room, with no agent cap. Stable desk
-ordering survives live updates; agents move between desks, shelves, the server
-corner, and the help area according to activity. Tap agents for live details and
-existing approval controls. Selected labels include the project and current step.
-The status chips focus matching agents, and List everyone provides readable details
-without hunting around the room. Idle/completed chats stay in a counted drawer.
+A strip of project chips under the status chips names every project and its state
+(`NexusLink · 1 need you`), marks the room in view, and flies there when tapped.
+It replaces the project filter dropdown.
 
-A clickable receptionist stands at the entrance, and the permanently visible New
-chat button opens the same searchable project picker. Project selection, default
-folder, retry, offline disabling, host-change checks, and explicit pagination remain.
-The project filter stays above the scene. Reduced motion and offline mode stop the
-animation ticker entirely; camera movement remains available.
+Every chat stays on the map. Finished agents walk to their room's lounge; recently
+stopped sessions (host state `idle`) go there too, labelled Stopped instead of Done
+because idle does not imply success. After 3 hours they sleep at their desk.
+
+Desks stay stable across live updates, and active agents are never dropped by the
+room or per-room caps. Each room has a reception desk that starts a chat in that
+project; the New chat button opens the searchable project picker.
 
 Previews: [busy](shared-office-busy.png), [empty](shared-office-empty.png),
-[320 px / 1.8× text](shared-office-large-text.png).
+[320 px / 1.8× text](shared-office-large-text.png). At 1.8× text the status chips
+wrap and can cover the top of the first room. Physical-phone acceptance and a new
+installable APK are still pending.
 
-Validation: 46 tests passed across shared_office_test, arena_world_test,
-arena_graphics_test, chat_library_test, monitor_states_test, and agent_monitor_test.
-Targeted analysis is clean. Tests cover drag/pinch/button zoom and fit, all 40 agents
-being retained and camera focus reaching the last one, project filtering/selection,
-retry, default folder, cancellation/offline behavior, stable ordering, completion,
-animation frame changes, and reduced-motion screenshot equality. Physical-phone
-acceptance and a new installable APK are still pending.
+### Small rooms on a phone
 
-Regenerate shared-office captures from apps/flutter_client:
+With two or more projects on a phone, rooms shrink and sit two across, so about
+eight projects and their live agents share one screen. Agents still walk between
+desks, shelves, rack, sofa and door; labels stay inside their room. Pinch or use
+the project chips to zoom in; the fit button returns to the overview. The small
+rooms have no reception desk, so use New chat. One project, or a wider screen,
+keeps the full-size room.
+
+Preview: [compact](compact-busy.png).
+
+Regenerate captures from apps/flutter_client:
 
 ```sh
 flutter test --no-pub test/shared_office_test.dart --dart-define=OFFICE_CAPTURE=true

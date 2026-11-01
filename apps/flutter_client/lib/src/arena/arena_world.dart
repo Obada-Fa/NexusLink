@@ -28,13 +28,13 @@ class ArenaWorld extends ConsumerStatefulWidget {
     required this.onOpen,
     this.onActions,
     this.now,
-    this.sharedOffice = false,
     this.onNewChat,
   });
   final List<ChatSummary> chats;
   final bool offline;
-  final bool sharedOffice;
-  final VoidCallback? onNewChat;
+
+  /// Tapped a room's reception desk: start a chat in that project.
+  final ValueChanged<WorldRoom>? onNewChat;
   final ValueChanged<ChatSummary> onOpen;
   final ValueChanged<ChatSummary>? onActions;
 
@@ -182,7 +182,8 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
               was == Pose.researching ||
               was == Pose.running;
           if (wasWorking &&
-              (a.pose == Pose.resting || a.pose == Pose.yourTurn)) {
+              (a.pose == Pose.yourTurn ||
+                  (a.pose == Pose.resting && a.chat.liveState == 'done'))) {
             _bursts.add(Burst(m.pos - const Offset(0, 22), _sceneMs));
           } else if (a.pose == Pose.failed) {
             _bursts.add(Burst(head, _sceneMs, smoke: true));
@@ -218,7 +219,8 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
       Pose.asking => 'Needs you',
       Pose.yourTurn => 'Your turn',
       Pose.failed => 'Failed',
-      Pose.resting => 'Done',
+      // A stopped session may not have succeeded; only say Done when it did.
+      Pose.resting => a.chat.liveState == 'done' ? 'Done' : 'Stopped',
       Pose.sleeping => 'Idle',
     };
     final color = switch (a.pose) {
@@ -234,7 +236,8 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
     final fontSize =
         (MediaQuery.textScalerOf(context).scale(11) / (2 * _zoom.clamp(.4, 3)))
             .clamp(6.5, 16.0);
-    final width = _selected == a.id ? 150.0 : 42.0;
+    // Small rooms have few neighbours per row, so the status can stay whole.
+    final width = _selected == a.id ? 150.0 : (_isCompact ? 58.0 : 42.0);
     final label = _selected == a.id
         ? '${a.chat.title} · ${a.chat.folderName}'
         : a.chat.title;
@@ -289,8 +292,8 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
 
   // --- Camera ---------------------------------------------------------------
 
-  /// Room for the counter chips at the top of the view.
-  static const _hudTop = 52.0;
+  /// Room for the counter and project chips at the top of the view.
+  static const _hudTop = 96.0;
 
   Matrix4 _focusMatrix(Offset art, double scale) {
     final p = art * kArtScale;
@@ -314,6 +317,7 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
 
   void _flyTo(Matrix4 target) {
     _fly?.dispose();
+    _fly = null;
     if (_reduced) {
       _camera.value = target;
       return;
@@ -348,16 +352,54 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
     _flyTo(_focusMatrix(room.rect.center, scale));
   }
 
-  void fitAll() => _flyTo(
-    Matrix4.identity()
-      ..translateByDouble(
-        (_viewport.width - _world!.size.width * kArtScale * _fitScale) / 2,
-        (_viewport.height - _world!.size.height * kArtScale * _fitScale) / 2,
-        0,
-        1,
-      )
-      ..scaleByDouble(_fitScale, _fitScale, _fitScale, 1),
-  );
+  /// The room under the middle of the view, or the nearest one.
+  WorldRoom? get currentRoom {
+    final rooms = _world?.rooms ?? const <WorldRoom>[];
+    if (rooms.isEmpty) return null;
+    final center = _camera.toScene(_viewport.center(Offset.zero)) / kArtScale;
+    double away(WorldRoom r) {
+      final x = center.dx.clamp(r.rect.left, r.rect.right);
+      final y = center.dy.clamp(r.rect.top, r.rect.bottom);
+      return (Offset(x, y) - center).distance;
+    }
+
+    return rooms.reduce((a, b) => away(b) < away(a) ? b : a);
+  }
+
+  /// Small rooms open filling the width, top rooms first, so people stay legible.
+  Matrix4 get _overview {
+    final scale = _viewport.width / (_world!.size.width * kArtScale);
+    return Matrix4.identity()
+      ..translateByDouble(0, _hudTop, 0, 1)
+      ..scaleByDouble(scale, scale, scale, 1);
+  }
+
+  bool get _isCompact => _world?.rooms.firstOrNull?.compact ?? false;
+
+  /// Every room is on screen at the overview, so a minimap adds nothing.
+  bool get fitsOverview {
+    final w = _world;
+    if (w == null || !_isCompact) return false;
+    return _hudTop + w.size.height * _viewport.width / w.size.width <=
+        _viewport.height;
+  }
+
+  void fitAll() {
+    if (_isCompact) {
+      _flyTo(_overview);
+      return;
+    }
+    _flyTo(
+      Matrix4.identity()
+        ..translateByDouble(
+          (_viewport.width - _world!.size.width * kArtScale * _fitScale) / 2,
+          (_viewport.height - _world!.size.height * kArtScale * _fitScale) / 2,
+          0,
+          1,
+        )
+        ..scaleByDouble(_fitScale, _fitScale, _fitScale, 1),
+    );
+  }
 
   void _zoomBy(double factor) {
     final s = (_camera.value.getMaxScaleOnAxis() * factor).clamp(
@@ -373,6 +415,10 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
   void _placeCamera() {
     final w = _world!;
     if (w.rooms.isEmpty) return;
+    if (_isCompact) {
+      _camera.value = _overview;
+      return;
+    }
     // Open on the first room (the most urgent), its full width on screen.
     final first = w.rooms.first;
     final fit = (_viewport.width - 16) / (first.rect.width * kArtScale);
@@ -402,13 +448,6 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
     final w = _world;
     if (w == null) return;
     final art = local / kArtScale;
-    if (widget.sharedOffice &&
-        !widget.offline &&
-        widget.onNewChat != null &&
-        w.rooms.any((r) => receptionRect(r).inflate(8).contains(art))) {
-      widget.onNewChat!();
-      return;
-    }
     WorldAgent? hit;
     var best = double.infinity;
     for (final a in w.agents) {
@@ -433,6 +472,14 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
       return;
     }
     for (final room in w.rooms) {
+      if (!room.compact &&
+          !widget.offline &&
+          widget.onNewChat != null &&
+          receptionRect(room).inflate(8).contains(art)) {
+        HapticFeedback.selectionClick();
+        widget.onNewChat!(room);
+        return;
+      }
       final plate = Rect.fromLTWH(
         room.rect.left,
         room.rect.top - 20,
@@ -555,12 +602,20 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
         ].join(';');
         if (signature != _signature || _world == null) {
           _signature = signature;
-          final next = (widget.sharedOffice ? buildSharedOffice : buildWorld)(
+          final next = buildWorld(
             widget.chats,
             asking: asking,
             now: _now,
             viewportWidth: c.maxWidth,
           );
+          // The map changed scale (a second project arrived, say): re-aim after
+          // this frame, since the camera drives widgets being built right now.
+          if (_placed &&
+              _isCompact != (next.rooms.firstOrNull?.compact ?? false)) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) _placeCamera();
+            });
+          }
           final layoutChanged =
               _world == null ||
               _world!.size != next.size ||
@@ -579,7 +634,11 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
           _static = recordStatic(_world!, night: _night);
           _staticNight = nightBucket;
         }
-        if (!_placed && c.maxWidth > 0 && c.maxHeight > 0) {
+        // Chats can load after the first build; wait for a room to aim at.
+        if (!_placed &&
+            _world!.rooms.isNotEmpty &&
+            c.maxWidth > 0 &&
+            c.maxHeight > 0) {
           _placed = true;
           _placeCamera();
         }
@@ -667,57 +726,28 @@ class _Hud extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    int count(Set<Pose> p) =>
-        world.agents.where((a) => p.contains(a.pose)).length;
-    const needs = {Pose.asking, Pose.failed};
-    const turn = {Pose.yourTurn};
-    const busy = {Pose.typing, Pose.researching, Pose.running};
-    final nNeeds = count(needs);
-    final nTurn = count(turn);
-    final nBusy = count(busy);
     return Positioned.fill(
       child: IgnorePointer(
         ignoring: false,
         child: Stack(
           children: [
             Positioned(
-              left: 10,
-              right: 10,
+              left: 0,
+              right: 0,
               top: 10,
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (offline)
-                    const _Chip(
-                      icon: Icons.cloud_off_rounded,
-                      label: 'Offline · last known',
-                      color: NX.idle,
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    child: _StatusChips(
+                      state: state,
+                      world: world,
+                      offline: offline,
                     ),
-                  _Chip(
-                    icon: Icons.front_hand_rounded,
-                    label: nNeeds == 0
-                        ? 'Nobody needs you'
-                        : '$nNeeds need you',
-                    color: nNeeds == 0 ? NX.idle : NX.waiting,
-                    pulse: nNeeds > 0,
-                    onTap: nNeeds == 0
-                        ? null
-                        : () => state.cycle('needs', needs),
                   ),
-                  if (nTurn > 0)
-                    _Chip(
-                      icon: Icons.chat_bubble_outline_rounded,
-                      label: '$nTurn your turn',
-                      color: NX.accent,
-                      onTap: () => state.cycle('turn', turn),
-                    ),
-                  _Chip(
-                    icon: Icons.bolt_rounded,
-                    label: '$nBusy working',
-                    color: nBusy == 0 ? NX.idle : NX.working,
-                    onTap: nBusy == 0 ? null : () => state.cycle('busy', busy),
-                  ),
+                  const SizedBox(height: 8),
+                  _ProjectStrip(state: state, world: world),
                 ],
               ),
             ),
@@ -740,9 +770,7 @@ class _Hud extends StatelessWidget {
                   const SizedBox(width: 8),
                   _RoundButton(
                     icon: Icons.fit_screen_rounded,
-                    label: state.widget.sharedOffice
-                        ? 'Show the whole office'
-                        : 'Show the whole campus',
+                    label: 'Show the whole campus',
                     onTap: state.fitAll,
                   ),
                   const SizedBox(width: 8),
@@ -754,7 +782,7 @@ class _Hud extends StatelessWidget {
                 ],
               ),
             ),
-            if (!state.widget.sharedOffice)
+            if (!state.fitsOverview)
               Positioned(
                 right: 10,
                 bottom: 10,
@@ -765,6 +793,103 @@ class _Hud extends StatelessWidget {
       ),
     );
   }
+}
+
+Color _roomColor(WorldRoom r) => r.needsYou + r.failed > 0
+    ? NX.waiting
+    : r.yourTurn > 0
+    ? NX.accent
+    : r.working > 0
+    ? NX.working
+    : NX.idle;
+
+/// Totals across every project: who needs you, whose turn it is, who is busy.
+class _StatusChips extends StatelessWidget {
+  const _StatusChips({
+    required this.state,
+    required this.world,
+    required this.offline,
+  });
+  final ArenaWorldState state;
+  final World world;
+  final bool offline;
+
+  @override
+  Widget build(BuildContext context) {
+    int count(Set<Pose> p) =>
+        world.agents.where((a) => p.contains(a.pose)).length;
+    const needs = {Pose.asking, Pose.failed};
+    const turn = {Pose.yourTurn};
+    const busy = {Pose.typing, Pose.researching, Pose.running};
+    final nNeeds = count(needs);
+    final nTurn = count(turn);
+    final nBusy = count(busy);
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        if (offline)
+          const _Chip(
+            icon: Icons.cloud_off_rounded,
+            label: 'Offline · last known',
+            color: NX.idle,
+          ),
+        _Chip(
+          icon: Icons.front_hand_rounded,
+          label: nNeeds == 0 ? 'Nobody needs you' : '$nNeeds need you',
+          color: nNeeds == 0 ? NX.idle : NX.waiting,
+          pulse: nNeeds > 0,
+          onTap: nNeeds == 0 ? null : () => state.cycle('needs', needs),
+        ),
+        if (nTurn > 0)
+          _Chip(
+            icon: Icons.chat_bubble_outline_rounded,
+            label: '$nTurn your turn',
+            color: NX.accent,
+            onTap: () => state.cycle('turn', turn),
+          ),
+        _Chip(
+          icon: Icons.bolt_rounded,
+          label: '$nBusy working',
+          color: nBusy == 0 ? NX.idle : NX.working,
+          onTap: nBusy == 0 ? null : () => state.cycle('busy', busy),
+        ),
+      ],
+    );
+  }
+}
+
+/// Every project on the map and how it is doing; the room in view is marked.
+class _ProjectStrip extends StatelessWidget {
+  const _ProjectStrip({required this.state, required this.world});
+  final ArenaWorldState state;
+  final World world;
+  @override
+  Widget build(BuildContext context) => SingleChildScrollView(
+    scrollDirection: Axis.horizontal,
+    padding: const EdgeInsets.symmetric(horizontal: 10),
+    child: AnimatedBuilder(
+      animation: state.camera,
+      builder: (_, _) {
+        final current = state.currentRoom;
+        return Row(
+          children: [
+            for (final room in world.rooms)
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: _Chip(
+                  icon: Icons.apartment_rounded,
+                  label: '${room.name} · ${room.summary}',
+                  color: _roomColor(room),
+                  pulse: room.id == current?.id,
+                  onTap: () => state.focusRoom(room),
+                ),
+              ),
+          ],
+        );
+      },
+    ),
+  );
 }
 
 class _Chip extends StatelessWidget {
@@ -898,13 +1023,7 @@ class _MinimapPainter extends CustomPainter {
       Paint()..color = const Color(0xFF294A42),
     );
     for (final r in world.rooms) {
-      final color = r.needsYou + r.failed > 0
-          ? NX.waiting
-          : r.yourTurn > 0
-          ? NX.accent
-          : r.working > 0
-          ? NX.working
-          : NX.idle;
+      final color = _roomColor(r);
       final rect = Rect.fromLTRB(
         r.rect.left * scale,
         r.rect.top * scale,

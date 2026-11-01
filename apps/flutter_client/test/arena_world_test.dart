@@ -87,6 +87,10 @@ void main() {
         Pose.resting,
       );
       expect(
+        poseFor(agent('a', state: 'idle', activity: null), now: now),
+        Pose.resting,
+      );
+      expect(
         poseFor(
           agent(
             'a',
@@ -176,6 +180,15 @@ void main() {
       final room = world.rooms.single;
       expect(room.agents.where((a) => a.id.startsWith('busy')), hasLength(14));
       expect(room.hidden, 5);
+    });
+
+    test('the room cap drops quiet projects, never active ones', () {
+      final world = buildWorld([
+        for (var i = 0; i < maxRooms + 2; i++) agent('busy$i', folder: 'B$i'),
+        agent('done', folder: 'Quiet', state: 'done', activity: null),
+      ], now: now);
+      expect(world.rooms, hasLength(maxRooms + 2));
+      expect(world.agent('done'), isNull);
     });
 
     test('workers sit right after their orchestrator, who is marked boss', () {

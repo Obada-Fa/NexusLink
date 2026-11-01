@@ -1,13 +1,10 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../chats/chat_models.dart';
-import '../monitor/approvals.dart';
 import '../theme/nexus_theme.dart';
-import 'arena_world.dart' show ArenaAgentSheet, ArenaWorld;
+import 'arena_world.dart' show ArenaWorld;
 
-/// A single office with stable seats and no limit on active chats.
-class SharedOffice extends ConsumerStatefulWidget {
+/// The Arena tab: the project campus plus the controls around it.
+class SharedOffice extends StatefulWidget {
   const SharedOffice({
     super.key,
     required this.chats,
@@ -29,72 +26,17 @@ class SharedOffice extends ConsumerStatefulWidget {
   final Future<List<ChatFolder>> Function() loadProjects;
   final VoidCallback? onLoadMore;
   @override
-  ConsumerState<SharedOffice> createState() => _SharedOfficeState();
+  State<SharedOffice> createState() => _SharedOfficeState();
 }
 
-class _SharedOfficeState extends ConsumerState<SharedOffice> {
-  final _seats = <String, int>{};
-  final _completed = <String, Timer>{};
-  int _nextSeat = 0;
-  String? _project;
-  @override
-  void didUpdateWidget(SharedOffice oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    final working = {
-      for (final c in oldWidget.chats)
-        if (c.running) c.id,
-    };
-    for (final c in widget.chats) {
-      if (working.contains(c.id) &&
-          c.liveState == 'done' &&
-          !_completed.containsKey(c.id)) {
-        _completed[c.id] = Timer(const Duration(seconds: 2), () {
-          if (mounted) setState(() => _completed.remove(c.id));
-        });
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    for (final timer in _completed.values) {
-      timer.cancel();
-    }
-    super.dispose();
-  }
-
-  void _open(ChatSummary chat) => showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    showDragHandle: true,
-    backgroundColor: NX.surface,
-    builder: (sheet) => ArenaAgentSheet(
-      chatId: chat.id,
-      lookup: () =>
-          widget.chats.where((c) => c.id == chat.id).firstOrNull ?? chat,
-      room: null,
-      world: null,
-      offline: widget.offline,
-      onOpen: () {
-        Navigator.pop(sheet);
-        widget.onOpen(chat);
-      },
-      onActions: widget.onActions == null
-          ? null
-          : () {
-              Navigator.pop(sheet);
-              widget.onActions!(chat);
-            },
-    ),
-  );
-  Future<void> _reception() async {
+class _SharedOfficeState extends State<SharedOffice> {
+  Future<void> _pickProject() async {
     final host = widget.hostKey;
     final choice = await showModalBottomSheet<ChatFolder>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (_) =>
-          OfficeProjectPicker(load: widget.loadProjects, selected: _project),
+      builder: (_) => OfficeProjectPicker(load: widget.loadProjects),
     );
     if (mounted &&
         choice != null &&
@@ -105,124 +47,52 @@ class _SharedOfficeState extends ConsumerState<SharedOffice> {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final asking = ref.watch(approvalsProvider.select((s) => s.chatIds));
-    final chats = widget.chats.where((c) => !c.archived).toList();
-    for (final c in chats) {
-      _seats.putIfAbsent(c.id, () => _nextSeat++);
-    }
-    final projects = <String, String>{
-      for (final c in chats)
-        if (c.folderPath != null) c.folderPath!: c.folderName,
-    };
-    if (!projects.containsKey(_project)) _project = null;
-    final visible = chats
-        .where((c) => _project == null || c.folderPath == _project)
-        .toList();
-    bool active(ChatSummary c) =>
-        c.monitorPriority < 3 ||
-        asking.contains(c.id) ||
-        _completed.containsKey(c.id);
-    int priority(ChatSummary c) =>
-        asking.contains(c.id) ? 0 : c.monitorPriority;
-    final busy = visible.where(active).toList()
-      ..sort((a, b) {
-        final p = priority(a).compareTo(priority(b));
-        return p != 0 ? p : _seats[a.id]!.compareTo(_seats[b.id]!);
-      });
-    final idle = visible.where((c) => !active(c)).toList();
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Row(
-            children: [
-              Expanded(
-                child: DropdownButton<String>(
-                  isExpanded: true,
-                  value: _project,
-                  hint: const Text('All projects'),
-                  items: [
-                    const DropdownMenuItem<String>(
-                      value: null,
-                      child: Text('All projects'),
-                    ),
-                    for (final p in projects.entries)
-                      DropdownMenuItem(
-                        value: p.key,
-                        child: Text(p.value, overflow: TextOverflow.ellipsis),
-                      ),
-                  ],
-                  onChanged: (value) => setState(() => _project = value),
-                ),
-              ),
-              const SizedBox(width: 8),
-              FilledButton.icon(
-                onPressed: widget.offline ? null : _reception,
-                icon: const Icon(Icons.person_add_alt_1),
-                label: const Text('New chat'),
-              ),
-            ],
-          ),
-        ),
-        const Text(
-          'Drag to explore · pinch or use + / − to zoom',
-          style: TextStyle(color: NX.textDim, fontSize: 12),
-        ),
-        Expanded(
-          child: ArenaWorld(
-            chats: busy,
-            offline: widget.offline,
-            sharedOffice: true,
-            onNewChat: widget.offline ? null : _reception,
-            onOpen: widget.onOpen,
-            onActions: widget.onActions,
-          ),
-        ),
-        Wrap(
-          alignment: WrapAlignment.center,
+  Widget build(BuildContext context) => Column(
+    children: [
+      Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Row(
           children: [
-            if (idle.isNotEmpty)
-              TextButton(
-                onPressed: () => showModalBottomSheet<void>(
-                  context: context,
-                  showDragHandle: true,
-                  builder: (sheet) => ListView(
-                    children: [
-                      for (final c in idle)
-                        ListTile(
-                          title: Text(c.title),
-                          subtitle: Text(
-                            '${c.folderName} · ${c.monitorStatus}',
-                          ),
-                          onTap: () {
-                            Navigator.pop(sheet);
-                            _open(c);
-                          },
-                        ),
-                    ],
-                  ),
-                ),
-                child: Text('Idle & completed (${idle.length})'),
+            const Expanded(
+              child: Text(
+                'Drag to explore, pinch to zoom',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: NX.textDim, fontSize: 12),
               ),
-            if (widget.onLoadMore != null)
-              TextButton(
-                onPressed: widget.loadingMore ? null : widget.onLoadMore,
-                child: Text(
-                  widget.loadingMore ? 'Loading…' : 'Load more chats',
-                ),
-              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.icon(
+              onPressed: widget.offline ? null : _pickProject,
+              icon: const Icon(Icons.person_add_alt_1),
+              label: const Text('New chat'),
+            ),
           ],
         ),
-      ],
-    );
-  }
+      ),
+      Expanded(
+        child: ArenaWorld(
+          chats: widget.chats,
+          offline: widget.offline,
+          onNewChat: widget.offline
+              ? null
+              : (room) => widget.onNewChat(room.path),
+          onOpen: widget.onOpen,
+          onActions: widget.onActions,
+        ),
+      ),
+      if (widget.onLoadMore != null)
+        TextButton(
+          onPressed: widget.loadingMore ? null : widget.onLoadMore,
+          child: Text(widget.loadingMore ? 'Loading…' : 'Load more chats'),
+        ),
+    ],
+  );
 }
 
 class OfficeProjectPicker extends StatefulWidget {
-  const OfficeProjectPicker({super.key, required this.load, this.selected});
+  const OfficeProjectPicker({super.key, required this.load});
   final Future<List<ChatFolder>> Function() load;
-  final String? selected;
   @override
   State<OfficeProjectPicker> createState() => _OfficeProjectPickerState();
 }
@@ -285,15 +155,7 @@ class _OfficeProjectPickerState extends State<OfficeProjectPicker> {
                             ),
                           )
                           .toList()
-                        ..sort(
-                          (a, b) => a.path == b.path
-                              ? 0
-                              : a.path == widget.selected
-                              ? -1
-                              : b.path == widget.selected
-                              ? 1
-                              : a.name.compareTo(b.name),
-                        );
+                        ..sort((a, b) => a.name.compareTo(b.name));
                   if (rows.isEmpty) {
                     return const Center(
                       child: Text(
@@ -307,9 +169,6 @@ class _OfficeProjectPickerState extends State<OfficeProjectPicker> {
                         ListTile(
                           title: Text(p.name),
                           subtitle: Text(p.path ?? ''),
-                          trailing: p.path == widget.selected
-                              ? const Icon(Icons.check)
-                              : null,
                           onTap: () => Navigator.pop(context, p),
                         ),
                     ],

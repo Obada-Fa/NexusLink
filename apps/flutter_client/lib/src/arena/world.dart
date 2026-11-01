@@ -95,6 +95,7 @@ class WorldRoom {
     required this.serverSpots,
     required this.loungeSpots,
     required this.helpSpots,
+    this.compact = false,
   });
   final String id;
   final String name;
@@ -114,20 +115,27 @@ class WorldRoom {
   final List<Spot> loungeSpots;
   final List<Spot> helpSpots;
 
+  /// A small room, so a phone sees several projects and their agents at once.
+  final bool compact;
+
   /// Interior geometry (world pixels), shared with the painter.
-  double get wallHeight => 3 * tile;
-  double get researchWidth => 4 * tile;
-  double get rightWidth => 5 * tile;
+  double get wallHeight => (compact ? 2 : 3) * tile;
+  double get researchWidth => (compact ? 2.5 : 4) * tile;
+  double get rightWidth => (compact ? 2.5 : 5) * tile;
+  double get deskLeft =>
+      rect.left + 4 + researchWidth + tile * (compact ? .25 : .5);
+  double get rightLeft =>
+      deskLeft + desksPerRow * 3 * tile + tile * (compact ? .25 : .5);
   Rect get floor => Rect.fromLTRB(
     rect.left + 4,
     rect.top + wallHeight,
     rect.right - 4,
     rect.bottom - 4,
   );
-  double get aisleY => rect.bottom - tile * 1.2;
+  double get aisleY => rect.bottom - tile * (compact ? 1 : 1.2);
   Offset get door => Offset(rect.center.dx, rect.bottom);
   Offset deskOrigin(int i) => Offset(
-    rect.left + 4 + researchWidth + tile * 0.5 + (i % desksPerRow) * 3 * tile,
+    deskLeft + (i % desksPerRow) * 3 * tile,
     rect.top + wallHeight + tile * 0.5 + (i ~/ desksPerRow) * 3 * tile,
   );
 
@@ -142,6 +150,15 @@ class WorldRoom {
       )
       .length;
   int get failed => agents.where((a) => a.pose == Pose.failed).length;
+
+  /// What is happening in this room, most urgent first.
+  String get summary {
+    final blocked = needsYou + failed;
+    if (blocked > 0) return '$blocked need you';
+    if (yourTurn > 0) return '$yourTurn your turn';
+    if (working > 0) return '$working working';
+    return 'quiet';
+  }
 }
 
 class World {
@@ -173,7 +190,8 @@ Pose poseFor(ChatSummary chat, {Set<String> asking = const {}, DateTime? now}) {
   final age = last == null
       ? const Duration(days: 1)
       : (now ?? DateTime.now()).difference(last);
-  return state == 'done' && age < const Duration(hours: 3)
+  // The host reports a stopped session as idle unless it was marked completed.
+  return (state == 'done' || state == 'idle') && age < const Duration(hours: 3)
       ? Pose.resting
       : Pose.sleeping;
 }
@@ -189,34 +207,13 @@ int _poseRank(Pose p) => switch (p) {
 
 bool _active(Pose p) => _poseRank(p) <= 3;
 
-/// Reception counter beside the shared office entrance.
+/// Reception counter beside a room's entrance: starts a chat in that project.
 Rect receptionRect(WorldRoom room) => Rect.fromLTWH(
   room.door.dx + tile * 1.1,
   room.rect.bottom - tile * 2.2 - 20,
   30,
   30,
 );
-
-/// One shared office, preserving the supplied priority/seat order without caps.
-World buildSharedOffice(
-  List<ChatSummary> chats, {
-  Set<String> asking = const {},
-  DateTime? now,
-  double viewportWidth = 400,
-}) {
-  final visible = chats.where((c) => !c.archived).toList();
-  final room = _layoutRoom(
-    'shared-office',
-    'Shared office',
-    null,
-    const Offset(32, 48),
-    visible,
-    0,
-    {for (final c in visible) c.id: poseFor(c, asking: asking, now: now)},
-    maxPerRow: viewportWidth < 500 ? 3 : 4,
-  );
-  return World([room], Size(room.rect.right + 32, room.rect.bottom + 48));
-}
 
 /// Groups chats into project rooms and lays the rooms out on a map.
 World buildWorld(
@@ -269,7 +266,7 @@ World buildWorld(
     final desks = [
       ...busy,
       ...quiet.take(math.max(0, maxAgentsPerRoom - busy.length)),
-    ];
+    ]..sort((a, b) => a.id.compareTo(b.id)); // Desks survive state changes.
     picked.add((
       id: entry.key,
       chats: desks,
@@ -278,15 +275,20 @@ World buildWorld(
   }
 
   // Rooms that need you first, then by their most urgent agent, then by recency.
-  int roomRank(List<ChatSummary> c) =>
-      c.map((x) => _poseRank(poses[x.id]!)).reduce(math.min);
   int latest(List<ChatSummary> c) =>
       c.map((x) => x.activity?.millisecondsSinceEpoch ?? 0).reduce(math.max);
   picked.sort((a, b) {
-    final r = roomRank(a.chats).compareTo(roomRank(b.chats));
+    final r = _rankOf(a.chats, poses).compareTo(_rankOf(b.chats, poses));
     return r != 0 ? r : latest(b.chats).compareTo(latest(a.chats));
   });
-  final rooms = picked.take(maxRooms).toList();
+  // The cap only drops quiet rooms: an active agent always stays on the map.
+  final rooms = [
+    for (final (i, room) in picked.indexed)
+      if (i < maxRooms || room.chats.any((c) => _active(poses[c.id]!))) room,
+  ];
+
+  // Several projects on a phone get small rooms, so they share the screen.
+  final compact = rooms.length >= 2 && viewportWidth < 700;
 
   // Rooms flow in rows; a narrow phone gets one or two columns.
   final columns = rooms.length <= 1
@@ -294,10 +296,11 @@ World buildWorld(
       : rooms.length <= 6 || viewportWidth < 700
       ? 2
       : 3;
-  const margin = 3 * tile;
-  const gap = 4 * tile;
+  final margin = (compact ? .5 : 3) * tile;
+  final gap = (compact ? 1 : 4) * tile;
+  final rowGap = (compact ? 2 : 4) * tile;
   final out = <WorldRoom>[];
-  var y = margin + tile * 2;
+  var y = compact ? tile * 1.5 : margin + tile * 2;
   double width = 0;
   for (var row = 0; row * columns < rooms.length; row++) {
     var x = margin;
@@ -315,17 +318,25 @@ World buildWorld(
         r.hidden,
         poses,
         // A phone gets taller rooms, so people stay big enough to read.
-        maxPerRow: viewportWidth < 500 ? 3 : 4,
+        maxPerRow: compact ? 2 : (viewportWidth < 500 ? 3 : 4),
+        compact: compact,
       );
       out.add(room);
       x = room.rect.right + gap;
       rowHeight = math.max(rowHeight, room.rect.height);
     }
     width = math.max(width, x - gap + margin);
-    y += rowHeight + gap;
+    y += rowHeight + rowGap;
   }
-  return World(out, Size(math.max(width, 20 * tile), y - gap + margin + tile));
+  return World(
+    out,
+    Size(math.max(width, 20 * tile), y - rowGap + margin + tile),
+  );
 }
+
+/// A room's most urgent pose rank.
+int _rankOf(List<ChatSummary> chats, Map<String, Pose> poses) =>
+    chats.map((c) => _poseRank(poses[c.id]!)).reduce(math.min);
 
 /// Orchestrators first, each followed by its workers, so they sit together.
 List<ChatSummary> _withBosses(List<ChatSummary> chats) {
@@ -354,20 +365,27 @@ WorldRoom _layoutRoom(
   int hidden,
   Map<String, Pose> poses, {
   int maxPerRow = 4,
+  bool compact = false,
 }) {
   final count = math.max(chats.length, 2);
   final perRow = math.min(maxPerRow, count);
   final rows = (count / perRow).ceil();
-  final width = (4 + perRow * 3 + 1 + 5) * tile + 8;
-  final interior = math.max(rows * 3 * tile + tile, 6 * tile);
-  final height = 3 * tile + interior + tile * 2 + 4;
+  final wall = (compact ? 2 : 3) * tile;
+  final research = (compact ? 2.5 : 4) * tile;
+  final deskGap = (compact ? .25 : .5) * tile;
+  final width = compact
+      ? research + deskGap * 2 + perRow * 3 * tile + 2.5 * tile + 8
+      : (4 + perRow * 3 + 1 + 5) * tile + 8;
+  final height = compact
+      ? wall + rows * 3 * tile + tile * 1.8 + 4
+      : wall + math.max(rows * 3 * tile + tile, 6 * tile) + tile * 2 + 4;
   final rect = Rect.fromLTWH(origin.dx, origin.dy, width, height);
 
   final left = rect.left + 4;
-  final top = rect.top + 3 * tile;
-  final deskLeft = left + 4 * tile + tile * 0.5;
-  final rightLeft = deskLeft + perRow * 3 * tile + tile * 0.5;
-  final aisle = rect.bottom - tile * 1.2;
+  final top = rect.top + wall;
+  final deskLeft = left + research + deskGap;
+  final rightLeft = deskLeft + perRow * 3 * tile + deskGap;
+  final aisle = rect.bottom - tile * (compact ? 1 : 1.2);
 
   final desks = [
     for (var i = 0; i < count; i++)
@@ -383,31 +401,46 @@ WorldRoom _layoutRoom(
   final shelfSpots = [
     for (var i = 0; i < 6; i++)
       Spot(
-        Offset(
-          left + tile * (0.9 + (i % 3) * 1.1),
-          top + tile * (1.6 + (i ~/ 3) * 2.2),
-        ),
+        compact
+            ? Offset(
+                left + tile * (0.7 + (i % 2) * 1.15),
+                top + tile * (1.5 + (i ~/ 2) * .9),
+              )
+            : Offset(
+                left + tile * (0.9 + (i % 3) * 1.1),
+                top + tile * (1.6 + (i ~/ 3) * 2.2),
+              ),
         facing: Facing.up,
       ),
   ];
   final serverSpots = [
     for (var i = 0; i < 4; i++)
       Spot(
-        Offset(
-          rightLeft + tile * (0.8 + (i % 2) * 1.3),
-          top + tile * (1.5 + (i ~/ 2) * 1.2),
-        ),
+        compact
+            ? Offset(
+                rightLeft + tile * (0.7 + (i % 2) * 1.15),
+                top + tile * (1.3 + (i ~/ 2) * .5),
+              )
+            : Offset(
+                rightLeft + tile * (0.8 + (i % 2) * 1.3),
+                top + tile * (1.5 + (i ~/ 2) * 1.2),
+              ),
         facing: Facing.up,
       ),
   ];
-  final loungeTop = top + tile * 3.6;
+  final loungeTop = top + tile * (compact ? 2.3 : 3.6);
   final loungeSpots = [
     for (var i = 0; i < 8; i++)
       Spot(
-        Offset(
-          rightLeft + tile * (0.9 + (i % 3) * 1.25),
-          loungeTop + tile * (0.4 + (i ~/ 3) * 1.25),
-        ),
+        compact
+            ? Offset(
+                rightLeft + tile * (0.7 + (i % 2) * 1.15),
+                loungeTop + tile * (1.3 + (i ~/ 2) * .4),
+              )
+            : Offset(
+                rightLeft + tile * (0.9 + (i % 3) * 1.25),
+                loungeTop + tile * (0.4 + (i ~/ 3) * 1.25),
+              ),
       ),
   ];
   final door = rect.center.dx;
@@ -472,6 +505,7 @@ WorldRoom _layoutRoom(
     serverSpots: serverSpots,
     loungeSpots: loungeSpots,
     helpSpots: helpSpots,
+    compact: compact,
   );
 }
 
