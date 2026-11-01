@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline';
 import { readdirSync, existsSync, readFileSync, statSync, openSync, readSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { roots } from '../paths';
-import type { AgentHostChat } from '../../../rpc-types/src/index';
+import type { AgentHostChat, AgentModelOption } from '../../../rpc-types/src/index';
 import type { HostChatDelta } from './local';
 
 export class CodexAppServer {
@@ -33,7 +33,7 @@ export class CodexAppServer {
     });
     const fail = () => { for (const request of this.pending.values()) { clearTimeout(request.timer); request.reject(new Error('Codex app-server unavailable. Check the PC installation and sign-in.')); } this.pending.clear();this.handlers.closed?.(); };
     this.process.on('error',fail); this.process.on('exit',fail);
-    await this.request('initialize',{clientInfo:{name:'nexuslink',title:'NexusLink',version:'1.0.0'}});
+    await this.request('initialize',{clientInfo:{name:'nexuslink',title:'NexusLink',version:'1.0.0'},capabilities:{experimentalApi:true}});
     this.process.stdin.write(JSON.stringify({method:'initialized',params:{}})+'\n');
   }
   request(method: string, params: unknown): Promise<any> {
@@ -60,6 +60,20 @@ export class CodexAppServer {
     }
     return rows;
   }
+  async models(): Promise<AgentModelOption[]> {
+    const rows: any[] = [];
+    const seen = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const page: any = await this.request('model/list',{cursor,limit:100});
+      if (!Array.isArray(page.data)) throw new Error('Unsupported Codex model list format');
+      rows.push(...page.data);
+      cursor = page.nextCursor || null;
+      if (cursor && seen.has(cursor)) throw new Error('Codex returned a repeated model cursor');
+      if (cursor) seen.add(cursor);
+    } while (cursor);
+    return parseCodexModels(rows);
+  }
   async history(id: string): Promise<HostChatDelta[]> {
     const response = await this.request('thread/read',{threadId:id,includeTurns:true});
     if (!Array.isArray(response.thread?.turns)) throw new Error('Codex history is unavailable in this version');
@@ -76,6 +90,14 @@ export class CodexAppServer {
   respond(id: string | number, result: unknown) { this.process?.stdin.write(JSON.stringify({id,result})+'\n'); }
   reject(id: string | number) { this.process?.stdin.write(JSON.stringify({id,error:{code:-32601,message:'Open this interaction on the PC'}})+'\n'); }
   close() { this.process?.kill(); }
+}
+
+/** app-server `model/list` rows → picker rows; hidden models stay out of the picker. */
+export function parseCodexModels(rows: any[]): AgentModelOption[] {
+  return rows.filter(row=>row && !row.hidden && typeof (row.id ?? row.model) === 'string').map(row=>{
+    const id = row.id ?? row.model;
+    return {id,name:row.displayName || id,supportsEffort:Array.isArray(row.supportedReasoningEfforts) ? row.supportedReasoningEfforts.length > 0 : true};
+  });
 }
 
 function validTime(value: unknown, factor = 1): number {
