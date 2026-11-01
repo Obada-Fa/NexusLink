@@ -178,7 +178,7 @@ void main() {
     await tester.tap(find.text('Arena'));
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.byType(ArenaWorld), findsOneWidget);
-    expect(find.textContaining('need you'), findsOneWidget);
+    expect(find.textContaining('need you'), findsWidgets);
     await tester.tap(find.byTooltip('List everyone'));
     await tester.pump(const Duration(milliseconds: 400));
     expect(find.text('Refactor the login flow'), findsOneWidget);

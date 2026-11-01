@@ -7,10 +7,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nexuslink/src/arena/shared_office.dart';
 import 'package:nexuslink/src/arena/arena_world.dart';
+import 'package:nexuslink/src/arena/world.dart';
 import 'package:nexuslink/src/chats/chat_models.dart';
 import 'package:nexuslink/src/monitor/approvals.dart';
 import 'package:nexuslink/src/theme/nexus_theme.dart';
-import 'arena_world_test.dart' show agent, NoApprovals;
+import 'arena_world_test.dart' show agent, now, NoApprovals;
 
 void main() {
   setUpAll(() async {
@@ -65,28 +66,83 @@ void main() {
   );
 
   testWidgets(
-    'attention first, idle collapsed, stable seats, completion leaves office',
+    'each project gets its own room and finished agents go to its lounge',
     (tester) async {
       tester.view.physicalSize = const Size(390, 850);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
-      final a = agent('a'),
-          b = agent('b'),
-          wait = agent('wait', state: 'waiting');
-      await tester.pumpWidget(app([a, b, wait, agent('idle', state: 'idle')]));
+      await tester.pumpWidget(
+        app([
+          agent('a', folder: 'One'),
+          agent('b', folder: 'One'),
+          agent('c', folder: 'Two'),
+        ]),
+      );
       ArenaWorldState arena() =>
           tester.state<ArenaWorldState>(find.byType(ArenaWorld));
-      expect(arena().world!.rooms.length, 1);
-      expect(arena().world!.agents.map((a) => a.id), ['wait', 'a', 'b']);
-      await tester.pumpWidget(app([b, a, wait, agent('idle', state: 'idle')]));
-      expect(arena().world!.agents.map((a) => a.id), ['wait', 'a', 'b']);
-      await tester.pumpWidget(app([agent('a', state: 'done'), b]));
-      expect(arena().world!.agent('a'), isNotNull);
-      await tester.pump(const Duration(seconds: 3));
-      expect(arena().world!.agent('a'), isNull);
-      expect(find.text('Idle & completed (1)'), findsOneWidget);
+      expect(arena().world!.rooms.map((r) => r.name).toSet(), {'One', 'Two'});
+      final desk = arena().world!.agent('b')!.desk.pos;
+
+      // The widget uses the real clock; the fixtures are dated from `now`.
+      final justNow = now.difference(DateTime.now());
+      await tester.pumpWidget(
+        app([
+          agent('a', folder: 'One', state: 'done', activity: null, age: justNow),
+          agent('b', folder: 'One'),
+          agent('c', folder: 'Two', state: 'idle', activity: null, age: justNow),
+        ]),
+      );
+      final world = arena().world!;
+      for (final id in ['a', 'c']) {
+        final finished = world.agent(id)!;
+        expect(finished.pose, Pose.resting);
+        expect(world.roomOf(id)!.loungeSpots, contains(finished.spot));
+      }
+      expect(world.agent('b')!.desk.pos, desk);
     },
   );
+  testWidgets('project strip names each project and jumps to its room', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 850);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      app([
+        agent('a', folder: 'One'),
+        agent('b', folder: 'Two', state: 'waiting', activity: null),
+      ]),
+    );
+    final arena = tester.state<ArenaWorldState>(find.byType(ArenaWorld));
+    expect(arena.currentRoom!.name, 'Two');
+    expect(find.text('Two · 1 need you'), findsOneWidget);
+    await tester.ensureVisible(find.text('One · 1 working'));
+    await tester.pump();
+    await tester.tap(find.text('One · 1 working'));
+    await tester.pump();
+    expect(arena.currentRoom!.name, 'One');
+  });
+  testWidgets('a room reception desk starts a chat in that project', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 850);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    String? chosen;
+    await tester.pumpWidget(
+      app([agent('a', folder: 'One')], create: (p) => chosen = p),
+    );
+    final arena = tester.state<ArenaWorldState>(find.byType(ArenaWorld));
+    final room = arena.world!.rooms.single;
+    final desk = MatrixUtils.transformPoint(
+      arena.camera.value,
+      receptionRect(room).center * kArtScale,
+    );
+    final origin = tester.getTopLeft(find.byType(ArenaWorld));
+    await tester.tapAt(origin + desk);
+    await tester.pump();
+    expect(chosen, '/w/One');
+  });
   testWidgets(
     'reception chooses project, cancellation and offline disable creation',
     (tester) async {
@@ -175,30 +231,6 @@ void main() {
     expect(more, 1);
     expect(tester.takeException(), isNull);
   });
-  testWidgets('project filter and receptionist preselection', (tester) async {
-    await tester.pumpWidget(
-      app(
-        [agent('one', folder: 'One'), agent('two', folder: 'Two')],
-        projects: () async => [
-          ChatFolder({'name': 'One', 'path': '/w/One'}),
-          ChatFolder({'name': 'Two', 'path': '/w/Two'}),
-        ],
-      ),
-    );
-    await tester.tap(find.byType(DropdownButton<String>));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Two').last);
-    await tester.pumpAndSettle();
-    final arena = tester.state<ArenaWorldState>(find.byType(ArenaWorld));
-    expect(arena.world!.agents.map((a) => a.id), ['two']);
-    await tester.tap(find.text('New chat'));
-    await tester.pumpAndSettle();
-    expect(find.byIcon(Icons.check), findsOneWidget);
-    expect(
-      tester.getTopLeft(find.text('Two').last).dy,
-      lessThan(tester.getTopLeft(find.text('One').last).dy),
-    );
-  });
   testWidgets(
     'arena drags, zooms with buttons and pinch, and fits the office',
     (tester) async {
@@ -231,7 +263,7 @@ void main() {
       expect(arena.camera.value.getMaxScaleOnAxis(), greaterThan(scale));
       await first.up();
       await second.up();
-      await tester.tap(find.byTooltip('Show the whole office'));
+      await tester.tap(find.byTooltip('Show the whole campus'));
       await tester.pump();
       expect(arena.camera.value.getMaxScaleOnAxis(), lessThan(scale));
     },
@@ -272,7 +304,23 @@ void main() {
               : [
                   agent('approval', state: 'waiting', waitKind: 'approval'),
                   agent('reading', activity: 'reading'),
-                  agent('tests', activity: 'running-command'),
+                  agent(
+                    'finished',
+                    state: 'done',
+                    activity: null,
+                    age: now.difference(DateTime.now()),
+                  ),
+                  agent(
+                    'stopped',
+                    state: 'idle',
+                    activity: null,
+                    age: now.difference(DateTime.now()),
+                  ),
+                  agent(
+                    'tests',
+                    folder: 'Website',
+                    activity: 'running-command',
+                  ),
                 ],
           boundary: key,
           scale: scene == 'large-text' ? 1.8 : 1,

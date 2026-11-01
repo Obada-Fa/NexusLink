@@ -84,8 +84,9 @@ ui.Picture recordStatic(World world, {required double night}) {
   }
   for (final row in rows.values) {
     final bottom = row.map((r) => r.rect.bottom).reduce(math.max);
-    final y = bottom + tile * 1.2;
-    _road(px, 0, y, size.width, tile * 1.1);
+    final compact = row.first.compact;
+    final y = bottom + tile * (compact ? .3 : 1.2);
+    _road(px, 0, y, size.width, tile * (compact ? .6 : 1.1));
     for (final r in row) {
       _road(
         px,
@@ -98,7 +99,7 @@ ui.Picture recordStatic(World world, {required double night}) {
   }
   final firstRoomTop = world.rooms.isEmpty ? 0.0 : world.rooms.first.rect.top;
   for (final r in world.rooms) {
-    if (r.rect.left > tile * 4) {
+    if (r.rect.left > tile * 4 && !r.compact) {
       _road(
         px,
         r.rect.left - tile * 2.6,
@@ -179,8 +180,9 @@ void _room(Canvas canvas, Px px, WorldRoom room, double night) {
   final r = room.rect;
   final top = r.top + room.wallHeight;
   final left = r.left + 4;
-  final deskLeft = left + room.researchWidth + tile * .5;
-  final rightLeft = deskLeft + room.desksPerRow * 3 * tile + tile * .5;
+  final deskLeft = room.deskLeft;
+  final rightLeft = room.rightLeft;
+  final compact = room.compact;
 
   // Shadow, walls and the back wall face.
   px.r(r.left + 4, r.top + 6, r.width, r.height, const Color(0x66000000));
@@ -225,7 +227,7 @@ void _room(Canvas canvas, Px px, WorldRoom room, double night) {
     rightLeft,
     top,
     r.right - 4 - rightLeft,
-    tile * 3.2,
+    tile * (compact ? 2.2 : 3.2),
   );
   for (var y = server.top; y < server.bottom; y += 8) {
     for (var x = server.left; x < server.right; x += 8) {
@@ -242,9 +244,9 @@ void _room(Canvas canvas, Px px, WorldRoom room, double night) {
   }
   final lounge = Rect.fromLTWH(
     rightLeft + 2,
-    top + tile * 3.4,
+    top + tile * (compact ? 2.3 : 3.4),
     r.right - 8 - rightLeft,
-    tile * 3.4,
+    tile * (compact ? 2.5 : 3.4),
   );
   px.r(lounge.left, lounge.top, lounge.width, lounge.height, _ink);
   px.r(
@@ -307,10 +309,10 @@ void _room(Canvas canvas, Px px, WorldRoom room, double night) {
   );
 
   // Research corner: two bookcases, a reading lamp, a plant.
-  for (var i = 0; i < 2; i++) {
+  for (var i = 0; i < (compact ? 1 : 2); i++) {
     _bookcase(px, left + 4 + i * 30, top - 22, i + room.id.length);
   }
-  _plant(px, Offset(left + 7, r.bottom - tile * 1.9), 1);
+  if (!compact) _plant(px, Offset(left + 7, r.bottom - tile * 1.9), 1);
 
   // Desks: each with a monitor (screen drawn live), keyboard, mug and a stool.
   for (var i = 0; i < room.desks.length; i++) {
@@ -322,35 +324,40 @@ void _room(Canvas canvas, Px px, WorldRoom room, double night) {
 
   // Server corner: a rack (LEDs live), a terminal desk.
   _rack(px, _rackRect(room));
-  px.block(
-    rightLeft + tile * 2.4,
-    top + 2,
-    tile * 2,
-    8,
-    const Color(0xFF4B4F5E),
-  );
-  px.r(rightLeft + tile * 2.8, top - 6, 14, 9, _ink);
-  px.r(rightLeft + tile * 2.8 + 1, top - 5, 12, 7, const Color(0xFF0E1A14));
+  if (!compact) {
+    px.block(
+      rightLeft + tile * 2.4,
+      top + 2,
+      tile * 2,
+      8,
+      const Color(0xFF4B4F5E),
+    );
+    px.r(rightLeft + tile * 2.8, top - 6, 14, 9, _ink);
+    px.r(rightLeft + tile * 2.8 + 1, top - 5, 12, 7, const Color(0xFF0E1A14));
+  }
 
   // Lounge: sofa, coffee machine, plant.
+  final sofaEnd = lounge.right - (compact ? 6 : 24);
   px.block(
     lounge.left + 6,
     lounge.top - 6,
-    lounge.width - 26,
+    sofaEnd - lounge.left - 4,
     9,
     const Color(0xFFC08B52),
   );
   px.r(
     lounge.left + 6,
     lounge.top - 6,
-    lounge.width - 26,
+    sofaEnd - lounge.left - 4,
     3,
     const Color(0xFFD8AB70),
   );
   px.block(lounge.left + 4, lounge.top - 4, 4, 9, const Color(0xFF996C44));
-  px.block(lounge.right - 24, lounge.top - 4, 4, 9, const Color(0xFF996C44));
-  _coffee(px, Offset(lounge.right - 9, lounge.top - 2));
-  _plant(px, Offset(lounge.right - 8, lounge.bottom - 6), 2);
+  px.block(sofaEnd, lounge.top - 4, 4, 9, const Color(0xFF996C44));
+  if (!compact) {
+    _coffee(px, Offset(lounge.right - 9, lounge.top - 2));
+    _plant(px, Offset(lounge.right - 8, lounge.bottom - 6), 2);
+  }
 
   // Bottom wall with the door and a help desk beside it.
   final door = room.door;
@@ -362,10 +369,12 @@ void _room(Canvas canvas, Px px, WorldRoom room, double night) {
     3,
     const Color(0xFFB8A97C),
   );
-  final help = Offset(door.dx + tile * 1.1, r.bottom - tile * 2.2);
-  px.block(help.dx, help.dy, 22, 7, const Color(0xFFA77B4F));
-  px.r(help.dx + 15, help.dy - 3, 4, 3, const Color(0xFFE2C35A));
-  px.r(help.dx + 16, help.dy - 4, 2, 1, const Color(0xFFF5E6A8));
+  if (!compact) {
+    final help = Offset(door.dx + tile * 1.1, r.bottom - tile * 2.2);
+    px.block(help.dx, help.dy, 22, 7, const Color(0xFFA77B4F));
+    px.r(help.dx + 15, help.dy - 3, 4, 3, const Color(0xFFE2C35A));
+    px.r(help.dx + 16, help.dy - 4, 2, 1, const Color(0xFFF5E6A8));
+  }
   _floorMark(px, Offset(door.dx, room.aisleY + 2));
 
   // Name plate above the room.
@@ -373,17 +382,16 @@ void _room(Canvas canvas, Px px, WorldRoom room, double night) {
 }
 
 Rect _boardRect(WorldRoom room) {
-  final deskLeft = room.rect.left + 4 + room.researchWidth + tile * .5;
-  final mid = deskLeft + room.desksPerRow * 1.5 * tile;
+  final mid = room.deskLeft + room.desksPerRow * 1.5 * tile;
   final w = math.min(room.desksPerRow * 2.2 * tile, tile * 6);
-  return Rect.fromLTWH(mid - w / 2, room.rect.top + 8, w, tile * 1.7);
+  return room.compact
+      ? Rect.fromLTWH(mid - w / 2, room.rect.top + 5, w, tile * 1.2)
+      : Rect.fromLTWH(mid - w / 2, room.rect.top + 8, w, tile * 1.7);
 }
 
 Rect _rackRect(WorldRoom room) {
-  final deskLeft = room.rect.left + 4 + room.researchWidth + tile * .5;
-  final rightLeft = deskLeft + room.desksPerRow * 3 * tile + tile * .5;
   return Rect.fromLTWH(
-    rightLeft + 4,
+    room.rightLeft + 4,
     room.rect.top + room.wallHeight - 30,
     22,
     40,
@@ -702,7 +710,13 @@ class LivePainter extends CustomPainter {
         final tag = f.tags[a.agent.id];
         if (tag == null) continue;
         final w = tag.width + 8;
-        final x = (a.pos.dx - w / 2).roundToDouble();
+        var x = (a.pos.dx - w / 2).roundToDouble();
+        // In small rooms a label that crossed a wall would read as the neighbour's.
+        final room = f.world.roomOf(a.agent.id);
+        if (room != null && room.compact) {
+          x = math.min(x, room.rect.right - w - 2);
+          x = math.max(x, room.rect.left + 2);
+        }
         final y = a.pos.dy + 4;
         final rect = Rect.fromLTWH(x, y, w, tag.height + 5);
         if (occupied.any((other) => other.overlaps(rect.inflate(1)))) continue;
@@ -716,40 +730,42 @@ class LivePainter extends CustomPainter {
     canvas.restore();
   }
 
-  void _roomLive(Canvas canvas, Px px, WorldRoom room, Frame f, int t) {
-    if (room.id == 'shared-office') {
-      final area = receptionRect(room);
-      final receptionist = ChatSummary({
-        'id': 'receptionist',
-        'source': 'nexuslink',
-      });
-      sprites.draw(
-        canvas,
-        front,
-        lookFor(receptionist),
-        area.center + const Offset(-4, 5),
-      );
-      final label = TextPainter(
-        text: const TextSpan(
-          text: 'New chat',
-          style: TextStyle(
-            color: Color(0xFFF4F1E6),
-            fontSize: 7,
-            fontWeight: FontWeight.bold,
-          ),
+  void _reception(Canvas canvas, Px px, WorldRoom room) {
+    final area = receptionRect(room);
+    final receptionist = ChatSummary({
+      'id': 'receptionist',
+      'source': 'nexuslink',
+    });
+    sprites.draw(
+      canvas,
+      front,
+      lookFor(receptionist),
+      area.center + const Offset(-4, 5),
+    );
+    final label = TextPainter(
+      text: const TextSpan(
+        text: 'New chat',
+        style: TextStyle(
+          color: Color(0xFFF4F1E6),
+          fontSize: 7,
+          fontWeight: FontWeight.bold,
         ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      px.r(
-        area.left - 3,
-        area.top - 10,
-        label.width + 6,
-        10,
-        const Color(0xFF23363D),
-      );
-      label.paint(canvas, Offset(area.left, area.top - 10));
-      label.dispose();
-    }
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    px.r(
+      area.left - 3,
+      area.top - 10,
+      label.width + 6,
+      10,
+      const Color(0xFF23363D),
+    );
+    label.paint(canvas, Offset(area.left, area.top - 10));
+    label.dispose();
+  }
+
+  void _roomLive(Canvas canvas, Px px, WorldRoom room, Frame f, int t) {
+    if (!room.compact) _reception(canvas, px, room);
 
     // Screens.
     for (var i = 0; i < room.desks.length; i++) {
@@ -1021,7 +1037,7 @@ class LivePainter extends CustomPainter {
         final k = (t / 1600) % 1;
         _z(px, head + Offset(6, -2 - k * 8), (1 - k));
       case Pose.typing || Pose.researching || Pose.running:
-        if (f.zoom >= .6) {
+        if (f.zoom >= .4) {
           _activityIcon(px, head + const Offset(8, -3), agent, t);
         }
       case Pose.resting:
