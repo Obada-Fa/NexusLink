@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nexuslink/src/arena/shared_office.dart';
+import 'package:nexuslink/src/arena/arena_world.dart';
 import 'package:nexuslink/src/chats/chat_models.dart';
 import 'package:nexuslink/src/monitor/approvals.dart';
 import 'package:nexuslink/src/theme/nexus_theme.dart';
@@ -73,20 +74,16 @@ void main() {
           b = agent('b'),
           wait = agent('wait', state: 'waiting');
       await tester.pumpWidget(app([a, b, wait, agent('idle', state: 'idle')]));
-      expect(
-        tester.getTopLeft(find.text('Task wait')).dy,
-        lessThan(tester.getTopLeft(find.text('Task a')).dy),
-      );
-      expect(find.text('Task idle'), findsNothing);
+      ArenaWorldState arena() =>
+          tester.state<ArenaWorldState>(find.byType(ArenaWorld));
+      expect(arena().world!.rooms.length, 1);
+      expect(arena().world!.agents.map((a) => a.id), ['wait', 'a', 'b']);
       await tester.pumpWidget(app([b, a, wait, agent('idle', state: 'idle')]));
-      expect(
-        tester.getTopLeft(find.text('Task a')).dy,
-        lessThan(tester.getTopLeft(find.text('Task b')).dy),
-      );
+      expect(arena().world!.agents.map((a) => a.id), ['wait', 'a', 'b']);
       await tester.pumpWidget(app([agent('a', state: 'done'), b]));
-      expect(find.text('Completed'), findsOneWidget);
+      expect(arena().world!.agent('a'), isNotNull);
       await tester.pump(const Duration(seconds: 3));
-      expect(find.text('Task a'), findsNothing);
+      expect(arena().world!.agent('a'), isNull);
       expect(find.text('Idle & completed (1)'), findsOneWidget);
     },
   );
@@ -161,19 +158,18 @@ void main() {
     await tester.pumpWidget(
       app(List.generate(40, (i) => agent('$i')), more: () => more++),
     );
-    await tester.scrollUntilVisible(
-      find.text('Task 39'),
-      200,
-      maxScrolls: 100,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(find.text('Task 39'), findsOneWidget);
+    final arena = tester.state<ArenaWorldState>(find.byType(ArenaWorld));
+    expect(arena.world!.agents.length, 40);
+    arena.focusAgent('39');
     await tester.pump();
-    await tester.scrollUntilVisible(
-      find.text('Load more chats'),
-      200,
-      maxScrolls: 100,
-      scrollable: find.byType(Scrollable).first,
+    expect(arena.selected, '39');
+    final position = MatrixUtils.transformPoint(
+      arena.camera.value,
+      arena.positionOf('39')! * kArtScale,
+    );
+    expect(
+      position.dy,
+      inInclusiveRange(0, tester.getSize(find.byType(ArenaWorld)).height),
     );
     await tester.tap(find.text('Load more chats'));
     expect(more, 1);
@@ -193,8 +189,8 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Two').last);
     await tester.pumpAndSettle();
-    expect(find.text('Task one'), findsNothing);
-    expect(find.text('Task two'), findsOneWidget);
+    final arena = tester.state<ArenaWorldState>(find.byType(ArenaWorld));
+    expect(arena.world!.agents.map((a) => a.id), ['two']);
     await tester.tap(find.text('New chat'));
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.check), findsOneWidget);
@@ -203,6 +199,43 @@ void main() {
       lessThan(tester.getTopLeft(find.text('One').last).dy),
     );
   });
+  testWidgets(
+    'arena drags, zooms with buttons and pinch, and fits the office',
+    (tester) async {
+      await tester.pumpWidget(app(List.generate(12, (i) => agent('$i'))));
+      final arena = tester.state<ArenaWorldState>(find.byType(ArenaWorld));
+      final original = arena.camera.value.clone();
+      await tester.drag(find.byType(InteractiveViewer), const Offset(-60, -80));
+      await tester.pump();
+      expect(arena.camera.value, isNot(original));
+      final scale = arena.camera.value.getMaxScaleOnAxis();
+      await tester.tap(find.byTooltip('Zoom in'));
+      await tester.pump();
+      expect(arena.camera.value.getMaxScaleOnAxis(), greaterThan(scale));
+      await tester.tap(find.byTooltip('Zoom out'));
+      await tester.pump();
+      expect(arena.camera.value.getMaxScaleOnAxis(), closeTo(scale, .001));
+      final center = tester.getCenter(find.byType(InteractiveViewer));
+      final first = await tester.startGesture(
+        center - const Offset(20, 0),
+        pointer: 1,
+      );
+      final second = await tester.startGesture(
+        center + const Offset(20, 0),
+        pointer: 2,
+      );
+      await tester.pump();
+      await first.moveTo(center - const Offset(60, 0));
+      await second.moveTo(center + const Offset(60, 0));
+      await tester.pump();
+      expect(arena.camera.value.getMaxScaleOnAxis(), greaterThan(scale));
+      await first.up();
+      await second.up();
+      await tester.tap(find.byTooltip('Show the whole office'));
+      await tester.pump();
+      expect(arena.camera.value.getMaxScaleOnAxis(), lessThan(scale));
+    },
+  );
   testWidgets('working animation changes frames', (tester) async {
     final key = GlobalKey();
     await tester.pumpWidget(
@@ -213,7 +246,9 @@ void main() {
         key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
     final first = await tester.runAsync(() => render.toImage());
     final before = await tester.runAsync(() => first!.toByteData());
-    await tester.pump(const Duration(milliseconds: 1200));
+    for (var i = 0; i < 12; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
     final second = await tester.runAsync(() => render.toImage());
     final after = await tester.runAsync(() => second!.toByteData());
     expect(

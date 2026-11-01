@@ -28,9 +28,13 @@ class ArenaWorld extends ConsumerStatefulWidget {
     required this.onOpen,
     this.onActions,
     this.now,
+    this.sharedOffice = false,
+    this.onNewChat,
   });
   final List<ChatSummary> chats;
   final bool offline;
+  final bool sharedOffice;
+  final VoidCallback? onNewChat;
   final ValueChanged<ChatSummary> onOpen;
   final ValueChanged<ChatSummary>? onActions;
 
@@ -88,6 +92,27 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
     _camera.addListener(_onCamera);
   }
 
+  void _syncTicker() {
+    if (_reduced || widget.offline || !TickerMode.valuesOf(context).enabled) {
+      _ticker.stop();
+    } else if (!_ticker.isActive) {
+      _lastTick = Duration.zero;
+      _ticker.start();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _syncTicker();
+  }
+
+  @override
+  void didUpdateWidget(ArenaWorld oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncTicker();
+  }
+
   @override
   void dispose() {
     _ticker.dispose();
@@ -95,6 +120,8 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
     _camera.removeListener(_onCamera);
     _camera.dispose();
     _clock.dispose();
+    _static?.dispose();
+    _sprites.dispose();
     for (final t in _tags.values) {
       t.dispose();
     }
@@ -106,6 +133,7 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
   void _tick(Duration elapsed) {
     final dt = ((elapsed - _lastTick).inMicroseconds / 1e6).clamp(0.0, .1);
     _lastTick = elapsed;
+    if (_reduced || widget.offline) return;
     _sceneMs += (dt * 1000).round();
     var moving = false;
     for (final m in _movers.values) {
@@ -206,15 +234,19 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
     final fontSize =
         (MediaQuery.textScalerOf(context).scale(11) / (2 * _zoom.clamp(.4, 3)))
             .clamp(6.5, 16.0);
-    final width = _selected == a.id ? 96.0 : 42.0;
-    final key = '${a.chat.title}|$status|$fontSize|$width';
+    final width = _selected == a.id ? 150.0 : 42.0;
+    final label = _selected == a.id
+        ? '${a.chat.title} · ${a.chat.folderName}'
+        : a.chat.title;
+    final detail = _selected == a.id ? '$status · ${a.chat.stepLabel}' : status;
+    final key = '$label|$detail|$fontSize|$width';
     final existing = _tags[a.id];
     if (existing != null && existing.key == key) return existing;
     existing?.dispose();
     return _tags[a.id] = AgentTag(
       key: key,
-      title: a.chat.title,
-      status: status,
+      title: label,
+      status: detail,
       color: color,
       fontSize: fontSize,
       maxWidth: width,
@@ -370,6 +402,13 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
     final w = _world;
     if (w == null) return;
     final art = local / kArtScale;
+    if (widget.sharedOffice &&
+        !widget.offline &&
+        widget.onNewChat != null &&
+        w.rooms.any((r) => receptionRect(r).inflate(8).contains(art))) {
+      widget.onNewChat!();
+      return;
+    }
     WorldAgent? hit;
     var best = double.infinity;
     for (final a in w.agents) {
@@ -510,13 +549,13 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
         _viewport = c.biggest;
         final signature = [
           for (final chat in widget.chats)
-            '${chat.id}|${chat.json['activityAt']}|${chat.liveState}|${chat.live?.activity}|${chat.title}|${chat.parentId}|${chat.live?.subagents.length}',
+            '${chat.id}|${chat.json['activityAt']}|${chat.liveState}|${chat.live?.activity}|${chat.title}|${chat.parentId}|${chat.live?.subagents.length}|${chat.stepLabel}|${chat.folderPath}',
           ...asking,
           c.maxWidth.round(),
         ].join(';');
         if (signature != _signature || _world == null) {
           _signature = signature;
-          final next = buildWorld(
+          final next = (widget.sharedOffice ? buildSharedOffice : buildWorld)(
             widget.chats,
             asking: asking,
             now: _now,
@@ -528,7 +567,10 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
               _world!.rooms.map((r) => '${r.id}${r.rect}').join() !=
                   next.rooms.map((r) => '${r.id}${r.rect}').join();
           _world = next;
-          if (layoutChanged) _static = null;
+          if (layoutChanged) {
+            _static?.dispose();
+            _static = null;
+          }
           _sync(next);
         }
         final nightBucket = (_night * 8).round();
@@ -698,7 +740,9 @@ class _Hud extends StatelessWidget {
                   const SizedBox(width: 8),
                   _RoundButton(
                     icon: Icons.fit_screen_rounded,
-                    label: 'Show the whole campus',
+                    label: state.widget.sharedOffice
+                        ? 'Show the whole office'
+                        : 'Show the whole campus',
                     onTap: state.fitAll,
                   ),
                   const SizedBox(width: 8),
@@ -710,11 +754,12 @@ class _Hud extends StatelessWidget {
                 ],
               ),
             ),
-            Positioned(
-              right: 10,
-              bottom: 10,
-              child: _Minimap(state: state, world: world),
-            ),
+            if (!state.widget.sharedOffice)
+              Positioned(
+                right: 10,
+                bottom: 10,
+                child: _Minimap(state: state, world: world),
+              ),
           ],
         ),
       ),

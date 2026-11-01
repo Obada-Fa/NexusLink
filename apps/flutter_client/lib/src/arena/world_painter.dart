@@ -717,6 +717,40 @@ class LivePainter extends CustomPainter {
   }
 
   void _roomLive(Canvas canvas, Px px, WorldRoom room, Frame f, int t) {
+    if (room.id == 'shared-office') {
+      final area = receptionRect(room);
+      final receptionist = ChatSummary({
+        'id': 'receptionist',
+        'source': 'nexuslink',
+      });
+      sprites.draw(
+        canvas,
+        front,
+        lookFor(receptionist),
+        area.center + const Offset(-4, 5),
+      );
+      final label = TextPainter(
+        text: const TextSpan(
+          text: 'New chat',
+          style: TextStyle(
+            color: Color(0xFFF4F1E6),
+            fontSize: 7,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      px.r(
+        area.left - 3,
+        area.top - 10,
+        label.width + 6,
+        10,
+        const Color(0xFF23363D),
+      );
+      label.paint(canvas, Offset(area.left, area.top - 10));
+      label.dispose();
+    }
+
     // Screens.
     for (var i = 0; i < room.desks.length; i++) {
       final s = screenRect(room, i);
