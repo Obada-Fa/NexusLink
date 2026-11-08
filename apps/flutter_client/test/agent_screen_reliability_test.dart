@@ -246,9 +246,30 @@ void main() {
         'agentSessionId': 'task-1',
         'event': {'seq': 3, 'ts': 3, 'kind': 'text', 'text': 'Host says hi'},
       });
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
       expect(find.text('Host says hi'), findsOneWidget);
       expect(find.text('Mode: Plan'), findsOneWidget);
+      // Streamed text waits for the next batch; other events flush it at once.
+      for (final (seq, text) in [(4, 'Batched '), (5, 'text')]) {
+        pc.emit('agent-event', {
+          'agentSessionId': 'task-1',
+          'event': {'seq': seq, 'ts': seq, 'kind': 'text-delta', 'text': text},
+        });
+      }
+      await tester.pump();
+      expect(find.textContaining('Batched text'), findsNothing);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.textContaining('Batched text'), findsOneWidget);
+      pc.emit('agent-event', {
+        'agentSessionId': 'task-1',
+        'event': {'seq': 6, 'ts': 6, 'kind': 'text-delta', 'text': ' flushed'},
+      });
+      pc.emit('agent-event', {
+        'agentSessionId': 'task-1',
+        'event': {'seq': 7, 'ts': 7, 'kind': 'status', 'text': 'Step'},
+      });
+      await tester.pump();
+      expect(find.textContaining('Batched text flushed'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
       await tester.pump(const Duration(seconds: 1));
     });

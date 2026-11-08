@@ -25,6 +25,7 @@ import '../state/connection.dart';
 import '../state/last_cwd.dart';
 import '../state/terminal_busy.dart';
 import '../widgets/agent_activity_icon.dart';
+import '../widgets/streamed_markdown.dart';
 import '../widgets/code_block_builder.dart';
 import '../widgets/file_viewer_modal.dart';
 import '../widgets/terminal_glow_border.dart';
@@ -78,6 +79,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
 
   /// Display list of the last build (host events + phone notes).
   List<AgentEvent> _display = const [];
+  // Streamed text is applied in batches and only rebuilds the transcript list.
+  static const _streamFlushInterval = Duration(milliseconds: 80);
+  final _transcriptTick = ValueNotifier<int>(0);
+  Timer? _streamFlush;
+  bool _scrollQueued = false;
   final _input = TextEditingController();
   final _scroll = ScrollController();
   final _imagePicker = ImagePicker();
@@ -1218,24 +1224,52 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       _thumbsBySeq[parsed.seq] = _pendingThumbs!;
       _pendingThumbs = null;
     }
+    if (parsed.kind == 'text' ||
+        parsed.kind == 'text-delta' ||
+        parsed.kind == 'thinking') {
+      if (_transcript.addHost(parsed)) {
+        _streamFlush ??= Timer(_streamFlushInterval, _flushStream);
+      }
+      return;
+    }
+    final hadBatch = _streamFlush != null;
+    _streamFlush?.cancel();
+    _streamFlush = null;
     var added = false;
     setState(() {
       // Dedupe against host seqs only; phone notes cannot collide.
       added = _transcript.addHost(parsed);
       if (parsed.kind == 'result' || parsed.kind == 'error') _setBusy(false);
     });
-    if (added) _scrollToEnd();
+    if (added || hadBatch) _scrollToEnd();
+  }
+
+  void _flushStream() {
+    _streamFlush = null;
+    if (!mounted) return;
+    _transcriptTick.value++;
+    _scrollToEnd();
   }
 
   void _scrollToEnd({bool force = false}) {
     if (!force &&
         _scroll.hasClients &&
         _scroll.position.maxScrollExtent - _scroll.offset > 120) {
-      if (mounted) setState(() => _newActivity = true);
+      if (mounted && !_newActivity) setState(() => _newActivity = true);
       return;
     }
-    _newActivity = false;
+    if (_newActivity) {
+      if (mounted) {
+        setState(() => _newActivity = false);
+      } else {
+        _newActivity = false;
+      }
+    }
+    if (_scrollQueued) return;
+    _scrollQueued = true;
+    WidgetsBinding.instance.ensureVisualUpdate();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollQueued = false;
       if (!_scroll.hasClients) return;
       _scroll.animateTo(
         _scroll.position.maxScrollExtent,
@@ -2728,6 +2762,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     _speech.stop();
     _libraryTimer?.cancel();
     _libraryPushTimer?.cancel();
+    _streamFlush?.cancel();
+    _transcriptTick.dispose();
     if (_isLibrary) {
       final chat = widget.libraryChat!;
       unawaited(
@@ -3232,8 +3268,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   Widget _chat() {
-    _display = _transcript.display;
-    final display = groupAgentDisplay(_display);
     final live = _isLibrary ? _chatSummary.live : null;
     return Column(
       children: [
@@ -3251,17 +3285,24 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         Expanded(
           child: Container(
             color: _chatBackgroundColor(_active?.agent),
-            child: ListView.builder(
-              controller: _scroll,
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-              itemCount: display.length + (_busy ? 1 : 0),
-              itemBuilder: (_, i) {
-                if (i >= display.length) {
-                  return _workingRow();
-                }
-                final item = display[i];
-                if (item.tools != null) return _toolGroup(item.tools!);
-                return _bubble(item.event!);
+            child: ListenableBuilder(
+              listenable: _transcriptTick,
+              builder: (context, _) {
+                _display = _transcript.display;
+                final display = groupAgentDisplay(_display);
+                return ListView.builder(
+                  controller: _scroll,
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+                  itemCount: display.length + (_busy ? 1 : 0),
+                  itemBuilder: (_, i) {
+                    if (i >= display.length) {
+                      return _workingRow();
+                    }
+                    final item = display[i];
+                    if (item.tools != null) return _toolGroup(item.tools!);
+                    return _bubble(item.event!);
+                  },
+                );
               },
             ),
           ),
@@ -3512,7 +3553,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  MarkdownBody(
+                  StreamedMarkdown(
                     data: e.text ?? '',
                     inlineSyntaxes: [IpAutolinkSyntax()],
                     builders: {
