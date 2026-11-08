@@ -8,11 +8,19 @@ import 'package:permission_handler/permission_handler.dart';
 import '../auth/pair_bundle.dart';
 import '../theme/nexus_theme.dart';
 
+/// What [ScanPairScreen] pops (with `returnBundle`) when the user chooses to
+/// type the code instead; backing out pops null.
+enum ScanChoice { manual }
+
 /// Scans the pairing QR code shown by Nexus Utilities → Add phone.
-/// Pops with a [NexusLinkPairing], or null when the user backs out or
-/// chooses to type the code instead.
+///
+/// Legacy mode (default): pops a [NexusLinkPairing], or null when the user
+/// backs out or chooses to type the code instead.
+/// With [returnBundle]: pops the whole [PairBundle], [ScanChoice.manual] for
+/// "type it instead", or null when the user backs out.
 class ScanPairScreen extends StatefulWidget {
-  const ScanPairScreen({super.key});
+  const ScanPairScreen({super.key, this.returnBundle = false});
+  final bool returnBundle;
 
   @override
   State<ScanPairScreen> createState() => _ScanPairScreenState();
@@ -91,7 +99,8 @@ class _ScanPairScreenState extends State<ScanPairScreen>
         return;
       }
       try {
-        final pairing = parsePairBundle(text);
+        final bundle = parsePairBundle(text);
+        final Object pairing = widget.returnBundle ? bundle : bundle.nexusLink;
         _done = true;
         HapticFeedback.mediumImpact();
         _controller?.stop();
@@ -102,6 +111,9 @@ class _ScanPairScreenState extends State<ScanPairScreen>
       return;
     }
   }
+
+  void _typeInstead() =>
+      Navigator.of(context).pop(widget.returnBundle ? ScanChoice.manual : null);
 
   void _reject(String text, String message) {
     HapticFeedback.lightImpact();
@@ -178,7 +190,7 @@ class _ScanPairScreenState extends State<ScanPairScreen>
                   ),
                 const SizedBox(height: 12),
                 TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
+                  onPressed: _typeInstead,
                   style: TextButton.styleFrom(foregroundColor: Colors.white),
                   child: const Text('Type the address and code instead'),
                 ),
@@ -211,7 +223,7 @@ class _ScanPairScreenState extends State<ScanPairScreen>
           _grant();
         },
       ),
-      secondary: ('Type it instead', () => Navigator.of(context).pop()),
+      secondary: ('Type it instead', _typeInstead),
     );
   }
 
@@ -221,15 +233,15 @@ class _ScanPairScreenState extends State<ScanPairScreen>
       icon: Icons.photo_camera_outlined,
       title: 'Allow the camera to scan',
       body: blocked
-          ? 'Camera access is turned off for NexusLink. Open Settings → '
-                'Permissions → Camera and choose Allow. NexusLink only uses '
+          ? 'Camera access is turned off for Nexus. Open Settings → '
+                'Permissions → Camera and choose Allow. Nexus only uses '
                 'it to read the pairing code.'
-          : 'NexusLink uses the camera only to read the pairing code on '
+          : 'Nexus uses the camera only to read the pairing code on '
                 'your PC. Nothing is recorded.',
       primary: blocked
           ? ('Open Settings', () => openAppSettings())
           : ('Allow camera', _askCamera),
-      secondary: ('Type it instead', () => Navigator.of(context).pop()),
+      secondary: ('Type it instead', _typeInstead),
     );
   }
 }

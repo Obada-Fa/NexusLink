@@ -77,4 +77,30 @@ void main() {
     expect(find.byType(ScanPairScreen), findsNothing);
     expect(find.text('go'), findsOneWidget);
   });
+
+  testWidgets('with returnBundle, "Type it instead" pops ScanChoice.manual', (
+    tester,
+  ) async {
+    mockPermission(_denied);
+    Object? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () async => result = await Navigator.of(context).push(
+              MaterialPageRoute<Object>(
+                builder: (_) => const ScanPairScreen(returnBundle: true),
+              ),
+            ),
+            child: const Text('go'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('go'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Type it instead'));
+    await tester.pumpAndSettle();
+    expect(result, ScanChoice.manual);
+  });
 }

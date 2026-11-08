@@ -21,7 +21,7 @@ Map<String, Object?> sample({
       u ??
       {
         'nexuslink': {'port': 45678, 'code': '54978453', 'host': 'h-1'},
-        'nexus-remote': {'port': 45679, 'code': '67852204'},
+        'remote': {'port': 45679, 'code': '67852204'},
       },
 };
 
@@ -29,7 +29,7 @@ void main() {
   final now = DateTime(2029);
 
   test('reads the NexusLink entry with the Tailscale address', () {
-    final p = parsePairBundle(bundle(sample()), now: now);
+    final p = parsePairBundle(bundle(sample()), now: now).nexusLink;
     expect(p.wsUrl, 'ws://100.64.0.5:45678/rpc');
     expect(p.code, '54978453');
     expect(p.pcName, 'Office PC');
@@ -37,19 +37,22 @@ void main() {
   });
 
   test('falls back to the first LAN address without Tailscale', () {
-    final p = parsePairBundle(bundle(sample(ts: null)), now: now);
+    final p = parsePairBundle(bundle(sample(ts: null)), now: now).nexusLink;
     expect(p.wsUrl, 'ws://192.168.2.10:45678/rpc');
   });
 
   test('brackets an IPv6 address', () {
-    final p = parsePairBundle(bundle(sample(ts: 'fd7a:115c::5')), now: now);
+    final p = parsePairBundle(
+      bundle(sample(ts: 'fd7a:115c::5')),
+      now: now,
+    ).nexusLink;
     expect(p.wsUrl, 'ws://[fd7a:115c::5]:45678/rpc');
   });
 
   test('accepts padding and surrounding whitespace', () {
     final text =
         ' NXU1:${base64Url.encode(utf8.encode(jsonEncode(sample())))}\n';
-    expect(parsePairBundle(text, now: now).code, '54978453');
+    expect(parsePairBundle(text, now: now).nexusLink.code, '54978453');
   });
 
   test('rejects with a user-facing reason', () {
@@ -74,11 +77,11 @@ void main() {
       bundle(
         sample(
           u: {
-            'nexus-remote': {'port': 1, 'code': '1'},
+            'party': {'port': 1, 'code': '1'},
           },
         ),
       ),
-      'doesn’t include NexusLink',
+      'doesn’t include any Nexus utility',
     );
     rejects(bundle(sample(ts: null, lan: const [])), 'network address');
     rejects(
@@ -91,6 +94,44 @@ void main() {
       ),
       'incomplete',
     );
+  });
+
+  test('reads all three entries with fingerprints and host ids', () {
+    final b = parsePairBundle(
+      bundle(
+        sample(
+          u: {
+            'nexuslink': {'port': 45678, 'code': '1', 'host': 'h1'},
+            'remote': {'port': 45679, 'code': '2', 'fp': 'AB12', 'host': 'h2'},
+            'audio': {'port': 8010, 'code': '3', 'fp': 'CD34', 'host': 'h3'},
+            'future-thing': {'port': 1, 'code': 'x'},
+          },
+        ),
+      ),
+      now: now,
+    );
+    expect(b.hubId, 'hub-1');
+    expect(b.utilities.keys, ['nexuslink', 'remote', 'audio']);
+    expect(b.utilities['remote']!.fingerprint, 'AB12');
+    expect(b.utilities['audio']!.port, 8010);
+    expect(b.utilities['audio']!.hostId, 'h3');
+    expect(b.utilities['nexuslink']!.fingerprint, isNull);
+    expect(b.addresses.ordered, ['100.64.0.5', '192.168.2.10']);
+  });
+
+  test('a bundle without NexusLink parses; .nexusLink explains', () {
+    final b = parsePairBundle(
+      bundle(
+        sample(
+          u: {
+            'audio': {'port': 8010, 'code': '3'},
+          },
+        ),
+      ),
+      now: now,
+    );
+    expect(b.utilities.keys, ['audio']);
+    expect(() => b.nexusLink, throwsA(isA<PairBundleException>()));
   });
 
   test('isPairBundle is a cheap prefix check', () {

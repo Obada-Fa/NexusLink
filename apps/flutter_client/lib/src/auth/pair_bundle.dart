@@ -5,9 +5,13 @@
 //   NXU1:<base64url, no padding, of UTF-8 JSON>
 //   {"v":1,"hub":"…","pc":"Office PC","exp":<ms>,
 //    "addr":{"ts":"100.64.0.5","lan":["192.168.2.10"]},
-//    "u":{"nexuslink":{"port":45678,"code":"54978453","host":"…"}, …}}
+//    "u":{"nexuslink":{"port":45678,"code":"54978453","host":"…"},
+//         "remote":{"port":45679,"code":"…","fp":"AB12…","host":"…"},
+//         "audio":{"port":8010,"code":"…","fp":"CD34…","host":"…"}}}
 
 import 'dart:convert';
+
+import '../session/target.dart';
 
 const pairBundlePrefix = 'NXU1:';
 
@@ -46,9 +50,71 @@ class PairBundleException implements Exception {
 /// so the scanner can ignore unrelated QR codes without an error).
 bool isPairBundle(String text) => text.trim().startsWith(pairBundlePrefix);
 
-/// Parses [text] and returns the NexusLink entry, or throws
-/// [PairBundleException] with a user-facing reason.
-NexusLinkPairing parsePairBundle(String text, {DateTime? now}) {
+/// One utility's entry in the bundle.
+class BundleEntry {
+  const BundleEntry({
+    required this.utility,
+    required this.port,
+    required this.code,
+    this.fingerprint,
+    this.hostId,
+  });
+  final String utility;
+  final int port;
+  final String code;
+  final String? fingerprint, hostId;
+}
+
+/// The whole scanned bundle.
+class PairBundle {
+  const PairBundle({
+    required this.hubId,
+    required this.pcName,
+    required this.expiresAt,
+    required this.addresses,
+    required this.utilities,
+  });
+
+  final String hubId, pcName;
+  final DateTime expiresAt;
+  final TargetAddresses addresses;
+
+  /// Only known utility ids; unknown keys are ignored.
+  final Map<String, BundleEntry> utilities;
+
+  /// The old NexusLink-only view (typed path and old callers). Throws
+  /// [PairBundleException] when the bundle has no NexusLink entry.
+  NexusLinkPairing get nexusLink {
+    final entry = utilities[UtilityIds.nexuslink];
+    if (entry == null) {
+      throw const PairBundleException(
+        'This code doesn’t include NexusLink. Check that Tailscale is on '
+        'and NexusLink is running on your PC, then make a new code.',
+      );
+    }
+    final address = addresses.ordered.firstOrNull;
+    if (address == null) throw _noAddress;
+    return NexusLinkPairing(
+      pcName: pcName,
+      wsUrl: 'ws://${hostForUrl(address)}:${entry.port}/rpc',
+      code: entry.code,
+      expiresAt: expiresAt,
+      hostId: entry.hostId,
+    );
+  }
+}
+
+const _noAddress = PairBundleException(
+  'Your PC didn’t share a network address. Turn on Tailscale on the PC '
+  'and make a new code.',
+);
+
+/// Brackets an IPv6 literal for use in a URL.
+String hostForUrl(String address) =>
+    address.contains(':') && !address.startsWith('[') ? '[$address]' : address;
+
+/// Parses [text], or throws [PairBundleException] with a user-facing reason.
+PairBundle parsePairBundle(String text, {DateTime? now}) {
   final raw = text.trim();
   if (!raw.startsWith(pairBundlePrefix)) {
     throw const PairBundleException(
@@ -66,10 +132,14 @@ NexusLinkPairing parsePairBundle(String text, {DateTime? now}) {
       'The code couldn’t be read. Hold the phone steady and try again.',
     );
   }
-  if (json is! Map || json['v'] != 1) {
+  final v = json is Map ? json['v'] : null;
+  if (json is! Map || v is! int || v > 1) {
     throw const PairBundleException(
-      'This pairing code is from a newer Nexus Utilities. Update NexusLink.',
+      'This pairing code is from a newer Nexus Utilities. Update the Nexus app.',
     );
+  }
+  if (v < 1) {
+    throw const PairBundleException('The code couldn’t be read.');
   }
 
   final exp = json['exp'];
@@ -82,46 +152,50 @@ NexusLinkPairing parsePairBundle(String text, {DateTime? now}) {
     );
   }
 
-  final utilities = json['u'];
-  final entry = utilities is Map ? utilities['nexuslink'] : null;
-  if (entry is! Map) {
-    throw const PairBundleException(
-      'This code doesn’t include NexusLink. Check that Tailscale is on '
-      'and NexusLink is running on your PC, then make a new code.',
-    );
-  }
-  final port = entry['port'];
-  final code = entry['code'];
-  if (port is! int || port <= 0 || port > 65535 || code is! String) {
-    throw const PairBundleException('The pairing code is incomplete.');
-  }
-
   final addr = json['addr'];
-  String? address;
-  if (addr is Map) {
-    final ts = addr['ts'];
-    if (ts is String && ts.isNotEmpty) {
-      address = ts;
-    } else if (addr['lan'] is List) {
-      address = (addr['lan'] as List).whereType<String>().firstOrNull;
+  final addresses = addr is Map
+      ? TargetAddresses.fromJson(Map<String, dynamic>.from(addr))
+      : const TargetAddresses();
+  if (addresses.ordered.isEmpty) throw _noAddress;
+
+  final entries = <String, BundleEntry>{};
+  final u = json['u'];
+  if (u is Map) {
+    for (final id in UtilityIds.all) {
+      final e = u[id];
+      if (e is! Map) continue;
+      final port = e['port'];
+      final code = e['code'];
+      if (port is! int || port <= 0 || port > 65535 || code is! String) {
+        throw const PairBundleException('The pairing code is incomplete.');
+      }
+      final fp = e['fp'];
+      final host = e['host'];
+      entries[id] = BundleEntry(
+        utility: id,
+        port: port,
+        code: code,
+        fingerprint: fp is String && fp.isNotEmpty ? fp : null,
+        hostId: host is String ? host : null,
+      );
     }
   }
-  if (address == null || address.isEmpty) {
+  if (entries.isEmpty) {
     throw const PairBundleException(
-      'Your PC didn’t share a network address. Turn on Tailscale on the PC '
-      'and make a new code.',
+      'This code doesn’t include any Nexus utility. Check that the utilities '
+      'are running on your PC, then make a new code.',
     );
   }
 
-  final host = address.contains(':') && !address.startsWith('[')
-      ? '[$address]' // IPv6 literal
-      : address;
+  final hub = json['hub'];
   final pc = json['pc'];
-  return NexusLinkPairing(
+  return PairBundle(
+    hubId: hub is String && hub.isNotEmpty
+        ? hub
+        : 'hub-${entries.values.first.hostId ?? entries.values.first.port}',
     pcName: pc is String && pc.trim().isNotEmpty ? pc.trim() : 'My PC',
-    wsUrl: 'ws://$host:$port/rpc',
-    code: code,
     expiresAt: expiresAt,
-    hostId: entry['host'] is String ? entry['host'] as String : null,
+    addresses: addresses,
+    utilities: entries,
   );
 }
