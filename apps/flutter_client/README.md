@@ -33,8 +33,15 @@ flutter run
 
 ### Android APK (Direct Testing Distribution)
 ```bash
-flutter build apk --release
-# Generated APK: build/app/outputs/flutter-apk/app-release.apk
+flutter build apk --release --split-per-abi
+# Generated APKs: build/app/outputs/flutter-apk/app-*-release.apk
+```
+
+Debug APKs run far slower than the shipped app, so don't use them to judge
+smoothness. To test performance on a phone, build a profile APK. It installs as
+NexusLink Test, the same as a debug build:
+```bash
+bash scripts/build-android-profile.sh
 ```
 
 ### Android App Bundle (Google Play Store)
