@@ -16,6 +16,7 @@ import 'src/services/notification_service.dart';
 import 'src/state/connection.dart';
 import 'src/state/last_host.dart';
 import 'src/workspace/workspace_shell.dart';
+import 'src/widgets/app_error_view.dart';
 import 'src/widgets/connection_lifecycle.dart';
 import 'src/state/saved_devices.dart';
 import 'src/services/wake_service.dart';
@@ -26,7 +27,17 @@ import 'src/theme/nx_widgets.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await NotificationService.instance.init();
-  runApp(const ProviderScope(child: NexusLinkApp()));
+  ErrorWidget.builder = AppErrorView.fromDetails;
+  appReloadGeneration.addListener(() => _autoConnectAttempted = false);
+  runApp(
+    ValueListenableBuilder<int>(
+      valueListenable: appReloadGeneration,
+      builder: (_, generation, _) => ProviderScope(
+        key: ValueKey(generation),
+        child: const NexusLinkApp(),
+      ),
+    ),
+  );
 }
 
 class NexusLinkApp extends StatelessWidget {
