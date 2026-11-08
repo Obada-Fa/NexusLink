@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 
 /// Wraps [child] with a sweeping arc that traces the rounded rectangle
@@ -26,6 +27,7 @@ class TerminalGlowBorder extends StatefulWidget {
 class _TerminalGlowBorderState extends State<TerminalGlowBorder>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
+  final _path = _OrbitPathCache();
 
   @override
   void initState() {
@@ -57,21 +59,39 @@ class _TerminalGlowBorderState extends State<TerminalGlowBorder>
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) => CustomPaint(
-        foregroundPainter: widget.active
-            ? _RoundedRectOrbitPainter(
-                progress: _controller.value,
-                color: widget.glowColor,
-                borderRadius: widget.borderRadius,
-                strokeWidth: widget.strokeWidth,
-              )
-            : null,
-        child: child,
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, child) => CustomPaint(
+          foregroundPainter: widget.active
+              ? _RoundedRectOrbitPainter(
+                  progress: _controller.value,
+                  color: widget.glowColor,
+                  borderRadius: widget.borderRadius,
+                  strokeWidth: widget.strokeWidth,
+                  path: _path,
+                )
+              : null,
+          child: child,
+        ),
+        child: widget.child,
       ),
-      child: widget.child,
     );
+  }
+}
+
+/// The measured border only changes with layout, not on every animation frame.
+class _OrbitPathCache {
+  RRect? _rRect;
+  ui.PathMetric? _metric;
+
+  ui.PathMetric? metricFor(RRect rRect) {
+    if (rRect != _rRect) {
+      _rRect = rRect;
+      final metrics = (Path()..addRRect(rRect)).computeMetrics().iterator;
+      _metric = metrics.moveNext() ? metrics.current : null;
+    }
+    return _metric;
   }
 }
 
@@ -82,12 +102,14 @@ class _RoundedRectOrbitPainter extends CustomPainter {
   final Color color;
   final BorderRadius borderRadius;
   final double strokeWidth;
+  final _OrbitPathCache path;
 
   _RoundedRectOrbitPainter({
     required this.progress,
     required this.color,
     required this.borderRadius,
     required this.strokeWidth,
+    required this.path,
   });
 
   @override
@@ -111,11 +133,8 @@ class _RoundedRectOrbitPainter extends CustomPainter {
         ..color = color.withValues(alpha: 0.2),
     );
 
-    // Extract path metrics from the RRect
-    final path = Path()..addRRect(rRect);
-    final metricsIterator = path.computeMetrics().iterator;
-    if (!metricsIterator.moveNext()) return;
-    final metric = metricsIterator.current;
+    final metric = path.metricFor(rRect);
+    if (metric == null) return;
     final total = metric.length;
     if (total <= 0) return;
 

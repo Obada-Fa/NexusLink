@@ -239,45 +239,47 @@ class _AgentActivityIconState extends State<AgentActivityIcon>
       );
     }
 
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        final t = _controller.value * 2 * math.pi;
-        final scale = 1.0 + 0.14 * math.sin(t);
-        final angle = 0.12 * math.sin(t);
-        final colorT = (math.sin(t) + 1) / 2;
-        final color = Color.lerp(widget.color, Colors.white, colorT)!;
-        return SizedBox(
-          width: widget.size,
-          height: widget.size,
-          child: Stack(
-            clipBehavior: Clip.none,
-            alignment: Alignment.center,
-            children: [
-              Positioned.fill(
-                child: CustomPaint(
-                  painter: _OrbitPainter(
-                    progress: _controller.value,
-                    color: color,
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) {
+          final t = _controller.value * 2 * math.pi;
+          final scale = 1.0 + 0.14 * math.sin(t);
+          final angle = 0.12 * math.sin(t);
+          final colorT = (math.sin(t) + 1) / 2;
+          final color = Color.lerp(widget.color, Colors.white, colorT)!;
+          return SizedBox(
+            width: widget.size,
+            height: widget.size,
+            child: Stack(
+              clipBehavior: Clip.none,
+              alignment: Alignment.center,
+              children: [
+                Positioned.fill(
+                  child: CustomPaint(
+                    painter: _OrbitPainter(
+                      progress: _controller.value,
+                      color: color,
+                    ),
                   ),
                 ),
-              ),
-              Transform.rotate(
-                angle: angle,
-                child: Transform.scale(
-                  scale: scale,
-                  child: AgentMark(
-                    agentId: widget.agentId,
-                    icon: widget.icon,
-                    size: widget.size * 0.8,
-                    color: color,
+                Transform.rotate(
+                  angle: angle,
+                  child: Transform.scale(
+                    scale: scale,
+                    child: AgentMark(
+                      agentId: widget.agentId,
+                      icon: widget.icon,
+                      size: widget.size * 0.8,
+                      color: color,
+                    ),
                   ),
                 ),
-              ),
-            ],
-          ),
-        );
-      },
+              ],
+            ),
+          );
+        },
+      ),
     );
   }
 }
