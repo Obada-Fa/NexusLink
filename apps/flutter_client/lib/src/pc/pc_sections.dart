@@ -291,6 +291,77 @@ class _ProcessRow extends StatelessWidget {
 }
 
 /// Entry to the live full-desktop mirror (view + touch, or view only).
+/// The PC tab's main destinations, kept above the scrolling sections.
+class PcQuickActions extends StatelessWidget {
+  const PcQuickActions({
+    super.key,
+    required this.onDesktop,
+    required this.onApps,
+    required this.onRunning,
+    required this.running,
+  });
+  final VoidCallback onDesktop;
+  final VoidCallback onApps;
+  final VoidCallback onRunning;
+  final int running;
+
+  static Widget _action(
+    IconData icon,
+    String label,
+    VoidCallback? onTap, {
+    int count = 0,
+  }) => Expanded(
+    child: Semantics(
+      label: count > 0 ? '$label, $count' : label,
+      button: true,
+      enabled: onTap != null,
+      excludeSemantics: true,
+      child: NxCard(
+        onTap: onTap,
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+        child: Column(
+          children: [
+            Badge.count(
+              count: count,
+              isLabelVisible: count > 0,
+              child: Icon(icon, color: onTap == null ? NX.textDim : NX.accent),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: onTap == null ? NX.textDim : NX.text,
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(NX.pad, 4, NX.pad, 8),
+    child: Row(
+      spacing: 8,
+      children: [
+        _action(Icons.desktop_windows_outlined, 'Desktop', onDesktop),
+        _action(Icons.apps, 'Apps', onApps),
+        _action(
+          Icons.layers_outlined,
+          'Running',
+          running > 0 ? onRunning : null,
+          count: running,
+        ),
+      ],
+    ),
+  );
+}
+
 class DesktopEntryCard extends StatelessWidget {
   const DesktopEntryCard({super.key, required this.onOpen});
   final void Function(bool viewOnly) onOpen;

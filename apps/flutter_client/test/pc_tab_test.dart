@@ -600,6 +600,21 @@ void main() {
     expect(copied, 'sudo bash packaging/rustdesk/install.sh');
   });
 
+  testWidgets('quick actions stay on top and reach the app list', (
+    tester,
+  ) async {
+    await pumpPcTab(tester, FakeMonitor());
+    expect(find.text('Desktop'), findsOneWidget);
+    await tester.drag(mainList, const Offset(0, -400));
+    await settle(tester, 2);
+    expect(find.text('Desktop'), findsOneWidget);
+    expect(find.text('Favourites'), findsNothing);
+    await tester.tap(find.text('Apps').first);
+    await settle(tester, 6);
+    expect(find.text('Favourites'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('no overflow at 320×640 with 1.3× text', (tester) async {
     await pumpPcTab(
       tester,
@@ -609,12 +624,14 @@ void main() {
     );
     expect(tester.takeException(), isNull);
     // Walk the whole tab so every section lays out at this size.
+    var sawDesktop = false;
     for (var i = 0; i < 30; i++) {
       await tester.drag(mainList, const Offset(0, -300));
       await settle(tester, 2);
       expect(tester.takeException(), isNull);
+      sawDesktop |= find.text('Your desktop').evaluate().isNotEmpty;
     }
-    expect(find.text('Your desktop'), findsOneWidget);
+    expect(sawDesktop, isTrue);
     // And each detail page, opened from its gauge and scrolled to the end.
     await tester.fling(mainList, const Offset(0, 6000), 3000);
     await settle(tester, 8);

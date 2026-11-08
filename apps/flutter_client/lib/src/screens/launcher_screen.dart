@@ -8,6 +8,7 @@ import '../monitor/monitor_provider.dart';
 import '../pc/agent_apps_section.dart';
 import '../pc/pc_actions.dart';
 import '../pc/pc_sections.dart';
+import '../pc/pc_ui.dart';
 import '../pc/phone_mic.dart';
 import '../pc/remote_access_section.dart';
 import '../pc/phone_approvals_section.dart';
@@ -36,6 +37,54 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   bool _expanded = false;
   bool _busy = false;
   bool _allWindows = false;
+  final _list = ScrollController();
+  final _appsKey = GlobalKey();
+  final _runningKey = GlobalKey();
+
+  @override
+  void dispose() {
+    _list.dispose();
+    super.dispose();
+  }
+
+  /// Scrolls to a section, which the lazy list may not have built yet.
+  Future<void> _reveal(GlobalKey key) async {
+    for (var i = 0; i < 8; i++) {
+      if (!mounted) return;
+      final target = key.currentContext;
+      if (target != null) {
+        if (!target.mounted) return;
+        final duration = motion(target, const Duration(milliseconds: 250));
+        await Scrollable.ensureVisible(
+          target,
+          duration: duration,
+          curve: Curves.easeOut,
+        );
+        return;
+      }
+      if (!_list.hasClients) return;
+      final position = _list.position;
+      if (position.pixels >= position.maxScrollExtent) return;
+      _list.jumpTo(
+        (position.pixels + position.viewportDimension * .8).clamp(
+          0.0,
+          position.maxScrollExtent,
+        ),
+      );
+      await WidgetsBinding.instance.endOfFrame;
+    }
+  }
+
+  Future<void> _showApps() async {
+    if (!_expanded) {
+      setState(() {
+        _expanded = true;
+        _search = '';
+      });
+    }
+    await WidgetsBinding.instance.endOfFrame;
+    await _reveal(_appsKey);
+  }
 
   static const _maxWindows = 6;
 
@@ -350,7 +399,10 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
       const NxSectionHeader('Screen'),
       _pad(DesktopEntryCard(onOpen: _openDesktop)),
       const SizedBox(height: 12),
-      _pad(_appsCard(apps, windows, sessions, preferences, appsAsync)),
+      KeyedSubtree(
+        key: _appsKey,
+        child: _pad(_appsCard(apps, windows, sessions, preferences, appsAsync)),
+      ),
       ..._runningWindows(windows, sessions, apps, preferences),
     ];
 
@@ -376,29 +428,45 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
         owner: 'pc',
         intervalMs: 2000,
         active: visible && monitor,
-        child: RefreshIndicator(
-          onRefresh: _refresh,
-          child: ListView(
-            physics: const AlwaysScrollableScrollPhysics(),
-            padding: const EdgeInsets.only(top: 4, bottom: 32),
-            children: monitor
-                ? [
-                    const PcHeroSection(key: ValueKey('pc-hero')),
-                    const PcFlowSection(key: ValueKey('pc-flow')),
-                    const AgentAppsSection(key: ValueKey('pc-agents')),
-                    const PhoneApprovalsSection(key: ValueKey('pc-approvals')),
-                    const PhoneMicSection(key: ValueKey('pc-mic')),
-                    const RemoteAccessSection(key: ValueKey('pc-remote')),
-                    const TopProcessesSection(key: ValueKey('pc-top')),
-                    ...screen,
-                  ]
-                : [
-                    _pad(_header(context)),
-                    ...screen,
-                    const SizedBox(height: 20),
-                    _pad(const PcCharts()),
-                  ],
-          ),
+        child: Column(
+          children: [
+            if (monitor)
+              PcQuickActions(
+                onDesktop: () => _openDesktop(false),
+                onApps: _showApps,
+                onRunning: () => _reveal(_runningKey),
+                running: windows.length + sessions.length,
+              ),
+            Expanded(
+              child: RefreshIndicator(
+                onRefresh: _refresh,
+                child: ListView(
+                  controller: _list,
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.only(top: 4, bottom: 32),
+                  children: monitor
+                      ? [
+                          const PcHeroSection(key: ValueKey('pc-hero')),
+                          ...screen,
+                          const PcFlowSection(key: ValueKey('pc-flow')),
+                          const AgentAppsSection(key: ValueKey('pc-agents')),
+                          const TopProcessesSection(key: ValueKey('pc-top')),
+                          const PhoneApprovalsSection(
+                            key: ValueKey('pc-approvals'),
+                          ),
+                          const PhoneMicSection(key: ValueKey('pc-mic')),
+                          const RemoteAccessSection(key: ValueKey('pc-remote')),
+                        ]
+                      : [
+                          _pad(_header(context)),
+                          ...screen,
+                          const SizedBox(height: 20),
+                          _pad(const PcCharts()),
+                        ],
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -524,7 +592,10 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     if (total == 0) return const [];
     final shown = _allWindows ? windows : windows.take(_maxWindows).toList();
     return [
-      NxSectionHeader('Running windows', count: total),
+      KeyedSubtree(
+        key: _runningKey,
+        child: NxSectionHeader('Running windows', count: total),
+      ),
       _pad(
         NxCard(
           padding: const EdgeInsets.symmetric(vertical: 4),
