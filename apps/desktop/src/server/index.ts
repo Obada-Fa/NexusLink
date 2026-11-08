@@ -9,7 +9,7 @@ import { roots as providerRoots } from '../../../../packages/chat-core/src/paths
 import { join as joinPath } from 'node:path';
 import { petSummaries } from './workspace/pet-monitor';
 import { dataDirectory } from './workspace/security';
-import { closeSecurityStore } from './workspace/security';
+import { closeSecurityStore, isRevokedToken } from './workspace/security';
 import { setChatLibraryReady } from './workspace/protocol';
 import { detachTerminalsForSocket, stopAllTerminals } from './handlers/terminal';
 // Linux/X11 host. Windows ships as apps/windows-host — do not add win32 branches here.
@@ -830,6 +830,8 @@ export async function startRpcServer(port = 45678, hostname?: string) {
     try { const windows=await listWindows(); for(const s of targets) send(s.ws,{type:'windows-update',windows}); } catch {}
   },5000);
   windowTimer.unref();
+  const revokeTimer = setInterval(() => { for (const s of sessions.values()) if (isRevokedToken(s.token)) try { s.ws.close(4401, 'Device revoked'); } catch {} }, 2000);
+  revokeTimer.unref();
   const monitorTimer = setInterval(() => {
     const now = Date.now();
     const targets = [...sessions.values()].filter(s => s.topics?.has('monitor') && accessToken(s.token) && now - (s.lastMonitor || 0) >= (s.monitorInterval || 2000) - 50);
@@ -845,7 +847,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   const servesClient = await staticAvailable();
   printLaunchBanner(server.port, servesClient);
   console.log(`[rpc-server] listening on ${bindHost}:${server.port}`);
-  return { port: server.port, stop: async () => { setChatLibraryReady(false); await chats.close(); await closeAgentStore(); clearInterval(metricTimer); clearInterval(windowTimer); clearInterval(monitorTimer); approvals.stop(); stopWatchdog(); stopAllTerminals(); unloadMicDevice(); server.stop(true); closeSecurityStore(); } };
+  return { port: server.port, stop: async () => { setChatLibraryReady(false); await chats.close(); await closeAgentStore(); clearInterval(metricTimer); clearInterval(windowTimer); clearInterval(revokeTimer); clearInterval(monitorTimer); approvals.stop(); stopWatchdog(); stopAllTerminals(); unloadMicDevice(); server.stop(true); closeSecurityStore(); } };
 }
 
 // Start the server if this file is run directly

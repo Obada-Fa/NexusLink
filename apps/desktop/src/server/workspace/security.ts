@@ -17,17 +17,28 @@ function db() {
   database.exec(`PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT, hash TEXT UNIQUE, created INTEGER);
     CREATE TABLE IF NOT EXISTS enrollment (id INTEGER PRIMARY KEY CHECK(id=1), hash TEXT, expires INTEGER, attempts INTEGER);`);
+  // Additive migration. Metadata lives in a side table (device_meta) rather than new columns on
+  // `devices`/`enrollment`: the old nexuslink.service uses positional INSERTs into those tables,
+  // which would fail once columns were added.
+  database.exec('CREATE TABLE IF NOT EXISTS device_meta (device_id TEXT PRIMARY KEY, invite_id TEXT, last_seen INTEGER)');
   database.query('INSERT OR IGNORE INTO settings VALUES (?, ?)').run('hostId', crypto.randomUUID());
   return database;
 }
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 export function hostId(): string { return (db().query('SELECT value FROM settings WHERE key=?').get('hostId') as any).value; }
-export function closeSecurityStore() { database?.close(); database = undefined as any; tokens.clear(); }
-export function enableEnrollment(): string {
+export function closeSecurityStore() { database?.close(); database = undefined as any; tokens.clear(); lastSeenWrites.clear(); }
+export const DEFAULT_ENROLLMENT_TTL_MS = 300000;
+export function createInvite(ttlMs = DEFAULT_ENROLLMENT_TTL_MS): { code: string; inviteId: string; expiresAt: number } {
   const code = String(randomInt(10000000, 100000000));
-  db().query('INSERT OR REPLACE INTO enrollment VALUES (1, ?, ?, 0)').run(hash(code), Date.now() + 300000);
-  return code;
+  const inviteId = crypto.randomUUID();
+  const expiresAt = Date.now() + ttlMs;
+  db().transaction(() => {
+    db().query('INSERT OR REPLACE INTO enrollment VALUES (1, ?, ?, 0)').run(hash(code), expiresAt);
+    db().query('INSERT OR REPLACE INTO settings VALUES (?, ?)').run('openInviteId', inviteId);
+  })();
+  return { code, inviteId, expiresAt };
 }
+export function enableEnrollment(ttlMs = DEFAULT_ENROLLMENT_TTL_MS): string { return createInvite(ttlMs).code; }
 export function enroll(code: string, name: string) {
   const row = db().query('SELECT * FROM enrollment WHERE id=1').get() as any;
   if (!row || row.expires < Date.now() || row.attempts >= 5) throw new WorkspaceError('UNAUTHENTICATED', 'Enable pairing on the PC with bun run host:pair.');
@@ -38,11 +49,40 @@ export function enroll(code: string, name: string) {
   db().transaction(() => {
     db().query('INSERT INTO devices VALUES (?, ?, ?, ?)').run(deviceId, name.slice(0, 100), hash(credential), Date.now());
     db().query('DELETE FROM enrollment').run();
+    const invite = db().query('SELECT value FROM settings WHERE key=?').get('openInviteId') as any;
+    db().query('INSERT OR REPLACE INTO device_meta VALUES (?, ?, NULL)').run(deviceId, invite?.value ?? null);
+    db().query('DELETE FROM settings WHERE key=?').run('openInviteId');
   })();
   return { credential, ...resume(credential) };
 }
 export function listDevices() { return db().query('SELECT id, name, created FROM devices').all(); }
-export function revokeDevice(id: string) { db().query('DELETE FROM devices WHERE id=?').run(id); }
+export function listDevicesDetailed(): { id: string; name: string; createdAt: number; lastSeenAt: number | null; inviteId: string | null }[] {
+  return (db().query('SELECT d.id, d.name, d.created, m.invite_id, m.last_seen FROM devices d LEFT JOIN device_meta m ON m.device_id=d.id ORDER BY d.created').all() as any[])
+    .map(r => ({ id: r.id, name: r.name ?? '', createdAt: r.created, lastSeenAt: r.last_seen ?? null, inviteId: r.invite_id ?? null }));
+}
+export function deviceCount(): number { return (db().query('SELECT COUNT(*) AS n FROM devices').get() as any).n; }
+/** Returns true if a device was removed. */
+export function revokeDevice(id: string): boolean {
+  const removed = db().transaction(() => {
+    const r = db().query('DELETE FROM devices WHERE id=?').run(id);
+    db().query('DELETE FROM device_meta WHERE device_id=?').run(id);
+    return r.changes > 0;
+  })();
+  lastSeenWrites.delete(id);
+  return removed;
+}
+const lastSeenWrites = new Map<string, number>();
+function touchDevice(id: string) {
+  const now = Date.now();
+  if (now - (lastSeenWrites.get(id) ?? 0) < 60000) return;
+  lastSeenWrites.set(id, now);
+  try { db().query('INSERT INTO device_meta (device_id, last_seen) VALUES (?, ?) ON CONFLICT(device_id) DO UPDATE SET last_seen=excluded.last_seen').run(id, now); } catch {}
+}
+/** True when this known token belongs to a device that has since been revoked. */
+export function isRevokedToken(token?: string): boolean {
+  const access = token ? tokens.get(token) : undefined;
+  return !!access && access.role !== 'download' && !db().query('SELECT id FROM devices WHERE id=?').get(access.deviceId);
+}
 type Access = { deviceId: string; expires: number; path?: string; role: 'control' | 'monitor' | 'download' };
 const tokens = new Map<string, Access>();
 export function resume(credential: string, role: 'control' | 'monitor' = 'control') {
@@ -57,6 +97,7 @@ export function resume(credential: string, role: 'control' | 'monitor' = 'contro
 export function accessToken(token?: string): Access | undefined {
   const access = token ? tokens.get(token) : undefined;
   if (!access || access.expires < Date.now() || !db().query('SELECT id FROM devices WHERE id=?').get(access.deviceId)) return;
+  touchDevice(access.deviceId);
   return access;
 }
 export function downloadToken(deviceId: string, path: string) {
