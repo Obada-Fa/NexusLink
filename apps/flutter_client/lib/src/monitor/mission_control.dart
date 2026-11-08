@@ -1226,7 +1226,7 @@ Future<ChatAction?> showChatActions(
               leading: const Icon(Icons.visibility_off_rounded),
               title: const Text('Hide from Monitor'),
               subtitle: const Text(
-                'Only on NexusLink; the chat stays in its app. Find it under Filter → Hidden chats',
+                'Only in Nexus; the chat stays in its app. Find it under Filter → Hidden chats',
               ),
               onTap: () => Navigator.pop(ctx, ChatAction.hide),
             ),

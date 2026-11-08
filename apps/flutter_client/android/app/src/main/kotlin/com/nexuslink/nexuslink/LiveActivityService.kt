@@ -96,7 +96,7 @@ class LiveActivityService:Service() {
         if(Build.VERSION.SDK_INT>=26){
             try{manager.deleteNotificationChannel("live_activity")}catch(e:Exception){}
             val liveChannel=NotificationChannel("live_activity_v2","PC live activity",NotificationManager.IMPORTANCE_DEFAULT).apply{
-                description="NexusLink task status"
+                description="Nexus agent status"
                 setSound(null,null)
                 enableVibration(false)
                 setShowBadge(true)
@@ -138,7 +138,7 @@ class LiveActivityService:Service() {
         else startForeground(9000,notification())
         true
     } catch(e:Exception){
-        lastError="Android did not allow monitoring to start in the background. Open NexusLink to resume it."
+        lastError="Android did not allow monitoring to start in the background. Open Nexus to resume it."
         false
     }
     /** The user turned monitoring off: do not restart it after boot or a crash. */
@@ -148,8 +148,8 @@ class LiveActivityService:Service() {
         prefs.edit().putBoolean("requested",false).apply()
         try{
             manager.notify("pairing",9004,builder("task_attention").setSmallIcon(android.R.drawable.stat_notify_error)
-                .setContentTitle("NexusLink monitoring stopped")
-                .setContentText("This phone is no longer paired with your PC. Open NexusLink to pair again.")
+                .setContentTitle("Nexus monitoring stopped")
+                .setContentText("This phone is no longer paired with your PC. Open Nexus to pair again.")
                 .setContentIntent(openTask()).setAutoCancel(true).build())
         }catch(e:Exception){}
         stopSelf()
@@ -180,27 +180,27 @@ class LiveActivityService:Service() {
 
         if(!online){
             iconRes=android.R.drawable.stat_notify_sync
-            titleText="NexusLink (offline)"
+            titleText="Nexus (offline)"
             bodyText="PC offline · reconnecting…"
             subText="offline"
         } else if(waiting>0){
             iconRes=android.R.drawable.stat_notify_error
-            titleText="NexusLink (waiting for you)"
+            titleText="Nexus (waiting for you)"
             bodyText=if(working>0)"$waiting conversation(s) waiting for you · $working working" else "$waiting conversation(s) waiting for you"
             subText="waiting for you"
         } else if(failed>0){
             iconRes=android.R.drawable.stat_notify_error
-            titleText="NexusLink (needs attention)"
+            titleText="Nexus (needs attention)"
             bodyText=if(working>0)"$failed conversation(s) need attention · $working working" else "$failed task(s) need attention"
             subText="attention"
         } else if(working>0){
             iconRes=android.R.drawable.stat_notify_sync
-            titleText="NexusLink (working)"
+            titleText="Nexus (working)"
             bodyText=if(working==1)"1 task running on PC" else "$working tasks running on PC"
             subText="working"
         } else {
             iconRes=R.mipmap.ic_launcher
-            titleText="NexusLink (idle)"
+            titleText="Nexus (idle)"
             bodyText="PC connected · No agents currently running"
             subText="idle"
         }
@@ -342,7 +342,7 @@ class LiveActivityService:Service() {
             if(result.optBoolean("replayGap")){
                 lastError="Some historical task alerts could not be recovered after a replay gap."
                 manager.notify("gap:$hostId",9001,builder("task_attention").setSmallIcon(android.R.drawable.stat_notify_error)
-                    .setContentTitle("NexusLink alerts restored").setContentText(lastError)
+                    .setContentTitle("Nexus alerts restored").setContentText(lastError)
                     .setContentIntent(openTask()).setAutoCancel(true).build())
             }
         }
@@ -469,7 +469,7 @@ class LiveActivityService:Service() {
         bubbleHiddenReason=when {
             !bubbleEnabled -> "Bubble is off"
             !Settings.canDrawOverlays(this) -> "Display over other apps permission is unavailable"
-            visible -> "NexusLink is foregrounded"
+            visible -> "Nexus is foregrounded"
             !screen -> "Screen is off"
             locked -> "Phone is locked"
             else -> ""
@@ -516,7 +516,7 @@ class LiveActivityService:Service() {
         panelRefresh?.invoke()
         (overlay as? MonitorPetView)?.let{
             it.status(mood,label,textColor)
-            it.contentDescription="NexusLink: ${if(!online) "disconnected" else if(waiting>0) "$waiting waiting for you" else if(failed>0) "$failed need attention" else if(working>0) "$working working" else "idle"}. Tap for conversations."
+            it.contentDescription="Nexus: ${if(!online) "disconnected" else if(waiting>0) "$waiting waiting for you" else if(failed>0) "$failed need attention" else if(working>0) "$working working" else "idle"}. Tap for conversations."
             it.requestLayout()
             val params=it.layoutParams as? WindowManager.LayoutParams
             if(params!=null){
@@ -547,7 +547,7 @@ class LiveActivityService:Service() {
             status(mood,label,textColor)
             setReducedMotion(prefs.getBoolean("petReducedMotion",false))
             faceInward(params.x>resources.displayMetrics.widthPixels/2)
-            contentDescription="NexusLink pet. Tap for important updates. Drag to move. Long press for options."
+            contentDescription="Nexus pet. Tap for important updates. Drag to move. Long press for options."
             elevation=10f*density
         }
 

@@ -96,7 +96,7 @@ String friendlyLaunchError(Object error) {
 String pairedDeviceName() {
   if (Platform.isAndroid) return 'Android phone';
   if (Platform.isIOS) return 'iPhone';
-  return 'NexusLink on ${Platform.operatingSystem}';
+  return 'Nexus on ${Platform.operatingSystem}';
 }
 
 /// Backoff for a dropped WebSocket: 1s, 2s, 4s, 8s, then cap at 30s.

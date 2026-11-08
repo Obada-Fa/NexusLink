@@ -45,14 +45,14 @@ android {
     buildTypes {
         debug {
             applicationIdSuffix = ".test"
-            manifestPlaceholders["appLabel"] = "NexusLink Test"
+            manifestPlaceholders["appLabel"] = "Nexus Test"
         }
         maybeCreate("profile").apply {
             applicationIdSuffix = ".test"
-            manifestPlaceholders["appLabel"] = "NexusLink Test"
+            manifestPlaceholders["appLabel"] = "Nexus Test"
         }
         release {
-            manifestPlaceholders["appLabel"] = "NexusLink"
+            manifestPlaceholders["appLabel"] = "Nexus"
             if (!releaseStore.isNullOrBlank()) signingConfig = signingConfigs.getByName("nexuslinkRelease")
         }
     }

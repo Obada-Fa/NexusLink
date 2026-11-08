@@ -102,7 +102,7 @@ class MainActivity : FlutterActivity() {
                             manager.createNotificationChannel(android.app.NotificationChannel("task_attention","Task updates",android.app.NotificationManager.IMPORTANCE_HIGH))
                         val allowed=(Build.VERSION.SDK_INT<33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED) && manager.areNotificationsEnabled()
                         if(allowed)manager.notify("watch-test",9003,NotificationCompat.Builder(this,"task_attention")
-                            .setSmallIcon(R.mipmap.ic_launcher).setContentTitle("NexusLink watch test")
+                            .setSmallIcon(R.mipmap.ic_launcher).setContentTitle("Nexus watch test")
                             .setContentText("Check whether this appears on your watch.")
                             .setContentIntent(android.app.PendingIntent.getActivity(this,9003,Intent(this,MainActivity::class.java),android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE))
                             .setAutoCancel(true).build())
@@ -149,7 +149,7 @@ class MainActivity : FlutterActivity() {
         while(File(base,chosen).exists() || reserved.contains(chosen)) {val dot=name.lastIndexOf('.');chosen=if(dot>0)name.substring(0,dot)+" (${index++})"+name.substring(dot) else "$name (${index++})"}
         val request=DownloadManager.Request(Uri.parse(args["url"] as String))
             .addRequestHeader("Authorization","Bearer ${args["token"]}")
-            .setTitle(chosen).setDescription("NexusLink · ${args["host"]}")
+            .setTitle(chosen).setDescription("Nexus · ${args["host"]}")
             .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,"NexusLink/$chosen")
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
         val id=downloads.enqueue(request)

@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:nexuslink/main.dart';
 import 'package:nexuslink/src/services/wake_service.dart';
+import 'package:nexuslink/src/session/store.dart';
 import 'package:nexuslink/src/state/saved_devices.dart';
 import 'package:nexuslink/src/state/wake_config.dart';
 
@@ -45,7 +46,7 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [wakeServiceProvider.overrideWithValue(wake)],
-          child: const NexusLinkApp(),
+          child: const NexusApp(),
         ),
       );
       await tester.pumpAndSettle();
@@ -60,7 +61,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(wake.secret, 'private-key');
       expect(
-        (await SavedDevices.load()).single.wake!.endpoint,
+        (await TargetStore.load()).single.wake!.endpoint,
         'http://100.101.246.19:3050/wake',
       );
       await tester.tap(find.text('Wake PC'));

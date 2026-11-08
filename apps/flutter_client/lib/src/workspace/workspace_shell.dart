@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -18,49 +17,57 @@ import 'project.dart';
 import 'platform_bridge.dart';
 import 'documents.dart';
 
+/// Global ids of the NexusLink workspace tabs. They stay stable so existing
+/// screens can keep selecting a tab through [workspaceTabProvider]; each
+/// module shows only its own tabs (agents: monitor; terminal: terminal +
+/// files; desktop: PC).
+abstract final class WorkspaceTabs {
+  static const monitor = 0;
+  static const files = 1;
+  static const terminal = 2;
+  static const pc = 3;
+  static const all = [monitor, files, terminal, pc];
+}
+
+/// Hosts one module's NexusLink screens. Tabs are global [WorkspaceTabs] ids;
+/// when a screen selects a tab this host does not show (e.g. Mission Control
+/// opening PC vitals), [onForeignTab] lets the shell open the module that owns
+/// it.
 class WorkspaceShell extends ConsumerStatefulWidget {
-  const WorkspaceShell({super.key});
+  const WorkspaceShell({
+    super.key,
+    this.tabs = WorkspaceTabs.all,
+    this.onForeignTab,
+  });
+  final List<int> tabs;
+  final void Function(int tab)? onForeignTab;
   @override
   ConsumerState<WorkspaceShell> createState() => _WorkspaceShellState();
 }
 
 class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
     with WidgetsBindingObserver {
-  final _keys = List.generate(4, (_) => GlobalKey<NavigatorState>());
-  final _visited = <int>{0};
+  final _visited = <int>{};
   bool _foreground = true;
   RpcClient? _metricsClient;
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    if (Platform.isAndroid) {
-      PlatformBridge.channel.setMethodCallHandler((call) async {
-        if (call.method == 'openTask' && call.arguments is Map) {
-          final args = Map<String, dynamic>.from(call.arguments);
-          final host = args['host'] as String?;
-          ref.read(workspaceTabProvider.notifier).select(0);
-          if (args['taskId'] == null) {
-            _keys[0].currentState?.popUntil((route) => route.isFirst);
-          }
-          if (host != null && host != ref.read(connectionProvider).hostUrl) {
-            try {
-              await ref.read(connectionProvider.notifier).connect(host);
-            } catch (e) {
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Connect to the alert’s PC: $e')),
-                );
-              }
-            }
-          }
-          ref
-              .read(pendingTaskProvider.notifier)
-              .select(args['taskId'] as String?);
+    if (!widget.tabs.contains(ref.read(workspaceTabProvider))) {
+      // Providers can't change while the tree builds.
+      Future.microtask(() {
+        if (mounted) {
+          ref.read(workspaceTabProvider.notifier).select(widget.tabs.first);
         }
       });
     }
     _loadSettings();
+  }
+
+  int get _tab {
+    final tab = ref.read(workspaceTabProvider);
+    return widget.tabs.contains(tab) ? tab : widget.tabs.first;
   }
 
   Future<void> _loadSettings() async {
@@ -86,7 +93,7 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
       _metricsClient?.demand('monitor:strip', 0);
       _metricsClient = client;
     }
-    final tab = ref.read(workspaceTabProvider);
+    final tab = _tab;
     final show = ref.read(workspaceSettingsProvider)['stats'] == true;
     client?.demand('windows', _foreground && tab == 3 ? 5000 : 0);
     if (hostSupportsMonitor(client)) {
@@ -101,6 +108,15 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
     }
   }
 
+  void _onTabChanged(int? previous, int next) {
+    _demand();
+    if (widget.tabs.contains(next)) return;
+    // Only the module on top reacts; one being pushed or popped stays quiet.
+    if (ModalRoute.of(context)?.isCurrent ?? true) {
+      widget.onForeignTab?.call(next);
+    }
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
@@ -110,82 +126,78 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
     super.dispose();
   }
 
+  static const _destinations = {
+    WorkspaceTabs.monitor: NavigationDestination(
+      icon: Icon(Icons.radar),
+      label: 'Monitor',
+    ),
+    WorkspaceTabs.files: NavigationDestination(
+      icon: Icon(Icons.folder_outlined),
+      label: 'Files',
+    ),
+    WorkspaceTabs.terminal: NavigationDestination(
+      icon: Icon(Icons.terminal),
+      label: 'Terminal',
+    ),
+    WorkspaceTabs.pc: NavigationDestination(
+      icon: Icon(Icons.computer_outlined),
+      label: 'PC',
+    ),
+  };
+
+  static Widget _screen(int tab) => switch (tab) {
+    WorkspaceTabs.monitor => const ChatLibraryScreen(),
+    WorkspaceTabs.files => const WorkspaceFilesScreen(),
+    WorkspaceTabs.terminal => const TerminalScreen(),
+    _ => const LauncherScreen(),
+  };
+
   @override
   Widget build(BuildContext context) {
-    final tab = ref.watch(workspaceTabProvider);
+    ref.watch(workspaceTabProvider);
+    final tab = _tab;
+    final tabs = widget.tabs;
     _visited.add(tab);
     ref.listen(activeClientProvider, (_, _) => _demand());
-    ref.listen(workspaceTabProvider, (_, _) => _demand());
+    ref.listen(workspaceTabProvider, _onTabChanged);
     ref.listen(workspaceSettingsProvider, (_, _) => _demand());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _demand();
     });
     final settings = ref.watch(workspaceSettingsProvider);
     final keyboard = MediaQuery.viewInsetsOf(context).bottom > 0;
+    final showStrip = settings['stats'] == true && tab != WorkspaceTabs.pc;
     return PopScope(
-      canPop: tab == 0,
+      canPop: tab == tabs.first,
       onPopInvokedWithResult: (didPop, result) {
-        if (!didPop && tab != 0) {
-          ref.read(workspaceTabProvider.notifier).select(0);
+        if (!didPop && tab != tabs.first) {
+          ref.read(workspaceTabProvider.notifier).select(tabs.first);
         }
       },
       child: Scaffold(
         body: IndexedStack(
-          index: tab,
+          index: tabs.indexOf(tab),
           children: [
-            for (var i = 0; i < 4; i++)
-              _visited.contains(i)
-                  ? TickerMode(
-                      enabled: tab == i,
-                      child: NavigatorPopHandler<Object?>(
-                        enabled: tab == i,
-                        onPopWithResult: (_) =>
-                            _keys[i].currentState?.maybePop(),
-                        child: Navigator(
-                          key: _keys[i],
-                          onGenerateRoute: (_) => MaterialPageRoute(
-                            builder: (_) => switch (i) {
-                              0 => const ChatLibraryScreen(),
-                              1 => const WorkspaceFilesScreen(),
-                              2 => const TerminalScreen(),
-                              _ => const LauncherScreen(),
-                            },
-                          ),
-                        ),
-                      ),
-                    )
+            for (final t in tabs)
+              _visited.contains(t)
+                  ? TickerMode(enabled: tab == t, child: _screen(t))
                   : const SizedBox.shrink(),
           ],
         ),
-        bottomNavigationBar: keyboard
+        bottomNavigationBar: keyboard || (tabs.length < 2 && !showStrip)
             ? null
             : Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (settings['stats'] == true) const PcStatsStrip(),
-                  NavigationBar(
-                    selectedIndex: tab,
-                    onDestinationSelected: (index) =>
-                        ref.read(workspaceTabProvider.notifier).select(index),
-                    destinations: const [
-                      NavigationDestination(
-                        icon: Icon(Icons.radar),
-                        label: 'Monitor',
-                      ),
-                      NavigationDestination(
-                        icon: Icon(Icons.folder_outlined),
-                        label: 'Files',
-                      ),
-                      NavigationDestination(
-                        icon: Icon(Icons.terminal),
-                        label: 'Terminal',
-                      ),
-                      NavigationDestination(
-                        icon: Icon(Icons.computer_outlined),
-                        label: 'PC',
-                      ),
-                    ],
-                  ),
+                  if (showStrip) const PcStatsStrip(),
+                  if (tabs.length > 1)
+                    NavigationBar(
+                      selectedIndex: tabs.indexOf(tab),
+                      onDestinationSelected: (index) => ref
+                          .read(workspaceTabProvider.notifier)
+                          .select(tabs[index]),
+                      destinations: [for (final t in tabs) _destinations[t]!],
+                    ),
                 ],
               ),
       ),
@@ -333,7 +345,7 @@ class _PcScreenState extends ConsumerState<PcScreen>
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: const Text(
-              'Choose NexusLink in Display over other apps and allow access. If Android explicitly shows Restricted setting, check App info for Allow restricted settings, then return to overlay settings.',
+              'Choose Nexus in Display over other apps and allow access. If Android explicitly shows Restricted setting, check App info for Allow restricted settings, then return to overlay settings.',
             ),
             action: SnackBarAction(
               label: 'App info',
@@ -514,7 +526,7 @@ class _PcScreenState extends ConsumerState<PcScreen>
                       builder: (ctx) => AlertDialog(
                         title: const Text('Allow floating pet'),
                         content: const Text(
-                          'In Android Settings, choose NexusLink (or NexusLink Test) and enable Display over other apps. This is separate from notification bubbles. Return here, then go to your home screen to see the bubble.',
+                          'In Android Settings, choose Nexus (or Nexus Test) and enable Display over other apps. This is separate from notification bubbles. Return here, then go to your home screen to see the bubble.',
                         ),
                         actions: [
                           TextButton(
@@ -591,7 +603,7 @@ class _PcScreenState extends ConsumerState<PcScreen>
               leading: const Icon(Icons.watch_outlined),
               title: const Text('Send test notification'),
               subtitle: const Text(
-                'In Mobvoi Health, enable notifications for this installed NexusLink package. Check the watch itself for delivery.',
+                'In Mobvoi Health, enable notifications for this installed Nexus app. Check the watch itself for delivery.',
               ),
               onTap: () async {
                 final status = await PlatformBridge.call(
