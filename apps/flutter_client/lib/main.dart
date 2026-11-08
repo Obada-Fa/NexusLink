@@ -4,6 +4,9 @@
 import 'dart:io';
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'src/auth/pair_bundle.dart';
+import 'src/screens/scan_pair_screen.dart';
 import 'src/workspace/platform_bridge.dart';
 import 'src/workspace/project.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -170,7 +173,8 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
       if (device != null) _nameController.text = device.name;
       _error =
           'This phone is no longer paired with ${device?.name ?? 'that PC'}. '
-          'Enter a new pairing code from NexusLink on your PC, then tap Connect.';
+          'Scan the QR code again, or type a new pairing code from '
+          'Nexus Utilities → Add phone on your PC.';
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // Never pull the keyboard up while another screen covers this one.
@@ -502,6 +506,24 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
     }
   }
 
+  Future<void> _scanPairCode() async {
+    FocusScope.of(context).unfocus();
+    final pairing = await Navigator.of(context).push<NexusLinkPairing>(
+      MaterialPageRoute(builder: (_) => const ScanPairScreen()),
+    );
+    if (!mounted) return;
+    if (pairing == null) return; // backed out or chose to type it
+    _urlController.text = pairing.wsUrl;
+    _pairingController.text = pairing.code;
+    final typed = _nameController.text.trim();
+    await _connect(
+      pairing.wsUrl,
+      name: typed.isEmpty ? pairing.pcName : typed,
+      icon: _newIcon,
+      label: pairing.pcName,
+    );
+  }
+
   Future<void> _connect(
     String wsUrl, {
     String? name,
@@ -513,7 +535,7 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
     if (_wakingUrl != null) _cancelWakeWait();
     wsUrl = normalizeHostWsUrl(wsUrl);
     final generation = ++_connectGeneration;
-    final pairingCode = _pairingController.text.trim();
+    final pairingCode = _pairingController.text.replaceAll(RegExp(r'\D'), '');
     setState(() {
       _connecting = true;
       _connectingUrl = wsUrl;
@@ -714,28 +736,25 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                 ),
                 if (_showAddDevice) ...[
                   const SizedBox(height: 16),
-                  TextField(
-                    controller: _nameController,
-                    maxLength: 40,
-                    decoration: const InputDecoration(
-                      labelText: 'Device name',
-                      hintText: 'e.g. Office PC',
+                  FilledButton.icon(
+                    key: const ValueKey('scan-pair'),
+                    onPressed: _connecting ? null : _scanPairCode,
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(54),
+                    ),
+                    icon: const Icon(Icons.qr_code_scanner_rounded),
+                    label: const Text(
+                      'Scan QR code from PC',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
                     ),
                   ),
-                  Wrap(
-                    spacing: 12,
-                    children: deviceIcons
-                        .map(
-                          (value) => ChoiceChip(
-                            label: Icon(_deviceIcon(value)),
-                            tooltip: value,
-                            selected: _newIcon == value,
-                            onSelected: (_) => setState(() => _newIcon = value),
-                          ),
-                        )
-                        .toList(),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'On your PC: Nexus Utilities → Add phone',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: NX.textDim, fontSize: 12.5),
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 12),
                   OutlinedButton.icon(
                     onPressed: _scanning || _connecting ? null : _scan,
                     icon: _scanning
@@ -767,29 +786,90 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                       ),
                     ),
                   ),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 22),
+                  const Row(
+                    children: [
+                      Expanded(child: Divider(color: NX.line)),
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 12),
+                        child: Text(
+                          'OR TYPE IT IN',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            letterSpacing: 1.2,
+                            color: NX.textFaint,
+                          ),
+                        ),
+                      ),
+                      Expanded(child: Divider(color: NX.line)),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
                   TextField(
-                    controller: _pairingController,
-                    focusNode: _pairingFocus,
-                    keyboardType: TextInputType.number,
+                    key: const ValueKey('pc-address'),
+                    controller: _urlController,
+                    onChanged: (_) => setState(() {}),
+                    keyboardType: TextInputType.url,
+                    autocorrect: false,
                     decoration: const InputDecoration(
-                      labelText: 'Pairing code (first connection)',
+                      labelText: 'PC address',
+                      hintText: 'e.g. 100.64.0.5',
                       helperText:
-                          'Shown by NexusLink on your PC when you pair a phone',
+                          'Your PC’s Tailscale IP or name. The port is added '
+                          'for you.',
+                      border: OutlineInputBorder(),
                     ),
                   ),
                   const SizedBox(height: 16),
                   TextField(
-                    controller: _urlController,
-                    onChanged: (_) => setState(() {}),
-                    decoration: InputDecoration(
-                      labelText: 'Device address',
-                      hintText: 'ws://host:45678/rpc',
-                      border: const OutlineInputBorder(),
+                    key: const ValueKey('pairing-code'),
+                    controller: _pairingController,
+                    focusNode: _pairingFocus,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [
+                      FilteringTextInputFormatter.allow(RegExp(r'[0-9 ]')),
+                      LengthLimitingTextInputFormatter(9),
+                    ],
+                    style: const TextStyle(
+                      fontSize: 20,
+                      letterSpacing: 3,
+                      fontWeight: FontWeight.w700,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Pairing code',
+                      hintText: '1234 5678',
+                      helperText:
+                          '8 digits shown on your PC under Add phone. '
+                          'Only needed the first time.',
+                      helperMaxLines: 2,
+                      border: OutlineInputBorder(),
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: _nameController,
+                    maxLength: 40,
+                    decoration: const InputDecoration(
+                      labelText: 'Name (optional)',
+                      hintText: 'e.g. Office PC',
+                    ),
+                  ),
+                  Wrap(
+                    spacing: 12,
+                    children: deviceIcons
+                        .map(
+                          (value) => ChoiceChip(
+                            label: Icon(_deviceIcon(value)),
+                            tooltip: value,
+                            selected: _newIcon == value,
+                            onSelected: (_) => setState(() => _newIcon = value),
+                          ),
+                        )
+                        .toList(),
+                  ),
+                  const SizedBox(height: 16),
                   FilledButton(
+                    key: const ValueKey('connect'),
                     onPressed: _connecting || _urlController.text.isEmpty
                         ? null
                         : () => _connect(
@@ -799,6 +879,9 @@ class _ConnectScreenState extends ConsumerState<ConnectScreen> {
                                 : _nameController.text.trim(),
                             icon: _newIcon,
                           ),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size.fromHeight(48),
+                    ),
                     child: const Text('Connect'),
                   ),
                 ],

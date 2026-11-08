@@ -33,8 +33,8 @@ void main() {
     expect(find.text('YOUR DEVICES'), findsOneWidget);
     expect(find.text('My PC'), findsOneWidget);
     expect(find.text('Tap to connect'), findsOneWidget);
-    expect(find.text('Device address'), findsNothing);
-    expect(find.text('Pairing code (first connection)'), findsNothing);
+    expect(find.text('PC address'), findsNothing);
+    expect(find.text('Pairing code'), findsNothing);
   });
 
   testWidgets('saved device name and icon can be edited and removed', (
@@ -72,6 +72,6 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Work laptop'), findsNothing);
     expect(await SavedDevices.load(), isEmpty);
-    expect(find.text('Device address'), findsOneWidget);
+    expect(find.text('PC address'), findsOneWidget);
   });
 }
