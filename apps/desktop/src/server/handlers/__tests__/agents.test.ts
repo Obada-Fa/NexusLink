@@ -19,6 +19,7 @@ import {
   buildOpenCodeArgs,
   buildAntigravityArgs,
   parseCursorToolCall,
+  classifyCursorAssistant,
 } from '../agents';
 
 function installFakeBin(name: string, script: string): { dir: string; argvFile: string; restore: () => void } {
@@ -123,11 +124,29 @@ describe('agent gateway', () => {
     expect(argv).toContain('--trust');
     expect(argv).toContain('--force');
     expect(argv).toContain('--approve-mcps');
+    expect(argv).toContain('--stream-partial-output');
     expect(argv).toContain('--workspace');
     expect(argv).toContain('/home/me/proj');
     expect(argv).toContain('--resume');
     expect(argv).toContain('abc');
     expect(argv.at(-1)).toBe('hello');
+  });
+
+  test('classifies Cursor assistant events for complete vs streamed output', () => {
+    const complete = { type: 'assistant', message: { content: [{ type: 'text', text: 'Hi' }] } };
+    expect(classifyCursorAssistant(complete, { streamedDeltas: false })).toBe('text');
+    expect(classifyCursorAssistant(complete, { streamedDeltas: true })).toBe('skip');
+
+    const delta = { type: 'assistant', timestamp_ms: 1, message: { content: [{ type: 'text', text: 'H' }] } };
+    expect(classifyCursorAssistant(delta, { streamedDeltas: false })).toBe('text-delta');
+
+    const flush = {
+      type: 'assistant',
+      timestamp_ms: 2,
+      model_call_id: 'm1',
+      message: { content: [{ type: 'text', text: 'Hi' }] },
+    };
+    expect(classifyCursorAssistant(flush, { streamedDeltas: true })).toBe('skip');
   });
 
   test('parses nested Cursor tool_call payloads', () => {
@@ -237,6 +256,59 @@ exit 1
       expect(err?.text ?? '').toMatch(/login|Authentication/i);
       closeAgentSession(info.agentSessionId);
     } finally {
+      fake.restore();
+      setAgentBroadcast(() => {});
+    }
+  });
+
+  test('cursor adapter streams token deltas and keeps later complete messages', async () => {
+    const fake = installFakeBin('cursor-agent', `#!/usr/bin/env bash
+echo '{"type":"system","subtype":"init","session_id":"sess-d"}'
+echo '{"type":"assistant","timestamp_ms":1,"message":{"role":"assistant","content":[{"type":"text","text":"Hel"}]}}'
+echo '{"type":"assistant","timestamp_ms":2,"message":{"role":"assistant","content":[{"type":"text","text":"lo"}]}}'
+echo '{"type":"assistant","model_call_id":"m1","timestamp_ms":3,"message":{"role":"assistant","content":[{"type":"text","text":"Hello"}]}}'
+echo '{"type":"tool_call","subtype":"started","call_id":"t1","tool_call":{"readToolCall":{"args":{"path":"a.txt"}}}}'
+echo '{"type":"tool_call","subtype":"completed","call_id":"t1","tool_call":{"readToolCall":{"args":{"path":"a.txt"},"result":{"success":{"content":"ok"}}}}}'
+echo '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":" Done."}]}}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"Hello Done.","session_id":"sess-d"}'
+`);
+    const pushed: AgentEvent[] = [];
+    setAgentBroadcast((msg: WsMessage) => {
+      if (msg.type === 'agent-event') pushed.push(msg.event);
+    });
+    try {
+      const info = createAgentSession('cursor', fake.dir, 'Cursor CLI');
+      promptAgent(info.agentSessionId, 'hi');
+      await waitFor(pushed, 'result');
+      const deltas = pushed.filter((e) => e.kind === 'text-delta').map((e) => e.text).join('');
+      expect(deltas).toBe('Hello');
+      expect(pushed.some((e) => e.kind === 'text' && e.text === ' Done.')).toBe(true);
+      closeAgentSession(info.agentSessionId);
+    } finally {
+      fake.restore();
+      setAgentBroadcast(() => {});
+    }
+  });
+
+  test('cursor adapter errors when the CLI stays silent', async () => {
+    const prev = process.env.NEXUS_AGENT_SILENCE_MS;
+    process.env.NEXUS_AGENT_SILENCE_MS = '200';
+    const fake = installFakeBin('cursor-agent', `#!/usr/bin/env bash
+sleep 8
+`);
+    const pushed: AgentEvent[] = [];
+    setAgentBroadcast((msg: WsMessage) => {
+      if (msg.type === 'agent-event') pushed.push(msg.event);
+    });
+    try {
+      const info = createAgentSession('cursor', fake.dir, 'Cursor CLI');
+      promptAgent(info.agentSessionId, 'hello');
+      await waitFor(pushed, 'error', 3000);
+      expect(pushed.find((e) => e.kind === 'error')?.text ?? '').toMatch(/did not respond/i);
+      closeAgentSession(info.agentSessionId);
+    } finally {
+      if (prev === undefined) delete process.env.NEXUS_AGENT_SILENCE_MS;
+      else process.env.NEXUS_AGENT_SILENCE_MS = prev;
       fake.restore();
       setAgentBroadcast(() => {});
     }
