@@ -1,6 +1,6 @@
 # Refine Nexus for “my computer in my pocket”
 
-Status: all three passes and the Desktop update are committed on `nexus-app-phase1`. The chart redesign and review fixes target test release **1.0.47+53**. The published **1.0.46+52** predates the Desktop update. [Chart comparisons and implementation handoff](chart-design/README.md).
+Status: all three passes and the Desktop update are committed on `nexus-app-phase1`. The chart redesign and review fixes shipped in **1.0.47+53**. The per-thread CPU redesign targets **1.0.48+54**. The published **1.0.46+52** predates the Desktop update. [Chart comparisons and implementation handoff](chart-design/README.md).
 
 **Assessment:** The strongest parts of Nexus are where it speaks in terms of your work. “Needs you” tells you why to open a chat. “Open terminal here” carries a folder into the next task. “Play PC audio here” tells you exactly what will happen. Home is weaker because it gives six tools similar weight without telling you what’s happening on your computer or where you left off.
 
@@ -99,3 +99,5 @@ I’d keep the dark visual identity, the direct access to PC tools, and the pixe
 
 - 2026-11-09, chart redesign and test build 1.0.47+53. Desktop rows now put load beside five-minute traces. CPU, GPU and memory mark the peak directly. Hold and drag to inspect all plots at one host timestamp. Network and disk use stacked directional lanes. The host telemetry interface is unchanged. [Phone captures and implementation details](chart-design/README.md).
 - Approval links carry the originating PC and request ID across Android and Flutter. Continue survives nested module navigation. App info drops controls when an item disappears. The Flutter suite passed 492 tests with three skips. Both capture tests ran separately at 1× and 2× text. Physical-phone checks against a paired PC are still outstanding.
+
+- 2026-11-09, per-thread CPU redesign after preview feedback. Desktop and the full CPU page now share colored logical-CPU histories. The expanded view shows each CPU’s number, percentage and selectable trace. GPU and Memory have dedicated Desktop panels. The phone retains the existing host’s timestamped per-core samples. Full Flutter run including the capture tests: 496 passed, one skipped.

@@ -1,16 +1,16 @@
 # Phone chart design
 
-These captures compare the Desktop implementation in `935d864` on the left with the new Flutter screens on the right. Both runs use the same monitor fixture at 412 × 915 dp.
+Desktop and CPU compare test builds 1.0.47 and 1.0.48. GPU and Network & disk compare the earlier Desktop implementation in `935d864` with 1.0.48. The Flutter captures use the same snapshot at 412 × 915 dp. The colored CPU histories use synthetic per-thread samples for the preview.
 
 ### Desktop
 
-Each row opens the corresponding monitor page. The center trace shows the last five minutes. The right edge holds the latest reading or both transfer rates. At large text sizes the trace moves beneath the readings.
+CPU activity shows each logical CPU in a stable color with total usage in white. Tap the thread count to see individual traces. Tap the chart or its heading to open the CPU page. The GPU and Memory panels open their monitor pages. Open desktop sits above Favourites.
 
 ![Desktop readings before and after](desktop.webp)
 
 ### CPU
 
-The hardware name and load precede the five-minute plot. The peak label sits on the highest retained sample. The temperature plot uses the same time axis. Processes opens below the plots. Hold and drag on either plot to see the corresponding readings across the page.
+The processor name and total load sit above the shared chart. CPU 0 through the last logical CPU each have a current percentage and history underneath. Tap a tile to emphasize its trace in the main plot. Tap again to return to Total. Holding the main chart looks up the reading at that host time across the thread tiles and temperature plot. The CPU time window starts at 15 seconds, grows to one minute and then five minutes as samples accumulate.
 
 ![CPU load and temperature before and after](cpu.webp)
 

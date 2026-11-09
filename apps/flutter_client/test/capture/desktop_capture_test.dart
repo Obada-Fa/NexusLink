@@ -3,6 +3,7 @@
 //   CAPTURE_DIR=/tmp/caps flutter test test/capture/desktop_capture_test.dart
 
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -75,6 +76,24 @@ MonitorHistory spikeHistory() {
   series['cpuTemp'] = temp;
   series['netRx'] = rx;
   series['netTx'] = tx;
+  // The fixture exercises migrating bursts on different logical CPUs.
+  for (var core = 0; core < 16; core++) {
+    final points = <Sample>[];
+    for (final sample in cpu.take(cpu.length - 1)) {
+      final sec = (sample.t - end + 300000) / 1000;
+      final phase = core * 1.74;
+      final wave =
+          math.sin(sec / 13 + phase) + .55 * math.sin(sec / 6.4 + core);
+      final burst =
+          math.pow(math.max(0.0, wave), 3).toDouble() * (13 + core % 6);
+      final busy = 4 + core % 7 + burst + 4 * math.sin(sec / 3.4 + phase);
+      points.add(
+        Sample(sample.t, sample.v > 90 ? 92 + core % 9 : busy.clamp(0, 100)),
+      );
+    }
+    points.add(Sample(end, (core * 13.0) % 100));
+    series['cpuThread:$core'] = points;
+  }
   return MonitorHistory(series);
 }
 

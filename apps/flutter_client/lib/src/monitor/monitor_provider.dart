@@ -75,6 +75,10 @@ class MonitorHistory {
 
     final gpu = v.mainGpu;
     push('cpu', v.cpu);
+    final cores = v.perCore;
+    for (var i = 0; i < cores.length; i++) {
+      push('cpuThread:$i', cores[i]);
+    }
     push('ram', v.ramPercent);
     push('cpuTemp', v.cpuTempC);
     push('gpu', gpu?.busy);

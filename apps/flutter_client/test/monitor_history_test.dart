@@ -74,6 +74,29 @@ void main() {
       expect(h['cpu'], [10, 20]);
     });
 
+    test(
+      'logical CPU samples keep their host time and index across missing reports',
+      () {
+        Vitals cpuAt(int time, List<double> threads) => Vitals({
+          'timestamp': time,
+          'cpu': {'perCore': threads},
+        });
+        final h = MonitorHistory()
+            .add(cpuAt(t0, [15, 80]))
+            .add(cpuAt(t0 + 2000, []))
+            .add(cpuAt(t0 + 24000, [92, 6]))
+            .add(cpuAt(t0 + 24000, [0, 0]));
+        expect(h.samples('cpuThread:0'), [
+          const Sample(t0, 15),
+          const Sample(t0 + 24000, 92),
+        ]);
+        expect(h.samples('cpuThread:1'), [
+          const Sample(t0, 80),
+          const Sample(t0 + 24000, 6),
+        ]);
+        expect(nearestReading(h.samples('cpuThread:0'), t0 + 12000), isNull);
+      },
+    );
     test('keeps about six minutes, by time not count', () {
       var h = MonitorHistory();
       for (var i = 0; i <= 400; i++) {

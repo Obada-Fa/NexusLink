@@ -16,6 +16,7 @@ import '../theme/nexus_theme.dart';
 import '../widgets/history_chart.dart';
 import '../workspace/metrics.dart';
 import 'pc_ui.dart';
+import 'cpu_activity.dart';
 import 'system_monitor.dart';
 
 // ---------------------------------------------------------------------------
@@ -170,21 +171,6 @@ class DesktopReadings extends ConsumerWidget {
     void open(MonitorFocus f) => openSystemMonitor(context, f);
     final rows = <_Reading>[
       _Reading(
-        label: 'CPU',
-        cells: [
-          (fmtLoad(v.cpu), NX.text),
-          (fmtCelsius(v.cpuTempC), _warnIf((v.cpuTempC ?? 0) >= 88)),
-          (fmtClock(v.cpuMHz), NX.text),
-        ],
-        history: h.samples('cpu'),
-        historyMax: 100,
-        semantics:
-            'CPU ${v.cpu.round()} percent, '
-            '${v.cpuTempC == null ? 'temperature not reported' : '${v.cpuTempC!.round()} degrees'}, '
-            '${fmtClock(v.cpuMHz)}',
-        onTap: () => open(MonitorFocus.cpu),
-      ),
-      _Reading(
         label: 'GPU',
         cells: gpu == null
             ? const [('—', NX.textDim), ('not reported', NX.textDim)]
@@ -243,16 +229,122 @@ class DesktopReadings extends ConsumerWidget {
         onTap: () => open(MonitorFocus.io),
       ),
     ];
-    return _ReadingsTable(
-      live: live,
-      rows: rows,
-      dividerAfter: 3,
-      footnote: v.diskLow
-          ? 'Drive under 10 % free. Tap Disk for details.'
-          : null,
-      footnoteWarn: v.diskLow,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        CpuActivity(
+          vitals: v,
+          history: h,
+          live: live,
+          onOpen: () => open(MonitorFocus.cpu),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: NX.pad),
+          child: LayoutBuilder(
+            builder: (context, box) {
+              final wide =
+                  box.maxWidth >=
+                  270 * MediaQuery.textScalerOf(context).scale(1);
+              final tiles = [
+                _MetricTile(reading: rows[0], color: const Color(0xffb4a0ec)),
+                _MetricTile(reading: rows[1], color: const Color(0xff86d8be)),
+              ];
+              return wide
+                  ? Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(child: tiles[0]),
+                        const SizedBox(width: 10),
+                        Expanded(child: tiles[1]),
+                      ],
+                    )
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [tiles[0], const SizedBox(height: 6), tiles[1]],
+                    );
+            },
+          ),
+        ),
+        _ReadingsTable(
+          live: live,
+          rows: rows.skip(2).toList(),
+          footnote: v.diskLow
+              ? 'Drive under 10 % free. Tap Disk for details.'
+              : null,
+          footnoteWarn: v.diskLow,
+        ),
+      ],
     );
   }
+}
+
+class _MetricTile extends StatelessWidget {
+  const _MetricTile({required this.reading, required this.color});
+  final _Reading reading;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: reading.semantics,
+    button: true,
+    excludeSemantics: true,
+    child: Material(
+      color: NX.surface,
+      borderRadius: BorderRadius.circular(12),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: reading.onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Wrap(
+                alignment: WrapAlignment.spaceBetween,
+                spacing: 8,
+                children: [
+                  Text(
+                    reading.label,
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  Text(
+                    reading.cells.first.$1,
+                    style: TextStyle(
+                      color: color,
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: NX.tabular,
+                    ),
+                  ),
+                ],
+              ),
+              TimeChart(
+                samples: reading.history,
+                max: 100,
+                color: color,
+                axis: false,
+                fill: true,
+                height: 24,
+              ),
+              Wrap(
+                spacing: 8,
+                children: [
+                  for (final cell in reading.cells.skip(1))
+                    Text(
+                      cell.$1,
+                      style: TextStyle(
+                        color: cell.$2 == NX.text ? NX.textDim : cell.$2,
+                        fontSize: 12,
+                        fontFeatures: NX.tabular,
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
 /// Readings from the older perf-update push, for hosts without monitor.v1.
@@ -308,13 +400,11 @@ class _ReadingsTable extends StatelessWidget {
   const _ReadingsTable({
     required this.rows,
     required this.live,
-    this.dividerAfter,
     this.footnote,
     this.footnoteWarn = false,
   });
   final List<_Reading> rows;
   final bool live;
-  final int? dividerAfter;
   final String? footnote;
   final bool footnoteWarn;
 
@@ -330,11 +420,8 @@ class _ReadingsTable extends StatelessWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            for (var i = 0; i < rows.length; i++) ...[
-              _ReadingRow(reading: rows[i], wide: wide, live: live),
-              if (dividerAfter == i + 1)
-                const Divider(height: 1, thickness: 1, color: NX.line),
-            ],
+            for (final row in rows)
+              _ReadingRow(reading: row, wide: wide, live: live),
             if (footnote != null)
               Padding(
                 padding: const EdgeInsets.fromLTRB(NX.pad, 6, NX.pad, 0),

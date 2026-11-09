@@ -1,3 +1,13 @@
+## NexusLink Test 1.0.48+54
+
+Open **Home → Desktop** for a live chart of your PC’s logical CPUs. Each thread has a color. The white trace shows total CPU load.
+
+- Tap **CPU activity** for the processor model, a larger chart and a grid of logical CPUs. Each tile shows its number, percentage and history. Tap a tile to highlight its thread. Hold and drag the main chart to inspect a moment across the grid.
+- Tap the thread count to expand the grid directly on Desktop. GPU and Memory have their own panels. **Open desktop** and **View only** sit above Favourites.
+- Existing Linux hosts already send per-thread readings. History builds as you monitor your PC. Hosts that supply aggregate CPU data show the total.
+
+[See the phone previews](https://github.com/Obada-Fa/NexusLink/blob/test-v1.0.48%2B54/docs/chart-design/README.md).
+
 ## NexusLink Test 1.0.47+53
 
 Open **Home → Desktop**, then tap **CPU**, **GPU**, **Memory**, **Network**, or **Disk**.

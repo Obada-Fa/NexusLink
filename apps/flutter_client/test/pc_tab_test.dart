@@ -598,6 +598,43 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets(
+    'thread grid on Desktop and CPU details selects and clears a logical CPU',
+    (tester) async {
+      await pumpPcTab(tester, FakeMonitor());
+      expect(find.byKey(const ValueKey('cpu-thread-0')), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('toggle-cpu-threads')));
+      await settle(tester);
+      await tester.tap(find.byKey(const ValueKey('cpu-thread-7')));
+      await settle(tester);
+      expect(
+        find.bySemanticsLabel(
+          RegExp('CPU load history, CPU 7, current 91 percent'),
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const ValueKey('cpu-thread-7')));
+      await settle(tester);
+      expect(
+        find.bySemanticsLabel(RegExp('CPU load history, Total,')),
+        findsOneWidget,
+      );
+      await tester.tap(find.bySemanticsLabel(RegExp('^CPU 42 percent,')));
+      await settle(tester);
+      expect(find.byKey(const ValueKey('cpu-thread-0')), findsOneWidget);
+      expect(find.byKey(const ValueKey('cpu-thread-15')), findsOneWidget);
+      await tester.ensureVisible(find.byKey(const ValueKey('cpu-thread-15')));
+      await tester.tap(find.byKey(const ValueKey('cpu-thread-15')));
+      await settle(tester);
+      expect(
+        find.bySemanticsLabel(
+          RegExp('CPU load history, CPU 15, current 95 percent'),
+        ),
+        findsOneWidget,
+      );
+    },
+  );
+
   testWidgets('from a CPU spike to the busiest process, inspected and ended '
       'behind the existing confirmation', (tester) async {
     final client = RpcClient('ws://127.0.0.1:1/rpc')

@@ -244,26 +244,6 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
         padding: const EdgeInsets.only(top: 4, bottom: 24),
         children: [
           monitor ? const DesktopReadings() : const LegacyDesktopReadings(),
-          _header(
-            'Favourites',
-            action: TextButton(
-              onPressed: () => setState(() => _tab = appsTab),
-              child: const Text('All apps'),
-            ),
-          ),
-          if (favourites.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: NX.pad),
-              child: Text(
-                'In Apps, open an app’s menu and add it to favourites.',
-                style: TextStyle(color: NX.textDim, fontSize: 13),
-              ),
-            )
-          else
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: NX.pad - 4),
-              child: _grid(favourites, apps),
-            ),
           const SizedBox(height: 12),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: NX.pad),
@@ -291,6 +271,26 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
               ],
             ),
           ),
+          _header(
+            'Favourites',
+            action: TextButton(
+              onPressed: () => setState(() => _tab = appsTab),
+              child: const Text('All apps'),
+            ),
+          ),
+          if (favourites.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: NX.pad),
+              child: Text(
+                'In Apps, open an app’s menu and add it to favourites.',
+                style: TextStyle(color: NX.textDim, fontSize: 13),
+              ),
+            )
+          else
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: NX.pad - 4),
+              child: _grid(favourites, apps),
+            ),
           _header(
             'Open apps',
             action: running.count > resumeLimit

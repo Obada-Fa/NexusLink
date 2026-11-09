@@ -160,6 +160,11 @@ class ChartInspection extends StatefulWidget {
   const ChartInspection({super.key, required this.child});
   final Widget child;
 
+  static int? timeOf(BuildContext context) => context
+      .dependOnInheritedWidgetOfExactType<_InspectionScope>()
+      ?.notifier
+      ?.value;
+
   @override
   State<ChartInspection> createState() => _ChartInspectionState();
 }
@@ -215,6 +220,7 @@ class TimeChart extends StatelessWidget {
     this.gutter,
     this.axis = true,
     this.timeLabels = false,
+    this.backgroundTraces = const [],
     this.markPeak = false,
   });
   final List<Sample> samples;
@@ -251,13 +257,16 @@ class TimeChart extends StatelessWidget {
   /// Elapsed-time labels under the plot ("5 min … now").
   final bool timeLabels;
 
+  final List<(List<Sample>, Color)> backgroundTraces;
   final bool markPeak;
 
   @override
   Widget build(BuildContext context) {
-    final cursor = context
-        .dependOnInheritedWidgetOfExactType<_InspectionScope>()
-        ?.notifier;
+    final cursor = axis
+        ? context
+              .dependOnInheritedWidgetOfExactType<_InspectionScope>()
+              ?.notifier
+        : null;
     final last = end ?? latestTime([samples, ?secondary]);
     final painter = TimeChartPainter(
       samples: samples,
@@ -275,6 +284,7 @@ class TimeChart extends StatelessWidget {
       timeLabels: timeLabels,
       labelSize: chartLabelSize(context),
       markPeak: markPeak,
+      backgroundTraces: backgroundTraces,
       cursor: cursor?.value,
     );
     final chart = SizedBox(
@@ -321,6 +331,7 @@ class TimeChartPainter extends CustomPainter {
     required this.axis,
     required this.timeLabels,
     required this.labelSize,
+    this.backgroundTraces = const [],
     this.markPeak = false,
     this.cursor,
   });
@@ -338,6 +349,7 @@ class TimeChartPainter extends CustomPainter {
   final bool axis;
   final bool timeLabels;
   final double labelSize;
+  final List<(List<Sample>, Color)> backgroundTraces;
   final bool markPeak;
   final int? cursor;
 
@@ -469,6 +481,26 @@ class TimeChartPainter extends CustomPainter {
       ..strokeJoin = StrokeJoin.round
       ..strokeCap = StrokeCap.round;
 
+    if (backgroundTraces.isNotEmpty) {
+      for (var i = 1; i < 5; i++) {
+        final xx = right * i / 5;
+        canvas.drawLine(Offset(xx, top), Offset(xx, bottom), grid);
+      }
+      for (final (samples, ink) in backgroundTraces) {
+        for (final points in runs(inWindow(samples, window, end: last))) {
+          if (points.length == 1) {
+            canvas.drawCircle(points.first, 1.7, Paint()..color = ink);
+          } else {
+            canvas.drawPath(
+              _path(points),
+              stroke
+                ..color = ink
+                ..strokeWidth = 1.35,
+            );
+          }
+        }
+      }
+    }
     if (second.isNotEmpty) {
       for (final run in runs(second)) {
         if (run.length < 2) continue;

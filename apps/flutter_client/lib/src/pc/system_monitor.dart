@@ -17,6 +17,7 @@ import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
 import '../theme/nx_widgets.dart';
 import '../widgets/history_chart.dart';
+import 'cpu_activity.dart';
 import 'desktop_overview.dart' show DesktopStatusLine;
 import 'pc_sections.dart';
 import 'pc_ui.dart';
@@ -103,7 +104,12 @@ class _MonitorPage extends ConsumerWidget {
             ),
           ]
         : switch (focus) {
-            MonitorFocus.cpu => _cpu(context, snapshot.vitals, h),
+            MonitorFocus.cpu => _cpu(
+              context,
+              snapshot.vitals,
+              h,
+              ref.watch(connectionStatusProvider) == RpcStatus.connected,
+            ),
             MonitorFocus.gpu => _gpu(context, snapshot.vitals, h),
             MonitorFocus.memory => _memory(context, snapshot.vitals, h),
             MonitorFocus.io => _io(context, snapshot.vitals, h),
@@ -121,34 +127,17 @@ class _MonitorPage extends ConsumerWidget {
 // ---------------------------------------------------------------------------
 // CPU
 
-List<Widget> _cpu(BuildContext context, Vitals v, MonitorHistory h) {
+List<Widget> _cpu(BuildContext context, Vitals v, MonitorHistory h, bool live) {
   final load = h.samples('cpu');
   final temp = h.samples('cpuTemp');
   final end = latestTime([load, temp]);
   final gutter = chartGutter(context, base: 38);
-  final threads = v.perCore;
   return [
-    _Headline(
-      title: shortCpuModel(v.cpuModel),
-      subtitle: [
-        if (v.cores > 0) '${v.cores} threads',
-        if (v.cpuMHz > 0) fmtGHz(v.cpuMHz),
-      ].join(' · '),
-      value: fmtPct(v.cpu),
-      semantics: 'CPU load ${v.cpu.round()} percent',
-    ),
-    _PrimaryPlot(
-      key: const ValueKey('cpu-load-chart'),
-      samples: load,
-      end: end,
-      gutter: gutter,
-      unit: '%',
-      what: 'CPU load',
-      timeLabels: temp.isEmpty && v.cpuTempC == null,
-    ),
+    CpuActivity(vitals: v, history: h, live: live),
     if (temp.isNotEmpty || v.cpuTempC != null)
       _AlignedPlot(
         key: const ValueKey('cpu-temp-chart'),
+        window: cpuHistoryWindow(h),
         title: 'Temperature',
         reading: fmtTemp(v.cpuTempC),
         readingColor: (v.cpuTempC ?? 0) >= 88 ? NX.waiting : NX.text,
@@ -166,7 +155,6 @@ List<Widget> _cpu(BuildContext context, Vitals v, MonitorHistory h) {
       alignment: Alignment.centerLeft,
       child: _ProcessesButton(sort: ProcessSort.cpu),
     ),
-    if (threads.isNotEmpty) _Threads(threads),
     _StatGrid([
       PcStat(label: 'CLOCK', value: fmtGHz(v.cpuMHz)),
       PcStat(
@@ -179,71 +167,6 @@ List<Widget> _cpu(BuildContext context, Vitals v, MonitorHistory h) {
       PcStat(label: 'UPTIME', value: formatUptime(v.uptimeSeconds)),
     ]),
   ];
-}
-
-/// Per-thread load: muted bars with the busiest one highlighted.
-class _Threads extends StatelessWidget {
-  const _Threads(this.values);
-  final List<double> values;
-
-  @override
-  Widget build(BuildContext context) {
-    var busiest = 0;
-    for (var i = 1; i < values.length; i++) {
-      if (values[i] > values[busiest]) busiest = i;
-    }
-    return _Section(
-      title: 'Threads',
-      trailing: 'busiest #${busiest + 1} · ${fmtPct(values[busiest])}',
-      child: Semantics(
-        label:
-            '${values.length} CPU threads, busiest is thread ${busiest + 1} '
-            'at ${values[busiest].round()} percent',
-        excludeSemantics: true,
-        child: CustomPaint(
-          size: const Size(double.infinity, 48),
-          painter: ThreadBarsPainter(values, busiest),
-        ),
-      ),
-    );
-  }
-}
-
-@visibleForTesting
-class ThreadBarsPainter extends CustomPainter {
-  ThreadBarsPainter(this.values, this.busiest);
-  final List<double> values;
-  final int busiest;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (values.isEmpty) return;
-    const gap = 3.0;
-    final w = (size.width - gap * (values.length - 1)) / values.length;
-    final track = Paint()..color = NX.line.withValues(alpha: .45);
-    final muted = Paint()..color = NX.textFaint.withValues(alpha: .65);
-    final hot = Paint()..color = NX.accent;
-    for (var i = 0; i < values.length; i++) {
-      final x = i * (w + gap);
-      final r = Rect.fromLTWH(x, 0, w, size.height);
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(r, const Radius.circular(2)),
-        track,
-      );
-      final bh = math.max(2.0, (values[i] / 100).clamp(0.0, 1.0) * size.height);
-      canvas.drawRRect(
-        RRect.fromRectAndRadius(
-          Rect.fromLTWH(x, size.height - bh, w, bh),
-          const Radius.circular(2),
-        ),
-        i == busiest ? hot : muted,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(ThreadBarsPainter old) =>
-      old.values != values || old.busiest != busiest;
 }
 
 // ---------------------------------------------------------------------------
@@ -902,6 +825,7 @@ class _AlignedPlot extends StatelessWidget {
     this.max,
     this.fromZero = true,
     this.timeLabels = false,
+    this.window = _window,
     this.format,
   });
   final String Function(double)? format;
@@ -917,10 +841,11 @@ class _AlignedPlot extends StatelessWidget {
   final double? max;
   final bool fromZero;
   final bool timeLabels;
+  final Duration window;
 
   @override
   Widget build(BuildContext context) {
-    final s = statsOf(samples, _window, end: end);
+    final s = statsOf(samples, window, end: end);
     return Padding(
       padding: const EdgeInsets.only(top: 10, bottom: 4),
       child: Semantics(
@@ -976,6 +901,7 @@ class _AlignedPlot extends StatelessWidget {
             else
               TimeChart(
                 samples: samples,
+                window: window,
                 end: end,
                 max: max,
                 fromZero: fromZero,
