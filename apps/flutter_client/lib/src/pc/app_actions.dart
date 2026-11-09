@@ -102,12 +102,17 @@ void resumeItem(BuildContext context, OpenItem item, List<AppInfo> apps) =>
 
 /// The one tap behaviour: closed → launch; one window → resume it; several
 /// → choose by title; an agent app with nothing to show → its info.
+bool _samePc(WidgetRef ref, RpcClient? client) =>
+    identical(ref.read(activeClientProvider), client) &&
+    (client == null || ref.read(connectionStatusProvider) == RpcStatus.connected);
+
 Future<void> openEntry(
   BuildContext context,
   WidgetRef ref,
   AppEntry entry,
   List<AppInfo> apps,
 ) async {
+  final client = ref.read(activeClientProvider);
   final app = entry.app;
   if (app != null) unawaitedRecord(ref, app.appId);
   switch (openActionFor(entry)) {
@@ -115,7 +120,9 @@ Future<void> openEntry(
       resumeItem(context, item, apps);
     case ChooseItem(:final items):
       final picked = await chooseOpenItem(context, entry, items);
-      if (picked != null && context.mounted) resumeItem(context, picked, apps);
+      if (picked != null && context.mounted && _samePc(ref, client)) {
+        resumeItem(context, picked, apps);
+      }
     case ShowInfo():
       await openAppInfo(context, entry.key);
     case LaunchApp():
@@ -290,6 +297,7 @@ Future<void> runAgentCommand(
   AgentApp app,
   AppCommand c,
 ) async {
+  final client = ref.read(activeClientProvider);
   final spec = _agentSpec(app, c);
   final ok = await confirmPcAction(
     context,
@@ -299,7 +307,7 @@ Future<void> runAgentCommand(
     icon: spec.icon,
     destructive: spec.destructive,
   );
-  if (!ok || !context.mounted) return;
+  if (!ok || !context.mounted || !_samePc(ref, client)) return;
   if (appProgress.value.containsKey(app.id)) return;
   final messenger = ScaffoldMessenger.maybeOf(context);
   _setProgress(app.id, spec.progress);
@@ -328,6 +336,7 @@ Future<void> runAppCommand(
   AppEntry entry,
   AppCommand c,
 ) async {
+  final client = ref.read(activeClientProvider);
   final agent = entry.agent;
   if (agent != null) return runAgentCommand(context, ref, agent, c);
   if (c == AppCommand.restart) {
@@ -339,7 +348,7 @@ Future<void> runAppCommand(
       confirm: 'Restart',
       icon: Icons.restart_alt_rounded,
     );
-    if (!ok || !context.mounted) return;
+    if (!ok || !context.mounted || !_samePc(ref, client)) return;
   }
   final closed = await closeApp(
     context,
@@ -348,7 +357,7 @@ Future<void> runAppCommand(
     windows: entry.windows,
     sessions: entry.sessions,
   );
-  if (!closed || !context.mounted) return;
+  if (!closed || !context.mounted || !_samePc(ref, client)) return;
   final app = entry.app;
   if (c == AppCommand.restart && app != null) {
     launchApp(context, app);
@@ -438,6 +447,7 @@ Future<void> showAppMenu(
   AppEntry entry, {
   VoidCallback? onChanged,
 }) async {
+  final client = ref.read(activeClientProvider);
   final prefs = launcherPrefs(ref);
   final app = entry.app;
   final favourite = app != null && (prefs?.isFavourite(app) ?? false);
@@ -497,7 +507,7 @@ Future<void> showAppMenu(
       ),
     ),
   );
-  if (choice == null || !context.mounted) return;
+  if (choice == null || !context.mounted || !_samePc(ref, client)) return;
   switch (choice) {
     case 'favourite':
       try {

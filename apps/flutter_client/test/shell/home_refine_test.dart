@@ -77,18 +77,18 @@ void main() {
   });
 
   group('groupTiles', () {
-    test('Workspace (Agents, Terminal, Files) before PC tools', () {
+    test('PC tools before Workspace', () {
       final tiles = [
         for (final m in moduleRegistry) HomeTile(m, TileStatus.ready),
       ];
       final groups = groupTiles(tiles);
-      expect(groups.map((g) => g.$1), [ToolGroup.workspace, ToolGroup.pcTools]);
-      expect(groups[0].$2.map((t) => t.module.id), [
+      expect(groups.map((g) => g.$1), [ToolGroup.pcTools, ToolGroup.workspace]);
+      expect(groups[1].$2.map((t) => t.module.id), [
         'agents',
         'terminal',
         'files',
       ]);
-      expect(groups[1].$2.map((t) => t.module.id), [
+      expect(groups[0].$2.map((t) => t.module.id), [
         'desktop',
         'remote',
         'audio',
@@ -293,6 +293,37 @@ void main() {
       continueLabel(LastDestination('agents', at), project: 'NexusLink'),
       'NexusLink',
     );
+  });
+
+  testWidgets('an Audio-only PC has a reachable shortcut at double text size', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(tester.view.reset);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    SharedPreferences.setMockInitialValues({});
+    final target = hubTarget(utilities: {UtilityIds.audio});
+    await TargetStore.save([target]);
+    await TargetStore.setCurrent(target.id);
+    await _pumpHome(tester);
+    final audio = find.byKey(const ValueKey('tile-audio'));
+    await tester.scrollUntilVisible(
+      audio,
+      180,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.pumpAndSettle();
+    expect(
+      audio.hitTestable(),
+      findsOneWidget,
+      reason: 'shortcut at ${tester.getRect(audio)}',
+    );
+    expect(find.byKey(const ValueKey('tile-desktop')), findsNothing);
+    expect(find.byKey(const ValueKey('home-dock')), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets('Continue names the chat you were in', (tester) async {

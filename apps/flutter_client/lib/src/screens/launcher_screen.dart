@@ -162,14 +162,22 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
         active: visible && monitor && _tab != appsTab,
         child: ValueListenableBuilder<Map<String, String>>(
           valueListenable: appProgress,
-          builder: (context, progress, _) => IndexedStack(
-            index: _tab,
-            children: [
-              _desktop(monitor, drawer, running, apps, preferences, progress),
-              _apps(drawer, apps, preferences, appsAsync, progress),
-              _running(running, apps, progress),
-            ],
-          ),
+          builder: (context, progress, _) {
+            Widget content() => IndexedStack(
+              index: _tab,
+              children: [
+                _desktop(monitor, drawer, running, apps, preferences, progress),
+                _apps(drawer, apps, preferences, appsAsync, progress),
+                _running(running, apps, progress),
+              ],
+            );
+            return preferences == null
+                ? content()
+                : ListenableBuilder(
+                    listenable: preferences,
+                    builder: (_, _) => content(),
+                  );
+          },
         ),
       ),
       bottomNavigationBar: DecoratedBox(

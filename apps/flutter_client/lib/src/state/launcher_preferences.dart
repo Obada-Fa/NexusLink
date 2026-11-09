@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -12,7 +13,7 @@ final launcherPreferencesProvider =
     });
 
 /// Favourites and mobile launch frequency are kept separately for each PC.
-class LauncherPreferences {
+class LauncherPreferences extends ChangeNotifier {
   LauncherPreferences(this._prefs, String host)
     : _key = 'nexuslink-launcher:$host' {
     final raw = _prefs.getString(_key);
@@ -79,6 +80,8 @@ class LauncherPreferences {
       });
 
   Future<void> toggleFavourite(AppInfo app) async {
+    final wasExplicit = favourites.contains(app.appId);
+    final wasRemoved = removedDefaults.contains(app.appId);
     if (isFavourite(app)) {
       favourites.remove(app.appId);
       removedDefaults.add(app.appId);
@@ -86,7 +89,22 @@ class LauncherPreferences {
       favourites.add(app.appId);
       removedDefaults.remove(app.appId);
     }
-    await _save();
+    try {
+      await _save();
+      notifyListeners();
+    } catch (_) {
+      if (wasExplicit) {
+        favourites.add(app.appId);
+      } else {
+        favourites.remove(app.appId);
+      }
+      if (wasRemoved) {
+        removedDefaults.add(app.appId);
+      } else {
+        removedDefaults.remove(app.appId);
+      }
+      rethrow;
+    }
   }
 
   Future<void> recordUse(String appId) async {

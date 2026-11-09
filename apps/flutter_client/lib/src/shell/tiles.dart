@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 
 import '../session/target.dart';
 import '../theme/nexus_theme.dart';
-import '../theme/nx_widgets.dart';
+import 'home_art.dart';
 import 'module.dart';
 import 'module_extras.dart';
 import 'module_registry.dart';
@@ -60,12 +60,7 @@ List<HomeTile> homeTiles(
 ];
 
 /// Home groups tools by what they're for (refine plan §1).
-enum ToolGroup { workspace, pcTools }
-
-String toolGroupTitle(ToolGroup g) => switch (g) {
-  ToolGroup.workspace => 'Workspace',
-  ToolGroup.pcTools => 'PC tools',
-};
+enum ToolGroup { pcTools, workspace }
 
 /// Fixed order inside each group so positions stay put across PCs.
 const toolGroupOrder = <ToolGroup, List<String>>{
@@ -105,50 +100,22 @@ List<(ToolGroup, List<HomeTile>)> groupTiles(List<HomeTile> tiles) {
   return result;
 }
 
-/// Lays tiles out two per row with equal heights, or one per row when the
-/// screen is narrow or the text is large. Tiles grow to fit their text.
+/// Each group gets a row on a phone. Wider labels wrap into fewer columns.
 class ToolGrid extends StatelessWidget {
   const ToolGrid({super.key, required this.children});
   final List<Widget> children;
 
-  /// One column below this width per tile (logical px, after text scaling).
-  static const minTileWidth = 168.0;
-
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
-      final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
-      final perTile = (constraints.maxWidth - NX.gap) / 2;
-      final columns = scale > 1.3 || perTile < minTileWidth ? 1 : 2;
-      final rows = <Widget>[];
-      for (var i = 0; i < children.length; i += columns) {
-        final row = children.sublist(
-          i,
-          (i + columns).clamp(0, children.length),
-        );
-        rows.add(
-          Padding(
-            padding: EdgeInsets.only(top: i == 0 ? 0 : NX.gap),
-            child: columns == 1
-                ? row.single
-                : IntrinsicHeight(
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        Expanded(child: row[0]),
-                        const SizedBox(width: NX.gap),
-                        Expanded(
-                          child: row.length > 1 ? row[1] : const SizedBox(),
-                        ),
-                      ],
-                    ),
-                  ),
-          ),
-        );
-      }
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: rows,
+      final minimum = MediaQuery.textScalerOf(context).scale(84);
+      final columns = (constraints.maxWidth / minimum).floor().clamp(1, 3);
+      return Wrap(
+        runSpacing: 4,
+        children: [
+          for (final child in children)
+            SizedBox(width: constraints.maxWidth / columns, child: child),
+        ],
       );
     },
   );
@@ -182,19 +149,7 @@ class ModuleTile extends StatelessWidget {
 
   Widget _build(BuildContext context, String? blocked) {
     final module = tile.module;
-    final accent = moduleAccent(module);
-    final status = blocked != null ? TileStatus.offline : tile.status;
-    final offline = status == TileStatus.offline;
-    final subtitle = moduleSubtitle(module);
-    final extra = blocked != null
-        ? Text(
-            blocked,
-            key: ValueKey('tile-blocked-${module.id}'),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: NX.waiting, fontSize: 12),
-          )
-        : module.buildTileExtra(context, ctx);
+    final status = blocked == null ? tile.status : TileStatus.offline;
     final statusLabel = switch (status) {
       TileStatus.ready => 'Ready',
       TileStatus.checking => checkingLabel,
@@ -202,104 +157,47 @@ class ModuleTile extends StatelessWidget {
     };
     return Semantics(
       button: true,
-      label: blocked == null
-          ? '${module.title}, $statusLabel'
-          : '${module.title}, $statusLabel: $blocked',
+      label: [module.title, statusLabel, ?blocked].join(', '),
       excludeSemantics: true,
-      child: AnimatedOpacity(
-        duration: const Duration(milliseconds: 220),
-        opacity: offline ? .5 : 1,
-        child: NxCard(
-          key: ValueKey('tile-${module.id}'),
-          accent: offline ? null : accent.withValues(alpha: .7),
-          color: offline ? NX.surface : NX.surface2,
-          padding: const EdgeInsets.fromLTRB(16, 16, 14, 14),
-          onTap: onTap,
+      child: InkWell(
+        key: ValueKey('tile-${module.id}'),
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 8),
           child: Column(
             mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _IconBadge(icon: module.icon, color: accent, muted: offline),
-                  const Spacer(),
-                  switch (status) {
-                    TileStatus.ready => Icon(
-                      Icons.arrow_outward_rounded,
-                      size: 18,
-                      color: accent.withValues(alpha: .8),
-                    ),
-                    TileStatus.checking => NxPill(
-                      checkingLabel,
-                      color: NX.waiting,
-                      live: true,
-                      dense: true,
-                    ),
-                    TileStatus.offline => const NxPill(
-                      'Offline',
-                      color: NX.idle,
-                      icon: Icons.cloud_off_rounded,
-                      dense: true,
-                    ),
-                  },
-                ],
+              AnimatedOpacity(
+                duration: const Duration(milliseconds: 160),
+                opacity: status == TileStatus.offline ? .5 : 1,
+                child: toolGroupOrder[toolGroupOf(module)]!.contains(module.id)
+                    ? HomeShortcutArt(moduleId: module.id, size: 54)
+                    : Icon(module.icon, size: 54),
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 5),
               Text(
                 module.title,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
                 style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -.2,
+                  color: Color(0xfff8f3e8),
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
-              if (subtitle.isNotEmpty) ...[
-                const SizedBox(height: 3),
+              if (status != TileStatus.ready)
                 Text(
-                  subtitle,
-                  maxLines: 3,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: NX.textDim, fontSize: 12.5),
+                  statusLabel,
+                  key: blocked == null
+                      ? null
+                      : ValueKey('tile-blocked-${module.id}'),
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: NX.textDim, fontSize: 12),
                 ),
-              ],
-              if (extra != null) ...[const SizedBox(height: 8), extra],
             ],
           ),
         ),
       ),
-    );
-  }
-}
-
-class _IconBadge extends StatelessWidget {
-  const _IconBadge({
-    required this.icon,
-    required this.color,
-    this.muted = false,
-  });
-  final IconData icon;
-  final Color color;
-  final bool muted;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = muted ? NX.idle : color;
-    return Container(
-      width: 46,
-      height: 46,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(NX.radiusSm),
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [c.withValues(alpha: .32), c.withValues(alpha: .12)],
-        ),
-        border: Border.all(color: c.withValues(alpha: .4)),
-      ),
-      child: Icon(icon, color: muted ? NX.textDim : c, size: 24),
     );
   }
 }

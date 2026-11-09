@@ -318,6 +318,7 @@ abstract final class AudioRuntime {
       for (final s in v.onStreams)
         LiveActivity(
           moduleId: 'audio',
+          activityId: s.wire,
           label: switch (v[s].phase) {
             StreamPhase.retrying =>
               '${liveActivityLabel(s, v.pcName)} · reconnecting',

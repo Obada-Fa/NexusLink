@@ -20,6 +20,10 @@ import '../workspace/project.dart';
 import 'auto_connect.dart';
 import 'capabilities.dart';
 import 'device_picker.dart';
+import '../modules/remote/remote_module.dart';
+import 'home_art.dart';
+import 'home_dock.dart';
+import 'home_media.dart';
 import 'live_bar.dart';
 import 'module.dart';
 import 'module_extras.dart';
@@ -79,7 +83,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _foreground = state == AppLifecycleState.resumed;
+    final foreground = state == AppLifecycleState.resumed;
+    if (_foreground == foreground) return;
+    setState(() => _foreground = foreground);
     if (_foreground) ref.read(shellProvider.notifier).probe();
   }
 
@@ -473,6 +479,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     final target = shell.current;
     if (target == null) return const DevicePickerScreen(isRoot: true);
     return _HomeView(
+      visible: _foreground && (ModalRoute.isCurrentOf(context) ?? true),
       target: target,
       onOpenPicker: () => _openPicker(),
       onDeviceSettings: () => _openDeviceSettings(target),
@@ -505,7 +512,9 @@ class _ModuleRoute extends ConsumerWidget {
 }
 
 class _HomeView extends ConsumerWidget {
+  final bool visible;
   const _HomeView({
+    required this.visible,
     required this.target,
     required this.onOpenPicker,
     required this.onDeviceSettings,
@@ -540,7 +549,7 @@ class _HomeView extends ConsumerWidget {
       nexusLinkConnecting: connecting,
       probedOnce: shell.probedOnce,
     );
-    final visible = [for (final t in tiles) t.module];
+    final availableModules = [for (final t in tiles) t.module];
     final url = nexusLinkUrlOf(target);
     final nexusConnected =
         url != null &&
@@ -589,252 +598,240 @@ class _HomeView extends ConsumerWidget {
     final project = nexusConnected ? ref.watch(projectProvider) : null;
     unawaited(ref.read(lastDestinationsProvider.notifier).load(target.id));
 
-    return Scaffold(
-      body: SafeArea(
-        bottom: false,
-        child: RefreshIndicator(
-          onRefresh: () => ref.read(shellProvider.notifier).probe(force: true),
-          child: CustomScrollView(
-            physics: const AlwaysScrollableScrollPhysics(),
-            slivers: [
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(NX.pad, 10, 4, 0),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: _PcSelector(
-                          target: target,
-                          status: status,
-                          onTap: onOpenPicker,
-                        ),
-                      ),
-                      IconButton(
-                        key: const ValueKey('device-settings'),
-                        tooltip: 'Device settings',
-                        onPressed: onDeviceSettings,
-                        icon: const Icon(Icons.tune_rounded, color: NX.textDim),
-                      ),
-                    ],
+    final tools = RefreshIndicator(
+      onRefresh: () => ref.read(shellProvider.notifier).probe(force: true),
+      child: CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: [
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(NX.pad, 10, 4, 0),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: _PcSelector(
+                      target: target,
+                      status: status,
+                      onTap: onOpenPicker,
+                    ),
                   ),
-                ),
+                  IconButton(
+                    key: const ValueKey('device-settings'),
+                    tooltip: 'Device settings',
+                    onPressed: onDeviceSettings,
+                    icon: const Icon(Icons.tune_rounded, color: NX.textDim),
+                  ),
+                ],
               ),
-              if (pairAgain)
-                SliverToBoxAdapter(
-                  child: _Banner(
-                    key: const ValueKey('pair-again-banner'),
-                    color: NX.waiting,
-                    icon: Icons.link_off,
-                    text: pairAgainText(target, shell.pairAgainUtilities),
-                    actions: [
-                      if (!shell.pairAgainUtilities.contains(
-                        UtilityIds.nexuslink,
-                      ))
-                        TextButton(
-                          onPressed: () => ref
-                              .read(shellProvider.notifier)
-                              .dismissPairAgain(),
-                          child: const Text('Later'),
-                        ),
-                      TextButton(
-                        onPressed: onScanAgain,
-                        child: const Text('Scan QR'),
-                      ),
-                      if (shell.pairAgainUtilities.contains(
-                            UtilityIds.nexuslink,
-                          ) ||
-                          shell.pairAgainUtilities.isEmpty)
-                        TextButton(
-                          onPressed: onPairAgain,
-                          child: const Text('Type code'),
-                        ),
-                    ],
+            ),
+          ),
+          if (pairAgain)
+            SliverToBoxAdapter(
+              child: _Banner(
+                key: const ValueKey('pair-again-banner'),
+                color: NX.waiting,
+                icon: Icons.link_off,
+                text: pairAgainText(target, shell.pairAgainUtilities),
+                actions: [
+                  if (!shell.pairAgainUtilities.contains(UtilityIds.nexuslink))
+                    TextButton(
+                      onPressed: () =>
+                          ref.read(shellProvider.notifier).dismissPairAgain(),
+                      child: const Text('Later'),
+                    ),
+                  TextButton(
+                    onPressed: onScanAgain,
+                    child: const Text('Scan QR'),
                   ),
-                ),
-              if (wakeHere?.error != null)
-                SliverToBoxAdapter(
-                  child: _Banner(
-                    color: NX.failed,
-                    icon: Icons.power_off_outlined,
-                    text: wakeHere!.error!,
-                    actions: [
-                      TextButton(
-                        onPressed: () =>
-                            ref.read(wakeFlowProvider.notifier).clearError(),
-                        child: const Text('Dismiss'),
-                      ),
-                    ],
+                  if (shell.pairAgainUtilities.contains(UtilityIds.nexuslink) ||
+                      shell.pairAgainUtilities.isEmpty)
+                    TextButton(
+                      onPressed: onPairAgain,
+                      child: const Text('Type code'),
+                    ),
+                ],
+              ),
+            ),
+          if (wakeHere?.error != null)
+            SliverToBoxAdapter(
+              child: _Banner(
+                color: NX.failed,
+                icon: Icons.power_off_outlined,
+                text: wakeHere!.error!,
+                actions: [
+                  TextButton(
+                    onPressed: () =>
+                        ref.read(wakeFlowProvider.notifier).clearError(),
+                    child: const Text('Dismiss'),
                   ),
-                ),
-              if (recovery != null)
-                SliverToBoxAdapter(
-                  child: _Banner(
-                    key: const ValueKey('recovery-banner'),
-                    color: NX.waiting,
-                    icon: recovery.allDown
-                        ? Icons.cloud_off_rounded
-                        : Icons.report_gmailerrorred_rounded,
-                    title: recovery.title,
-                    text: recovery.body,
-                    actions: [
-                      TextButton(
-                        onPressed: onReconnect,
-                        child: Text(recovery.allDown ? 'Reconnect' : 'Retry'),
-                      ),
-                      if (recovery.offerWake)
-                        TextButton(
-                          onPressed: onWake,
-                          child: const Text('Wake PC'),
+                ],
+              ),
+            ),
+          if (recovery != null)
+            SliverToBoxAdapter(
+              child: _Banner(
+                key: const ValueKey('recovery-banner'),
+                color: NX.waiting,
+                icon: recovery.allDown
+                    ? Icons.cloud_off_rounded
+                    : Icons.report_gmailerrorred_rounded,
+                title: recovery.title,
+                text: recovery.body,
+                actions: [
+                  TextButton(
+                    onPressed: onReconnect,
+                    child: Text(recovery.allDown ? 'Reconnect' : 'Retry'),
+                  ),
+                  if (recovery.offerWake)
+                    TextButton(onPressed: onWake, child: const Text('Wake PC')),
+                ],
+              ),
+            ),
+          SliverToBoxAdapter(
+            child: HomeMedia(
+              key: ValueKey(target.id),
+              targetId: target.id,
+              visible: visible,
+              onOpenMedia: RemoteRuntime.openMedia,
+            ),
+          ),
+          if (approvals.isNotEmpty || lastTile != null)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(NX.pad, 12, NX.pad, 0),
+                child: approvals.isNotEmpty
+                    ? _AttentionCard(
+                        approval: approvals.first,
+                        more: approvals.length - 1,
+                        pcName: target.name,
+                        onTap: () {
+                          ref
+                              .read(pendingTaskProvider.notifier)
+                              .select(
+                                TaskLink(
+                                  'chat:${approvals.first.chatId}',
+                                  hostUrl: url!,
+                                ),
+                              );
+                          onOpenModule('agents');
+                        },
+                      )
+                    : lastTile != null
+                    ? _ContinueCard(
+                        module: lastTile.module,
+                        at: last!.at,
+                        project: continueLabel(
+                          last,
+                          project: _usesProject(lastTile.module.id)
+                              ? project?.name
+                              : null,
                         ),
-                    ],
-                  ),
-                ),
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(NX.pad, 12, NX.pad, 0),
-                  child: approvals.isNotEmpty
-                      ? _AttentionCard(
-                          approval: approvals.first,
-                          more: approvals.length - 1,
-                          pcName: target.name,
-                          onTap: () {
+                        onTap: () {
+                          // Reopen the task, not just the tool.
+                          if (last.chatId != null &&
+                              last.moduleId == 'agents' &&
+                              url != null) {
                             ref
                                 .read(pendingTaskProvider.notifier)
                                 .select(
-                                  TaskLink(
-                                    'chat:${approvals.first.chatId}',
-                                    hostUrl: url!,
-                                  ),
+                                  TaskLink('chat:${last.chatId}', hostUrl: url),
                                 );
-                            onOpenModule('agents');
-                          },
-                        )
-                      : lastTile != null
-                      ? _ContinueCard(
-                          module: lastTile.module,
-                          at: last!.at,
-                          project: continueLabel(
-                            last,
-                            project: _usesProject(lastTile.module.id)
-                                ? project?.name
-                                : null,
-                          ),
-                          onTap: () {
-                            // Reopen the task, not just the tool.
-                            if (last.chatId != null &&
-                                last.moduleId == 'agents' &&
-                                url != null) {
-                              ref
-                                  .read(pendingTaskProvider.notifier)
-                                  .select(
-                                    TaskLink(
-                                      'chat:${last.chatId}',
-                                      hostUrl: url,
-                                    ),
-                                  );
-                            } else if (last.path != null &&
-                                last.moduleId == 'files') {
-                              ref
-                                  .read(pendingFolderProvider.notifier)
-                                  .select(last.path);
-                            }
-                            onTile(lastTile, ctx);
-                          },
-                        )
-                      : const SizedBox.shrink(),
+                          } else if (last.path != null &&
+                              last.moduleId == 'files') {
+                            ref
+                                .read(pendingFolderProvider.notifier)
+                                .select(last.path);
+                          }
+                          onTile(lastTile, ctx);
+                        },
+                      )
+                    : const SizedBox.shrink(),
+              ),
+            ),
+
+          if (tiles.isEmpty)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(NX.pad, 20, NX.pad, 0),
+                child: NxCard(
+                  child: Text(
+                    'Nothing on ${target.name} works with this phone yet. '
+                    'Scan the QR code from Nexus Utilities to pair it.',
+                    style: const TextStyle(color: NX.textDim),
+                  ),
                 ),
               ),
-              SliverToBoxAdapter(
-                child: LiveBar(modules: visible, ctx: ctx),
-              ),
-              if (tiles.isEmpty)
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(NX.pad, 20, NX.pad, 0),
-                    child: NxCard(
-                      child: Text(
-                        'Nothing on ${target.name} works with this phone yet. '
-                        'Scan the QR code from Nexus Utilities to pair it.',
-                        style: const TextStyle(color: NX.textDim),
-                      ),
-                    ),
-                  ),
-                )
-              else
-                for (final (i, (group, groupTiles)) in groupTiles(
-                  tiles,
-                ).indexed) ...[
-                  SliverToBoxAdapter(
-                    child: NxSectionHeader(
-                      toolGroupTitle(group),
-                      trailing: i == 0 && shell.probing
-                          ? const SizedBox(
-                              width: 12,
-                              height: 12,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 1.6,
-                              ),
-                            )
-                          : null,
-                    ),
-                  ),
-                  SliverPadding(
-                    padding: const EdgeInsets.symmetric(horizontal: NX.pad),
-                    sliver: SliverToBoxAdapter(
-                      child: ToolGrid(
-                        children: [
-                          for (final t in groupTiles)
-                            ModuleTile(
-                              tile: t,
-                              ctx: ctx,
-                              checkingLabel:
-                                  connecting &&
-                                      t.module
-                                          .utilitiesFor(ctx)
-                                          .contains(UtilityIds.nexuslink)
-                                  ? 'Connecting…'
-                                  : 'Checking…',
-                              onTap: () => onTile(t, ctx),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              if (missing.isNotEmpty)
-                SliverToBoxAdapter(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                      NX.pad,
-                      NX.gap,
-                      NX.pad,
-                      0,
-                    ),
-                    child: NxCard(
-                      onTap: onScanAgain,
-                      child: Row(
-                        children: [
-                          const Icon(
-                            Icons.add_circle_outline,
-                            color: NX.accent,
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              'Add ${missing.map(utilityName).join(' and ')}: '
-                              'scan the QR code from Nexus Utilities.',
-                              style: const TextStyle(color: NX.textDim),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
+            )
+          else
+            for (final (_, groupTiles) in groupTiles(tiles))
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(NX.pad, 12, NX.pad, 0),
+                sliver: SliverToBoxAdapter(
+                  child: ToolGrid(
+                    children: [
+                      for (final t in groupTiles)
+                        ModuleTile(
+                          tile: t,
+                          ctx: ctx,
+                          checkingLabel:
+                              connecting &&
+                                  t.module
+                                      .utilitiesFor(ctx)
+                                      .contains(UtilityIds.nexuslink)
+                              ? 'Connecting…'
+                              : 'Checking…',
+                          onTap: () => onTile(t, ctx),
+                        ),
+                    ],
                   ),
                 ),
-              const SliverToBoxAdapter(child: SizedBox(height: 40)),
-            ],
+              ),
+          SliverToBoxAdapter(
+            child: LiveBar(modules: availableModules, ctx: ctx),
           ),
-        ),
+          if (missing.isNotEmpty)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(NX.pad, NX.gap, NX.pad, 0),
+                child: NxCard(
+                  onTap: onScanAgain,
+                  child: Row(
+                    children: [
+                      const Icon(Icons.add_circle_outline, color: NX.accent),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          'Add ${missing.map(utilityName).join(' and ')}: '
+                          'scan the QR code from Nexus Utilities.',
+                          style: const TextStyle(color: NX.textDim),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          SliverToBoxAdapter(
+            child: SizedBox(height: 24 + MediaQuery.paddingOf(context).bottom),
+          ),
+        ],
+      ),
+    );
+    return Scaffold(
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          const HomeWallpaper(),
+          SafeArea(
+            bottom: false,
+            child: Column(
+              children: [
+                Expanded(child: tools),
+                HomeDock(target: target, visible: visible),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -968,8 +965,6 @@ class _PcSelector extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: 6),
           child: Row(
             children: [
-              TargetBadge(icon: target.icon, size: 40),
-              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -983,17 +978,17 @@ class _PcSelector extends StatelessWidget {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.w800,
+                              fontSize: 26,
+                              fontWeight: FontWeight.w700,
                               letterSpacing: -.3,
                             ),
                           ),
                         ),
                         const SizedBox(width: 2),
                         const Icon(
-                          Icons.unfold_more_rounded,
+                          Icons.keyboard_arrow_down_rounded,
                           size: 20,
-                          color: NX.textFaint,
+                          color: NX.textDim,
                         ),
                       ],
                     ),
@@ -1163,8 +1158,9 @@ class _ActionCard extends StatelessWidget {
     label: '$title. $subtitle',
     excludeSemantics: true,
     child: NxCard(
-      accent: color,
-      padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
+      flat: true,
+      color: const Color(0xff283642),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       onTap: onTap,
       child: Row(
         children: [
@@ -1244,6 +1240,7 @@ class _Banner extends StatelessWidget {
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.fromLTRB(NX.pad, 12, NX.pad, 0),
     child: NxCard(
+      flat: true,
       accent: color,
       padding: const EdgeInsets.fromLTRB(14, 12, 6, 4),
       child: Column(

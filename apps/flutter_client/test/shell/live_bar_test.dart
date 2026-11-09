@@ -83,7 +83,7 @@ void main() {
     );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('LIVE NOW · 1'), findsOneWidget);
+    expect(find.text('LIVE NOW · 1'), findsNothing);
     expect(find.text('Agent monitor'), findsOneWidget);
 
     remoteStream.add([act('remote', 'Trackpad connected')]);
@@ -103,7 +103,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     expect(stops, 1);
     expect(find.text('Agent monitor'), findsNothing);
-    expect(find.text('LIVE NOW · 1'), findsOneWidget);
+    expect(find.text('LIVE NOW · 1'), findsNothing);
 
     remoteStream.add(const []);
     await tester.pump();

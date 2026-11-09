@@ -5,6 +5,7 @@
 // sqlite, no network) and the audio engine is fed states directly.
 
 import 'dart:io';
+import 'dart:convert';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -17,6 +18,8 @@ import 'package:nexuslink/main.dart';
 import 'package:nexuslink/src/modules/agents/agents_module.dart';
 import 'package:nexuslink/src/modules/audio/audio_runtime.dart';
 import 'package:nexuslink/src/modules/remote/remote_module.dart';
+import 'package:nexuslink/src/pc/app_actions.dart';
+import 'package:nexuslink/src/screens/mirror_screen.dart';
 import 'package:nexuslink/src/session/store.dart';
 import 'package:nexuslink/src/session/target.dart';
 import 'package:nexuslink/src/shell/module.dart';
@@ -29,6 +32,12 @@ import 'package:nexuslink/src/state/wake_config.dart';
 import 'package:nexuslink/src/workspace/platform_bridge.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:nexuslink/src/rpc/models.dart';
+import 'package:nexuslink/src/rpc/rpc_client.dart';
+import 'package:nexuslink/src/state/launcher.dart';
+import 'package:nexuslink/src/state/connection.dart' as conn;
+
+import '../pc_tab_test.dart' show FixedApps, FixedWindows, NoSessions;
 import 'fake_connection.dart';
 import 'fakes.dart';
 
@@ -120,15 +129,102 @@ AudioEngineState _engine({
   micLevel: level,
 );
 
+// A paired host with a media session and installed applications for the
+// phone previews. All three modules still go through their normal entry points.
+class _PreviewRemote extends FakeRemoteSession {
+  _PreviewRemote(super.endpoint, {required super.onUnauthorized});
+  bool playing = true;
+
+  @override
+  Future<void> initialize() async {
+    mediaSupported = true;
+    await super.initialize();
+  }
+
+  @override
+  Future<Map<String, dynamic>> rpc(
+    String method,
+    Map<String, dynamic> params,
+  ) async {
+    if (method == 'media.action') {
+      if (params['action'] == 'play_pause') playing = !playing;
+      return {};
+    }
+    if (method == 'volume.state') return {'percent': 50, 'muted': false};
+    return method == 'media.list'
+        ? {
+            'players': [
+              {
+                'id': 'Music',
+                'title': 'Teardrop',
+                'status': playing ? 'Playing' : 'Paused',
+              },
+            ],
+          }
+        : {};
+  }
+}
+
+class _PreviewConnection extends FakeConnection {
+  @override
+  Future<void> connect(String wsUrl, {String? pairingCode}) async {
+    await super.connect(wsUrl, pairingCode: pairingCode);
+    final client = RpcClient(wsUrl)
+      ..capabilities = {
+        'methods': ['apps.list'],
+      };
+    state = conn.ConnectionState(
+      client: client,
+      status: RpcStatus.connected,
+      hostUrl: wsUrl,
+    );
+    ref.onDispose(client.dispose);
+  }
+}
+
+AppInfo _previewApp(String id, String name) {
+  final dir = Platform.environment['CAPTURE_ICON_DIR'];
+  final icon = File('$dir/$id.png');
+  return AppInfo(
+    appId: id,
+    name: name,
+    icon: dir != null && icon.existsSync()
+        ? 'data:image/png;base64,${base64Encode(icon.readAsBytesSync())}'
+        : null,
+  );
+}
+
 Future<void> _pumpApp(
   WidgetTester tester, {
   required List<NexusModule> modules,
   required Set<int> openPorts,
+  bool withDock = false,
 }) async {
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
-        connectionProvider.overrideWith(FakeConnection.new),
+        if (withDock) ...[
+          connectionProvider.overrideWith(_PreviewConnection.new),
+          appsProvider.overrideWith(
+            () => FixedApps([
+              _previewApp('firefox', 'Firefox'),
+              _previewApp('code', 'Code'),
+            ]),
+          ),
+          windowsProvider.overrideWith(
+            () => FixedWindows([
+              WindowInfo(
+                windowId: 'firefox-window',
+                title: 'Firefox window',
+                wmClass: 'firefox',
+                desktop: 0,
+                appId: 'firefox',
+              ),
+            ]),
+          ),
+          appSessionsProvider.overrideWith(NoSessions.new),
+        ] else
+          connectionProvider.overrideWith(FakeConnection.new),
         moduleListProvider.overrideWithValue(modules),
         reachabilityProberProvider.overrideWithValue(
           ReachabilityProber(
@@ -160,6 +256,9 @@ void main() {
     RemoteRuntime.debugReset();
     RemoteRuntime.debugSessionFactory = null;
     AudioRuntime.debugReset();
+    debugViewerBuilder = null;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(NexusAudio.methods, null);
     await CredentialVault.delete('hub-office', UtilityIds.remote);
     await CredentialVault.delete('hub-office', UtilityIds.audio);
   });
@@ -205,7 +304,118 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('home grid, all five tiles live', (tester) async {
+  for (final playing in [false, true]) {
+    testWidgets(
+      'pocket launcher preview, media ${playing ? "playing" : "idle"}',
+      (tester) async {
+        phone(tester);
+        if (playing) {
+          RemoteRuntime.debugSessionFactory = (endpoint, onUnauthorized) =>
+              _PreviewRemote(endpoint, onUnauthorized: onUnauthorized);
+        } else {
+          fakeRemote();
+        }
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(
+          'nexuslink-launcher:$office',
+          jsonEncode({
+            'favourites': ['firefox', 'code'],
+            'usage': {},
+          }),
+        );
+        await _storeSecrets('hub-office');
+        await TargetStore.save([hubTarget(name: 'Studio PC')]);
+        await TargetStore.setCurrent('hub-office');
+        await _pumpApp(
+          tester,
+          modules: moduleRegistry,
+          openPorts: {45678, 45679, 8010},
+          withDock: true,
+        );
+        final viewed = <MirrorTarget>[];
+        final audioCalls = <String>[];
+        if (playing) {
+          debugViewerBuilder = (target) {
+            viewed.add(target);
+            return Scaffold(appBar: AppBar(title: const Text('Viewer stub')));
+          };
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(NexusAudio.methods, (call) async {
+                audioCalls.add(call.method);
+                if (call.method == 'stop') AudioRuntime.debugEngine(_engine());
+                return null;
+              });
+          AudioRuntime.debugEngine(_engine(playHere: StreamPhase.live));
+          await tester.pump();
+        }
+        expect(find.byKey(const ValueKey('dock-app-firefox')), findsOneWidget);
+        expect(find.byKey(const ValueKey('dock-app-code')), findsOneWidget);
+        final images = tester.widgetList<Image>(find.byType(Image)).toList();
+        final context = tester.element(find.byType(Scaffold).first);
+        await tester.runAsync(
+          () => Future.wait([
+            for (final image in images) precacheImage(image.image, context),
+          ]),
+        );
+        await tester.pump();
+        expect(find.text('Teardrop'), playing ? findsOneWidget : findsNothing);
+        final first = tester.getCenter(
+          find.byKey(const ValueKey('tile-desktop')),
+        );
+        final audio = tester.getCenter(
+          find.byKey(const ValueKey('tile-audio')),
+        );
+        final files = tester.getCenter(
+          find.byKey(const ValueKey('tile-files')),
+        );
+        expect(first.dy, audio.dy);
+        expect(files.dx, audio.dx);
+        expect(files.dy, greaterThan(audio.dy));
+        await _shot(tester, playing ? 'home-media' : 'home-idle');
+        if (playing) {
+          expect(find.text('Stop stream'), findsOneWidget);
+          await tester.tap(find.byKey(const ValueKey('dock-app-firefox')));
+          await _settle(tester);
+          expect(find.text('Viewer stub'), findsOneWidget);
+          expect(viewed.last.windowId, 'firefox-window');
+          await tester.binding.handlePopRoute();
+          await _settle(tester);
+
+          await tester.tap(find.byTooltip('Pause playback'));
+          await tester.pump();
+          expect(find.byTooltip('Play'), findsOneWidget);
+          await tester.tap(find.byTooltip('Play'));
+          await tester.pump();
+          expect(find.byTooltip('Pause playback'), findsOneWidget);
+          await tester.tap(find.text('Stop stream'));
+          await tester.pump();
+          expect(audioCalls, contains('stop'));
+          expect(find.text('Stop stream'), findsNothing);
+
+          await tester.tap(find.byKey(const ValueKey('home-running')));
+          await _settle(tester);
+          await tester.tap(find.text('Firefox').last);
+          await _settle(tester);
+          expect(find.text('Viewer stub'), findsOneWidget);
+          expect(viewed.last.windowId, 'firefox-window');
+          await tester.binding.handlePopRoute();
+          await _settle(tester);
+          // Dismiss Running if it remains underneath the viewer.
+          if (find.text('Running').evaluate().isNotEmpty) {
+            await tester.binding.handlePopRoute();
+            await _settle(tester);
+          }
+          await tester.ensureVisible(find.text('Teardrop'));
+          await tester.tap(find.text('Teardrop'));
+          await _settle(tester);
+          expect(find.text('Media player'), findsOneWidget);
+        }
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
+
+  testWidgets('home grid, all six tools ready', (tester) async {
     phone(tester);
     fakeRemote();
     await _storeSecrets('hub-office');
@@ -218,7 +428,14 @@ void main() {
     );
     expect(find.text('Offline'), findsNothing);
     expect(find.textContaining('Connected'), findsOneWidget);
-    for (final id in ['desktop', 'files', 'agents', 'terminal', 'remote', 'audio']) {
+    for (final id in [
+      'desktop',
+      'files',
+      'agents',
+      'terminal',
+      'remote',
+      'audio',
+    ]) {
       await tester.scrollUntilVisible(
         find.byKey(ValueKey('tile-$id')),
         200,
@@ -237,11 +454,7 @@ void main() {
     await TargetStore.setCurrent('hub-office');
     fakeRemote();
     await _storeSecrets('hub-office');
-    await _pumpApp(
-      tester,
-      modules: moduleRegistry,
-      openPorts: {45678, 8010},
-    );
+    await _pumpApp(tester, modules: moduleRegistry, openPorts: {45678, 8010});
     expect(find.text('Offline'), findsOneWidget);
     await _shot(tester, '3-home-remote-offline');
     await tester.pumpWidget(const SizedBox());
@@ -275,7 +488,8 @@ void main() {
     await _settle(tester);
     expect(find.text('Remote: Office PC'), findsOneWidget);
     expect(find.text('Phone mic to Office PC'), findsOneWidget);
-    expect(find.text('LIVE NOW · 4'), findsOneWidget);
+    expect(find.text('LIVE NOW · 3'), findsOneWidget);
+    expect(find.text('PC audio here · Retrying…'), findsOneWidget);
     await _shot(tester, '4-live-bar-audio-remote');
     await tester.pumpWidget(const SizedBox());
   });

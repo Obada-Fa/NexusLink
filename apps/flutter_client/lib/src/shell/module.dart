@@ -39,12 +39,16 @@ class LiveActivity {
     required this.moduleId,
     required this.label,
     required this.icon,
+    this.activityId,
     this.onTap,
     this.onStop,
   });
   final String moduleId;
   final String label;
   final IconData icon;
+
+  /// Stable identifier within a module, independent of its displayed label.
+  final String? activityId;
   final VoidCallback? onTap; // opens the module
   final VoidCallback? onStop; // stops it from the bar
 }

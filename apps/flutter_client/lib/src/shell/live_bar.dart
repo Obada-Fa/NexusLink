@@ -6,16 +6,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../theme/nexus_theme.dart';
-import '../theme/nx_widgets.dart';
 import 'module.dart';
 
 /// Flattens the latest activities per module in [order] (module ids).
 List<LiveActivity> combineLiveActivities(
   Map<String, List<LiveActivity>> latest,
   List<String> order,
-) => [
-  for (final id in order) ...?latest[id],
-];
+) => [for (final id in order) ...?latest[id]];
 
 /// Subscribes to every module's [NexusModule.liveActivities] for [ctx] and
 /// reports the combined list. Streams are created once per module and target.
@@ -105,7 +102,11 @@ class _LiveBarState extends State<LiveBar> {
 
   @override
   Widget build(BuildContext context) {
-    final items = _activities;
+    // PC audio has its own stop control in HomeMedia. Keep every other
+    // activity, including the other audio streams, in the live bar.
+    final items = _activities
+        .where((a) => !(a.moduleId == 'audio' && a.activityId == 'playHere'))
+        .toList();
     return AnimatedSize(
       duration: const Duration(milliseconds: 220),
       curve: Curves.easeOutCubic,
@@ -119,38 +120,34 @@ class _LiveBarState extends State<LiveBar> {
                 decoration: BoxDecoration(
                   color: NX.surface,
                   borderRadius: BorderRadius.circular(NX.radius),
-                  border: Border.all(
-                    color: NX.working.withValues(alpha: .35),
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: NX.working.withValues(alpha: .08),
-                      blurRadius: 24,
-                      spreadRadius: -6,
-                    ),
-                  ],
+                  border: Border.all(color: NX.line),
                 ),
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(14, 10, 6, 6),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Row(
-                        children: [
-                          const LiveDot(color: NX.working, size: 7),
-                          const SizedBox(width: 8),
-                          Text(
-                            'LIVE NOW · ${items.length}',
-                            style: const TextStyle(
+                      if (items.length > 1)
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.circle,
                               color: NX.working,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: 1.3,
+                              size: 7,
                             ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
+                            const SizedBox(width: 8),
+                            Text(
+                              'LIVE NOW · ${items.length}',
+                              style: const TextStyle(
+                                color: NX.working,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 1.3,
+                              ),
+                            ),
+                          ],
+                        ),
+                      if (items.length > 1) const SizedBox(height: 4),
                       for (final a in items) _LiveRow(activity: a),
                     ],
                   ),
@@ -186,7 +183,6 @@ class _LiveRow extends StatelessWidget {
           if (activity.onStop != null)
             IconButton(
               tooltip: 'Stop ${activity.label}',
-              visualDensity: VisualDensity.compact,
               icon: const Icon(Icons.stop_circle_outlined, color: NX.textDim),
               onPressed: activity.onStop,
             )

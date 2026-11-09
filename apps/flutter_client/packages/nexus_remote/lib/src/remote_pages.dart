@@ -9,15 +9,36 @@ import 'session.dart';
 /// Whole Remote UI (trackpad, keyboard, dictation, taskbar) for one session.
 /// Lives inside the host app's Navigator/theme; it creates no MaterialApp.
 class RemoteHomeScreen extends StatefulWidget {
-  const RemoteHomeScreen({super.key, required this.session});
+  const RemoteHomeScreen({super.key, required this.session, this.initialPage = 0, this.mediaRequests, this.onMediaRequest});
   final RemoteSession session;
+  final int initialPage;
+  final Listenable? mediaRequests;
+  final VoidCallback? onMediaRequest;
 
   @override
   State<RemoteHomeScreen> createState() => _RemoteHomeScreenState();
 }
 
 class _RemoteHomeScreenState extends State<RemoteHomeScreen> {
-  int page = 0;
+  late int page;
+
+  @override
+  void initState() {
+    super.initState();
+    page = widget.initialPage;
+    widget.mediaRequests?.addListener(_openMedia);
+  }
+
+  void _openMedia() {
+    widget.onMediaRequest?.call();
+    setState(() => page = 2);
+  }
+
+  @override
+  void dispose() {
+    widget.mediaRequests?.removeListener(_openMedia);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {

@@ -46,7 +46,7 @@ void main() {
     await tester.pumpWidget(const ProviderScope(child: NexusApp()));
     await tester.pumpAndSettle();
     expect(find.text('My PC'), findsOneWidget);
-    expect(find.text('WORKSPACE'), findsOneWidget);
+    expect(find.byKey(const ValueKey('tile-files')), findsOneWidget);
     expect(find.text('Agents'), findsOneWidget);
     expect(find.text('Terminal'), findsOneWidget);
     // Not paired on this phone, so no auto-connect: the PC reads offline and
@@ -58,7 +58,10 @@ void main() {
       200,
       scrollable: find.byType(Scrollable).first,
     );
-    expect(find.text('PC TOOLS'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('Desktop')).dy,
+      lessThan(tester.getTopLeft(find.text('Agents')).dy),
+    );
     expect(find.text('Offline'), findsWidgets);
     await tester.drag(find.byType(Scrollable).first, const Offset(0, 2000));
     await tester.pumpAndSettle();

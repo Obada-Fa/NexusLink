@@ -14,7 +14,10 @@ import '../../theme/nexus_theme.dart';
 
 /// Builds a [RemoteSession]; tests swap it for a fake.
 typedef RemoteSessionFactory =
-    RemoteSession Function(RemoteEndpoint endpoint, VoidCallback onUnauthorized);
+    RemoteSession Function(
+      RemoteEndpoint endpoint,
+      VoidCallback onUnauthorized,
+    );
 
 /// Adapter that turns the `nexus_remote` package into a shell module.
 ///
@@ -116,6 +119,15 @@ String remoteMissingReason(SavedTarget target, String? token) {
 /// The one Remote session for the current target. Static because the module
 /// is const.
 abstract final class RemoteRuntime {
+  static final ValueNotifier<int> mediaRequests = ValueNotifier(0);
+  static bool _openMediaOnEntry = false;
+
+  static void openMedia() {
+    _openMediaOnEntry = true;
+    mediaRequests.value++;
+    ShellNavigator.instance.openModule('remote');
+  }
+
   static final ValueNotifier<RemoteSession?> session = ValueNotifier(null);
   static final ValueNotifier<bool> unauthorized = ValueNotifier(false);
 
@@ -127,6 +139,7 @@ abstract final class RemoteRuntime {
       StreamController.broadcast();
   static List<LiveActivity> _current = const [];
   static String? _targetId;
+  static String? get targetId => _targetId;
   static bool _wasConnected = false;
 
   @visibleForTesting
@@ -168,9 +181,11 @@ abstract final class RemoteRuntime {
     created.addListener(() => _publish(created));
     session.value = created;
     _publish(created);
-    unawaited(created.initialize().catchError((Object e) {
-      debugPrint('Remote session failed to start: $e');
-    }));
+    unawaited(
+      created.initialize().catchError((Object e) {
+        debugPrint('Remote session failed to start: $e');
+      }),
+    );
   }
 
   static void _setBlocked(String targetId, String? reason) {
@@ -221,6 +236,7 @@ abstract final class RemoteRuntime {
   static void debugReset() {
     _dispose();
     _targetId = null;
+    _openMediaOnEntry = false;
     blocked.value = const {};
   }
 }
@@ -279,11 +295,24 @@ class _RemoteEntry extends ConsumerWidget {
                     ),
                   ],
                 ),
-              Expanded(child: RemoteHomeScreen(session: session)),
+              Expanded(
+                child: RemoteHomeScreen(
+                  session: session,
+                  initialPage: _consumeMediaPage(),
+                  mediaRequests: RemoteRuntime.mediaRequests,
+                  onMediaRequest: _consumeMediaPage,
+                ),
+              ),
             ],
           ),
         );
       },
     );
   }
+}
+
+int _consumeMediaPage() {
+  final page = RemoteRuntime._openMediaOnEntry ? 2 : 0;
+  RemoteRuntime._openMediaOnEntry = false;
+  return page;
 }

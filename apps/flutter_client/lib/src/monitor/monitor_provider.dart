@@ -137,8 +137,11 @@ class MonitorNotifier extends Notifier<MonitorState> {
     final client = _client;
     if (client == null || !client.supports('monitor.v1')) return;
     try {
-      _apply(MonitorSnapshot(await client.requestMap('monitor.snapshot')));
+      final snapshot = await client.requestMap('monitor.snapshot');
+      if (!identical(_client, client)) return;
+      _apply(MonitorSnapshot(snapshot));
     } catch (e) {
+      if (!identical(_client, client)) return;
       state = MonitorState(
         snapshot: state.snapshot,
         history: state.history,
