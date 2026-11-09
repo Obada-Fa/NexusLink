@@ -14,8 +14,14 @@
 - Terminal: the title shows the shell's folder and switches shells; **End shell** moved into the shell options menu.
 - Agents: **New chat** is a labelled button; Live puts "Needs you" ahead of PC vitals; **Forget this PC** moved to Home → Device settings.
 
-**PC tools**
-- Desktop opens on the desktop and apps; vitals, processes, approvals, remote access and the older mic control are under **PC details**.
+**Desktop: a PC home screen for your phone**
+- Three destinations: **Desktop · Apps · Running**. Desktop shows how the PC is doing (CPU, GPU, memory, network and disk with small histories), your favourite apps, **Open desktop** (or **View only**), and the apps you can resume.
+- Tapping an app works the same everywhere: a closed app opens, an app with one window resumes it, and an app with several windows (or a phone session) lets you choose by title. Back from the viewer returns to the same tab, search and scroll position.
+- **Apps** lists every app on the PC, including agent apps, with the PC's own icons and a search box. Each app has one menu: favourites, **App info**, and Restart / Quit / Force stop where supported.
+- **Running** has one entry per open app. Agents running in terminals have their own **In terminals** group, and windows that don't belong to a known app are listed by title. A frozen agent app says **Not responding** next to its name; its App info shows CPU and memory use and can restart it.
+- Tapping a reading opens the **System monitor** (CPU · GPU · Memory · Network & disk). CPU and GPU show load, temperature and power on one shared time axis, so a spike and the temperature rise after it line up. GPU power reads like "188 W of 317 W"; Network and Disk show Download / Upload and Read / Write on one chart each. **Processes** (from CPU or Memory) lists the busiest processes; tap one to inspect or end it.
+- Charts now use the PC's own timestamps: short spikes are no longer smoothed away, the line ends at the latest reading, and the peak shown always includes the current value. Readings kept while disconnected say when they were last updated.
+- **PC details** is gone: host approvals and remote access are under the Desktop menu → **Settings → This PC**, and the older phone mic is under **Audio** (also on PCs without Nexus Audio).
 - Remote's first tab is **Trackpad**. The screen viewer says the input mode when it changes (View only / Trackpad / Direct touch).
 - Settings are grouped into **This PC** and **This phone**.
 - Arena overview shows each project's name and how many agents need you.

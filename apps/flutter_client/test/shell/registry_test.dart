@@ -16,6 +16,7 @@ void main() {
       'files',
       'terminal',
       'agents',
+      'phone_mic',
     ]);
     expect(
       capabilitiesOf(nexusOnly).every((c) => c.utility == UtilityIds.nexuslink),
@@ -88,7 +89,14 @@ void main() {
       capabilities: capabilitiesOf(hubTarget(utilities: {UtilityIds.nexuslink})),
       platform: TargetPlatform.android,
     );
-    expect(shown.map((m) => m.id), ['desktop', 'files', 'agents', 'terminal']);
+    // Audio stays reachable for NexusLink's older phone mic.
+    expect(shown.map((m) => m.id), [
+      'desktop',
+      'files',
+      'agents',
+      'terminal',
+      'audio',
+    ]);
   });
 
   test('NexusLink modules hide when only Remote/Audio are paired', () {

@@ -191,6 +191,12 @@ abstract final class AudioRuntime {
     }
     view.value = AudioView(targetId: target.id, pcName: target.name)
         .copyWith(engine: view.value.engine, details: view.value.details);
+    // A PC without Nexus Audio only offers NexusLink's older mic here.
+    if (!target.has(UtilityIds.audio)) {
+      _setBlocked(target.id, null);
+      _pairing = null;
+      return;
+    }
     final token = await ctx.secret(UtilityIds.audio);
     if (view.value.targetId != target.id) return;
     final result = resolveAudioPairing(target, token);

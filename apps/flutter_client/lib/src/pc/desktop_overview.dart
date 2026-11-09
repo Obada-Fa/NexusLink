@@ -1,6 +1,7 @@
-// Desktop → Overview: the PC's live readings as an aligned, flat table, then
-// the desktop entry and PC details. Reads the monitor snapshot itself so the
-// rest of Desktop does not rebuild on every push.
+// Desktop home: the PC's live readings as an aligned, flat table with tiny
+// unlabeled histories. Each reading opens the system monitor. Reads the
+// monitor snapshot itself so the rest of Desktop does not rebuild on every
+// push.
 
 import 'dart:async';
 
@@ -14,15 +15,13 @@ import '../state/connection.dart';
 import '../theme/nexus_theme.dart';
 import '../widgets/history_chart.dart';
 import '../workspace/metrics.dart';
-import 'flow_strip.dart';
 import 'pc_ui.dart';
-import 'vitals_hero.dart' show VitalsFocus;
-import 'vitals_sheet.dart';
+import 'system_monitor.dart';
 
 // ---------------------------------------------------------------------------
 // Formatting
 
-String fmtCelsius(double? c) => c == null ? '—' : '${c.round()} °C';
+String fmtCelsius(double? c) => fmtTemp(c);
 
 String fmtClock(num mhz) =>
     mhz <= 0 ? '—' : '${(mhz / 1000).toStringAsFixed(1)} GHz';
@@ -119,6 +118,7 @@ class _Reading {
     this.primary = true,
     this.history = const [],
     this.historyMax,
+    this.historySecondary = const [],
     this.onTap,
   });
   final String label;
@@ -126,8 +126,13 @@ class _Reading {
   /// First cell is the headline value when [primary]; the rest are secondary.
   final List<(String, Color)> cells;
   final bool primary;
-  final List<double> history;
+  final List<Sample> history;
+
+  /// Null scales to the window's own peak (rates).
   final double? historyMax;
+
+  /// Rates: the quieter direction, folded into the same bars by peak.
+  final List<Sample> historySecondary;
   final String semantics;
   final VoidCallback? onTap;
 }
@@ -160,9 +165,9 @@ class DesktopReadings extends ConsumerWidget {
     final v = snapshot.vitals;
     final h = state.history ?? MonitorHistory();
     final gpu = v.mainGpu;
-    final gpuTemp = gpu?.tempC ?? gpu?.hotspotC;
-    void open(VitalsFocus f) => showVitalsSheet(context, f);
-    void flow() => showFlowSheet(context);
+    // The hottest sensor, the same one the monitor charts.
+    final gpuTemp = gpu?.peakTempC;
+    void open(MonitorFocus f) => openSystemMonitor(context, f);
     final rows = <_Reading>[
       _Reading(
         label: 'CPU',
@@ -171,13 +176,13 @@ class DesktopReadings extends ConsumerWidget {
           (fmtCelsius(v.cpuTempC), _warnIf((v.cpuTempC ?? 0) >= 88)),
           (fmtClock(v.cpuMHz), NX.text),
         ],
-        history: h['cpu'],
+        history: h.samples('cpu'),
         historyMax: 100,
         semantics:
             'CPU ${v.cpu.round()} percent, '
             '${v.cpuTempC == null ? 'temperature not reported' : '${v.cpuTempC!.round()} degrees'}, '
             '${fmtClock(v.cpuMHz)}',
-        onTap: () => open(VitalsFocus.cpu),
+        onTap: () => open(MonitorFocus.cpu),
       ),
       _Reading(
         label: 'GPU',
@@ -185,17 +190,17 @@ class DesktopReadings extends ConsumerWidget {
             ? const [('—', NX.textDim), ('not reported', NX.textDim)]
             : [
                 (fmtLoad(gpu.busy), NX.text),
-                (fmtCelsius(gpuTemp), _warnIf((gpu.peakTempC ?? 0) >= 95)),
+                (fmtCelsius(gpuTemp), _warnIf((gpuTemp ?? 0) >= 95)),
                 (fmtWatts(gpu.powerW), NX.text),
               ],
-        history: h['gpu'],
+        history: h.samples('gpu'),
         historyMax: 100,
         semantics: gpu == null
             ? 'GPU, not reported by this PC'
             : 'GPU ${gpu.busy == null ? 'load not reported' : '${gpu.busy!.round()} percent'}, '
                   '${gpuTemp == null ? 'temperature not reported' : '${gpuTemp.round()} degrees'}, '
                   '${gpu.powerW == null ? 'power not reported' : '${gpu.powerW!.round()} watts'}',
-        onTap: () => open(VitalsFocus.gpu),
+        onTap: () => open(MonitorFocus.gpu),
       ),
       _Reading(
         label: 'Memory',
@@ -203,12 +208,12 @@ class DesktopReadings extends ConsumerWidget {
           (fmtLoad(v.ramPercent), _warnIf(v.ramPercent >= 90)),
           (v.ramTotal > 0 ? fmtGiBOf(v.ramUsed, v.ramTotal) : '—', NX.text),
         ],
-        history: h['ram'],
+        history: h.samples('ram'),
         historyMax: 100,
         semantics:
             'Memory ${v.ramPercent.round()} percent, '
             '${v.ramTotal > 0 ? fmtGiBOf(v.ramUsed, v.ramTotal) : 'size not reported'}',
-        onTap: () => open(VitalsFocus.ram),
+        onTap: () => open(MonitorFocus.memory),
       ),
       _Reading(
         label: 'Network',
@@ -217,9 +222,11 @@ class DesktopReadings extends ConsumerWidget {
           ('↓ ${fmtIecRate(v.netRx)}', NX.text),
           ('↑ ${fmtIecRate(v.netTx)}', NX.text),
         ],
+        history: h.samples('netRx'),
+        historySecondary: h.samples('netTx'),
         semantics:
             'Network, down ${fmtIecRate(v.netRx)}, up ${fmtIecRate(v.netTx)}',
-        onTap: flow,
+        onTap: () => open(MonitorFocus.io),
       ),
       _Reading(
         label: 'Disk',
@@ -231,7 +238,9 @@ class DesktopReadings extends ConsumerWidget {
         semantics:
             'Disk, read ${fmtIecRate(v.diskRead)}, write ${fmtIecRate(v.diskWrite)}'
             '${v.diskLow ? ', drive nearly full' : ''}',
-        onTap: flow,
+        history: h.samples('diskRead'),
+        historySecondary: h.samples('diskWrite'),
+        onTap: () => open(MonitorFocus.io),
       ),
     ];
     return _ReadingsTable(
@@ -366,6 +375,14 @@ class _ReadingRow extends StatelessWidget {
 
   static const _sparkWidth = 56.0;
 
+  static double _peak(List<Sample> s) {
+    var hi = 0.0;
+    for (final x in s) {
+      if (x.v > hi) hi = x.v;
+    }
+    return hi <= 0 ? 1 : hi;
+  }
+
   Text _cell(String text, Color color, {bool bold = false, TextAlign? align}) =>
       Text(
         text,
@@ -391,15 +408,16 @@ class _ReadingRow extends StatelessWidget {
     final cells = r.cells;
     final head = r.primary ? cells.first : null;
     final rest = r.primary ? cells.skip(1).toList() : cells;
-    final history = spark && r.history.length >= 2
+    final bars = combinedRate(r.history, r.historySecondary);
+    final history = spark && bars.length >= 2
         ? Padding(
             padding: const EdgeInsets.only(left: 12),
             child: SizedBox(
               width: _sparkWidth,
               child: HistoryBars(
-                values: r.history,
+                samples: bars,
                 color: live ? NX.accent : NX.idle,
-                max: r.historyMax ?? 100,
+                max: r.historyMax ?? _peak(bars),
                 width: _sparkWidth,
                 height: 20,
               ),
@@ -489,46 +507,12 @@ class _ReadingRow extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Network and disk details (the existing flow readings)
 
-Future<void> showFlowSheet(BuildContext context) => showModalBottomSheet<void>(
-  context: context,
-  isScrollControlled: true,
-  useSafeArea: true,
-  builder: (_) => MonitorDemand(
-    owner: 'pc-flow',
-    intervalMs: 2000,
-    child: DraggableScrollableSheet(
-      expand: false,
-      initialChildSize: .7,
-      minChildSize: .4,
-      maxChildSize: .96,
-      builder: (context, scroll) => Consumer(
-        builder: (context, ref, _) {
-          final state = ref.watch(monitorProvider);
-          final snapshot = state.snapshot;
-          return ListView(
-            controller: scroll,
-            padding: const EdgeInsets.fromLTRB(NX.pad, 0, NX.pad, 28),
-            children: [
-              const Padding(
-                padding: EdgeInsets.only(bottom: 12),
-                child: Text(
-                  'Network and disk',
-                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
-                ),
-              ),
-              if (snapshot == null)
-                const Text('Waiting for readings…')
-              else
-                FlowStrip(
-                  vitals: snapshot.vitals,
-                  history: state.history ?? MonitorHistory(),
-                ),
-            ],
-          );
-        },
-      ),
-    ),
-  ),
-);
+/// Per-timestamp sum of two rate series (download + upload), for one row of
+/// bars. A single series passes through.
+List<Sample> combinedRate(List<Sample> a, List<Sample> b) {
+  if (b.isEmpty) return a;
+  if (a.isEmpty) return b;
+  final byTime = <int, double>{for (final s in b) s.t: s.v};
+  return [for (final s in a) Sample(s.t, s.v + (byTime[s.t] ?? 0))];
+}

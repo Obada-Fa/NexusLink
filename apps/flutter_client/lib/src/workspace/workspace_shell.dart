@@ -11,6 +11,8 @@ import '../rpc/rpc_client.dart';
 import 'files_screen.dart';
 import 'metrics.dart';
 import '../monitor/monitor_provider.dart';
+import '../pc/phone_approvals_section.dart';
+import '../pc/remote_access_section.dart';
 import '../theme/nexus_theme.dart';
 import '../theme/nx_widgets.dart';
 import 'project.dart';
@@ -484,6 +486,19 @@ class _PcScreenState extends ConsumerState<PcScreen>
               subtitle: Text('${_info!['os']}'),
             ),
           ],
+          // Access and repair for this PC (moved here from PC details).
+          const MonitorDemand(
+            owner: 'pc-settings',
+            intervalMs: 5000,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                PhoneApprovalsSection(key: ValueKey('pc-approvals')),
+                RemoteAccessSection(key: ValueKey('pc-remote')),
+                SizedBox(height: 12),
+              ],
+            ),
+          ),
           ListTile(
             leading: const Icon(Icons.link_off),
             title: const Text('Disconnect PC'),

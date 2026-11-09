@@ -328,8 +328,8 @@ class PhoneMicSection extends ConsumerWidget {
                 if (hasAudio) ...[
                   const SizedBox(height: 10),
                   const PcNote(
-                    'This PC has Audio too: try “Use as PC mic” on the '
-                    'Audio tile on the home screen.',
+                    'This PC has Nexus Audio too: “Use as PC mic” above is '
+                    'the newer, more reliable way.',
                     key: ValueKey('mic-audio-hint'),
                     color: NX.accent,
                     icon: Icons.graphic_eq_rounded,

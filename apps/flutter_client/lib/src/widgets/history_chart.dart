@@ -1,33 +1,18 @@
-// Flat, instrument-style history charts for Desktop and the PC detail views.
+// Flat, instrument-style history charts for Desktop and the system monitor.
 //
-// Design rules: no smoothing curves, no gradients, no glow. Samples are
-// averaged to the available pixels so 2-second jitter doesn't turn into a
-// zig-zag; the newest reading sits at the right edge and is marked; axes are
-// faint and labelled with real values.
+// Rules: x is elapsed host time (not sample index), so irregular pushes and
+// reconnect gaps plot where they happened; points are reduced by keeping each
+// bucket's low and high, so a short spike survives; the line ends at the
+// latest real sample and that point is marked. No curves, no gradients, faint
+// gridlines, a light fill only where asked (the main load chart).
 
 import 'dart:math' as math;
+import 'dart:ui' show PathMetric;
 
 import 'package:flutter/material.dart';
 
+import '../monitor/time_series.dart';
 import '../theme/nexus_theme.dart';
-
-/// Averages [values] into at most [buckets] groups, keeping the newest last.
-List<double> bucketMeans(List<double> values, int buckets) {
-  if (buckets <= 0 || values.isEmpty) return const [];
-  if (values.length <= buckets) return values;
-  final out = <double>[];
-  final size = values.length / buckets;
-  for (var b = 0; b < buckets; b++) {
-    final start = (b * size).floor();
-    final end = math.max(start + 1, ((b + 1) * size).floor());
-    var sum = 0.0;
-    for (var i = start; i < end && i < values.length; i++) {
-      sum += values[i];
-    }
-    out.add(sum / (end - start));
-  }
-  return out;
-}
 
 /// "Nice" axis bounds and step for [lo]..[hi] with about [ticks] intervals.
 ({double min, double max, double step}) niceAxis(
@@ -61,38 +46,76 @@ List<double> bucketMeans(List<double> values, int buckets) {
   );
 }
 
-/// Thin vertical bars of recent history, newest at the right. For table rows.
+/// Width of the value-label gutter shared by a stack of aligned charts, so
+/// their plot edges line up at any text size.
+double chartGutter(BuildContext context, {double base = 40}) =>
+    base * chartLabelSize(context) / 10;
+
+double chartLabelSize(BuildContext context) =>
+    MediaQuery.textScalerOf(context).scale(10).clamp(10, 15).toDouble();
+
+/// A gap longer than this between two samples breaks the line (the phone was
+/// away or the PC was offline) instead of drawing a misleading ramp.
+const chartGapBreak = Duration(seconds: 15);
+
+// ---------------------------------------------------------------------------
+// Tiny unlabeled history for table rows
+
+/// Thin vertical bars over the last [window], newest at the right. Each bar is
+/// the highest reading in its slice of time; the last bar is the latest
+/// reading itself, so it matches the number printed beside it.
 class HistoryBars extends StatelessWidget {
   const HistoryBars({
     super.key,
-    required this.values,
+    required this.samples,
     this.max = 100,
     this.color = NX.accent,
     this.height = 18,
     this.width = 48,
+    this.window = const Duration(minutes: 5),
   });
-  final List<double> values;
+  final List<Sample> samples;
   final double max;
   final Color color;
   final double height;
   final double width;
+  final Duration window;
 
   @override
   Widget build(BuildContext context) => ExcludeSemantics(
     child: RepaintBoundary(
       child: CustomPaint(
         size: Size(width, height),
-        painter: _BarsPainter(values, max, color),
+        painter: _BarsPainter(samples, max, color, window),
       ),
     ),
   );
 }
 
+/// Bar heights for [HistoryBars]: one per slot, null where no sample fell.
+@visibleForTesting
+List<double?> barValues(List<Sample> samples, int count, Duration window) {
+  if (count <= 0 || samples.isEmpty) return const [];
+  final end = samples.last.t;
+  final span = window.inMilliseconds / count;
+  final start = end - window.inMilliseconds;
+  final out = List<double?>.filled(count, null);
+  for (final s in samples) {
+    if (s.t < start) continue;
+    final slot = math.min(count - 1, ((s.t - start) / span).floor());
+    final v = out[slot];
+    out[slot] = v == null ? s.v : math.max(v, s.v);
+  }
+  out[count - 1] = samples.last.v;
+  return out;
+}
+
 class _BarsPainter extends CustomPainter {
-  _BarsPainter(this.values, this.max, this.color);
-  final List<double> values;
+  _BarsPainter(this.samples, this.max, this.color, this.window);
+  final List<Sample> samples;
   final double max;
   final Color color;
+  final Duration window;
 
   static const _bar = 3.0;
   static const _gap = 2.0;
@@ -100,18 +123,19 @@ class _BarsPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final count = ((size.width + _gap) / (_bar + _gap)).floor();
-    final data = bucketMeans(values, count);
     // Baseline so an idle machine still reads as a chart, not empty space.
     canvas.drawRect(
       Rect.fromLTWH(0, size.height - 1, size.width, 1),
       Paint()..color = NX.line,
     );
-    final old = Paint()..color = color.withValues(alpha: .5);
+    final data = barValues(samples, count, window);
+    final old = Paint()..color = color.withValues(alpha: .45);
     final now = Paint()..color = color;
     for (var i = 0; i < data.length; i++) {
-      final slot = count - data.length + i;
-      final x = slot * (_bar + _gap);
-      final h = math.max(1.0, (data[i] / max).clamp(0.0, 1.0) * size.height);
+      final v = data[i];
+      if (v == null) continue;
+      final x = i * (_bar + _gap);
+      final h = math.max(1.0, (v / max).clamp(0.0, 1.0) * size.height);
       canvas.drawRRect(
         RRect.fromRectAndCorners(
           Rect.fromLTWH(x, size.height - h, _bar, h),
@@ -125,28 +149,46 @@ class _BarsPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_BarsPainter old) =>
-      old.values != values || old.max != max || old.color != color;
+      old.samples != samples || old.max != max || old.color != color;
 }
 
-/// Line chart with faint value gridlines, a flat light fill and the latest
-/// reading marked. [max] fixes the top (percentages); otherwise the axis fits
-/// the data with round numbers. [secondary] draws a second, quieter series.
-class HistoryChart extends StatelessWidget {
-  const HistoryChart({
+// ---------------------------------------------------------------------------
+// Time chart
+
+/// A line chart over elapsed time.
+///
+/// Charts stacked to compare (load above temperature above power) pass the
+/// same [end], [window] and [gutter] so their plot edges and time axes match;
+/// only the bottom one usually shows [timeLabels].
+class TimeChart extends StatelessWidget {
+  const TimeChart({
     super.key,
-    required this.values,
+    required this.samples,
     this.secondary,
+    this.end,
+    this.window = const Duration(minutes: 5),
     this.max,
     this.fromZero = true,
     this.unit = '',
     this.format,
     this.color = NX.accent,
     this.secondaryColor = NX.textDim,
+    this.fill = false,
     this.height = 96,
+    this.gutter,
     this.axis = true,
+    this.timeLabels = false,
   });
-  final List<double> values;
-  final List<double>? secondary;
+  final List<Sample> samples;
+
+  /// Drawn as a dashed, quieter line (Upload, Write).
+  final List<Sample>? secondary;
+
+  /// Right edge of the time axis (ms). Defaults to the newest sample shown.
+  final int? end;
+  final Duration window;
+
+  /// Fixed top (percentages); otherwise the axis fits the data.
   final double? max;
 
   /// Start the axis at zero (loads, rates); false fits temperatures etc.
@@ -157,62 +199,88 @@ class HistoryChart extends StatelessWidget {
   final String Function(double)? format;
   final Color color;
   final Color secondaryColor;
+
+  /// Light fill under the main line. Reserved for the main load chart.
+  final bool fill;
   final double height;
 
-  /// Gridlines and their labels. Off for small tiles.
+  /// Value-label gutter width; pass the same value to align stacked charts.
+  final double? gutter;
+
+  /// Gridlines and their value labels.
   final bool axis;
 
+  /// Elapsed-time labels under the plot ("5 min … now").
+  final bool timeLabels;
+
   @override
-  Widget build(BuildContext context) {
-    final scale = MediaQuery.textScalerOf(context);
-    return ExcludeSemantics(
-      child: RepaintBoundary(
-        child: SizedBox(
-          height: height,
-          width: double.infinity,
-          child: CustomPaint(
-            painter: _LinePainter(
-              values: values,
-              secondary: secondary,
-              max: max,
-              fromZero: fromZero,
-              label: format ?? (v) => '${_trim(v)}$unit',
-              color: color,
-              secondaryColor: secondaryColor,
-              axis: axis,
-              labelSize: scale.scale(10).clamp(10, 14).toDouble(),
-            ),
+  Widget build(BuildContext context) => ExcludeSemantics(
+    child: RepaintBoundary(
+      child: SizedBox(
+        height: height,
+        width: double.infinity,
+        child: CustomPaint(
+          painter: TimeChartPainter(
+            samples: samples,
+            secondary: secondary,
+            end: end ?? latestTime([samples, ?secondary]),
+            window: window,
+            max: max,
+            fromZero: fromZero,
+            label: format ?? (v) => '${_trim(v)}$unit',
+            color: color,
+            secondaryColor: secondaryColor,
+            fill: fill,
+            gutter: gutter,
+            axis: axis,
+            timeLabels: timeLabels,
+            labelSize: chartLabelSize(context),
           ),
         ),
       ),
-    );
-  }
+    ),
+  );
 
   static String _trim(double v) =>
       v == v.roundToDouble() ? '${v.round()}' : v.toStringAsFixed(1);
 }
 
-class _LinePainter extends CustomPainter {
-  _LinePainter({
-    required this.values,
+/// Exposed for tests: where the chart puts things.
+class TimeChartPainter extends CustomPainter {
+  TimeChartPainter({
+    required this.samples,
     required this.secondary,
+    required this.end,
+    required this.window,
     required this.max,
     required this.fromZero,
     required this.label,
     required this.color,
     required this.secondaryColor,
+    required this.fill,
+    required this.gutter,
     required this.axis,
+    required this.timeLabels,
     required this.labelSize,
   });
-  final List<double> values;
-  final List<double>? secondary;
+  final List<Sample> samples;
+  final List<Sample>? secondary;
+  final int? end;
+  final Duration window;
   final double? max;
   final bool fromZero;
   final String Function(double) label;
   final Color color;
   final Color secondaryColor;
+  final bool fill;
+  final double? gutter;
   final bool axis;
+  final bool timeLabels;
   final double labelSize;
+
+  /// Set after [paint]: the plot area and the endpoint marker's centre.
+  Rect? plot;
+  Offset? endpoint;
 
   TextPainter _text(String s) => TextPainter(
     text: TextSpan(
@@ -229,94 +297,236 @@ class _LinePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final all = [...values, ...?secondary];
-    if (all.isEmpty) return;
-    final lo = all.reduce(math.min), hi = all.reduce(math.max);
+    final last = end;
+    final grid = Paint()
+      ..color = NX.line.withValues(alpha: .7)
+      ..strokeWidth = 1;
+    final w = window.inMilliseconds;
+    final start = last == null ? 0 : last - w;
+    final main = last == null
+        ? const <Sample>[]
+        : inWindow(samples, window, end: last);
+    final second = last == null || secondary == null
+        ? const <Sample>[]
+        : inWindow(secondary!, window, end: last);
+    final all = [for (final s in main) s.v, for (final s in second) s.v];
+
     final ax = max != null
         ? (min: 0.0, max: max!, step: max! / 2)
-        : niceAxis(lo, hi, fromZero: fromZero);
+        : all.isEmpty
+        ? (min: 0.0, max: 1.0, step: .5)
+        : niceAxis(
+            all.reduce(math.min),
+            all.reduce(math.max),
+            fromZero: fromZero,
+          );
+    final ticks = <double>[
+      for (var v = ax.min; v <= ax.max + ax.step * .01; v += ax.step) v,
+    ];
 
-    // Labels sit at the right, so the newest point stays at the plot's edge.
     var right = size.width;
-    final ticks = <double>[];
     if (axis) {
-      for (var v = ax.min; v <= ax.max + ax.step * .01; v += ax.step) {
-        ticks.add(v);
-      }
       final widest = ticks
           .map((t) => _text(label(t)).width)
           .fold<double>(0, math.max);
-      right = size.width - widest - 8;
+      right = size.width - math.max(gutter ?? 0, widest + 8);
+    } else if (gutter != null) {
+      right = size.width - gutter!;
     }
     final top = axis ? labelSize * .7 : 3.0;
-    final bottom = size.height - (axis ? labelSize * .7 : 3.0);
+    final timeBand = timeLabels ? labelSize + 6 : 0.0;
+    final bottom = size.height - timeBand - (axis ? labelSize * .7 : 3.0);
+    plot = Rect.fromLTRB(0, top, right, bottom);
     double y(double v) =>
         bottom -
         ((v - ax.min) / (ax.max - ax.min)).clamp(0.0, 1.0) * (bottom - top);
+    double x(int t) => w <= 0 ? right : (t - start) / w * right;
 
     if (axis) {
-      final grid = Paint()
-        ..color = NX.line
-        ..strokeWidth = 1;
       for (final t in ticks) {
         final yy = y(t).roundToDouble() + .5;
         canvas.drawLine(Offset(0, yy), Offset(right, yy), grid);
         final tp = _text(label(t));
         tp.paint(canvas, Offset(right + 8, yy - tp.height / 2));
       }
+    } else {
+      canvas.drawLine(Offset(0, bottom + .5), Offset(right, bottom + .5), grid);
     }
 
-    // At most 60 points (~5 s each over the 5-minute history): the shape
-    // stays honest while 2-second jitter stops reading as noise.
-    final buckets = math.max(2, math.min(60, (right / 4).floor()));
-    Path? line(List<double> raw, {bool fill = false}) {
-      final data = bucketMeans(raw, buckets);
-      if (data.length < 2) return null;
-      final dx = right / (buckets - 1);
-      final start = right - (data.length - 1) * dx;
-      final path = Path()..moveTo(start, y(data.first));
-      for (var i = 1; i < data.length; i++) {
-        path.lineTo(start + i * dx, y(data[i]));
+    if (timeLabels) {
+      final ty = size.height - labelSize - 2;
+      final left = _text(fmtElapsed(window));
+      final mid = _text(fmtElapsed(window ~/ 2));
+      final now = _text('now');
+      left.paint(canvas, Offset(0, ty));
+      mid.paint(canvas, Offset(right / 2 - mid.width / 2, ty));
+      now.paint(canvas, Offset(right - now.width, ty));
+    }
+
+    if (last == null) return;
+    final buckets = math.max(2, (right / 3).floor());
+
+    /// Runs of reduced points, split where the samples have a long gap.
+    List<List<Offset>> runs(List<Sample> raw) {
+      final pts = reducePeaks(raw, buckets, start: start, end: last);
+      final out = <List<Offset>>[];
+      Sample? prev;
+      for (final s in pts) {
+        if (prev == null || s.t - prev.t > chartGapBreak.inMilliseconds) {
+          out.add([]);
+        }
+        out.last.add(Offset(x(s.t), y(s.v)));
+        prev = s;
       }
-      if (fill) {
-        final area = Path.from(path)
-          ..lineTo(right, bottom)
-          ..lineTo(start, bottom)
-          ..close();
-        canvas.drawPath(area, Paint()..color = color.withValues(alpha: .10));
-      }
-      return path;
+      return out;
     }
 
     final stroke = Paint()
       ..style = PaintingStyle.stroke
       ..strokeJoin = StrokeJoin.round
       ..strokeCap = StrokeCap.round;
-    if (secondary != null) {
-      final p = line(secondary!);
-      if (p != null) {
-        canvas.drawPath(
-          p,
+
+    if (second.isNotEmpty) {
+      for (final run in runs(second)) {
+        if (run.length < 2) continue;
+        _dashed(
+          canvas,
+          _path(run),
           stroke
             ..color = secondaryColor
-            ..strokeWidth = 1.25,
+            ..strokeWidth = 1.5,
         );
       }
     }
-    final main = line(values, fill: true);
-    if (main != null) {
+    if (main.isEmpty) return;
+    for (final run in runs(main)) {
+      if (run.length < 2) {
+        canvas.drawCircle(run.first, 1.5, Paint()..color = color);
+        continue;
+      }
+      final path = _path(run);
+      if (fill) {
+        final area = Path.from(path)
+          ..lineTo(run.last.dx, bottom)
+          ..lineTo(run.first.dx, bottom)
+          ..close();
+        canvas.drawPath(area, Paint()..color = color.withValues(alpha: .10));
+      }
       canvas.drawPath(
-        main,
+        path,
         stroke
           ..color = color
           ..strokeWidth = 1.75,
       );
-      final last = Offset(right, y(bucketMeans(values, buckets).last));
-      canvas.drawCircle(last, 4, Paint()..color = NX.bg);
-      canvas.drawCircle(last, 2.75, Paint()..color = color);
+    }
+    final dot = Offset(x(main.last.t), y(main.last.v));
+    endpoint = dot;
+    canvas.drawCircle(dot, 4, Paint()..color = NX.bg);
+    canvas.drawCircle(dot, 2.75, Paint()..color = color);
+  }
+
+  static Path _path(List<Offset> pts) {
+    final p = Path()..moveTo(pts.first.dx, pts.first.dy);
+    for (final o in pts.skip(1)) {
+      p.lineTo(o.dx, o.dy);
+    }
+    return p;
+  }
+
+  static void _dashed(Canvas canvas, Path path, Paint paint) {
+    const dash = 5.0, gap = 4.0;
+    for (final PathMetric m in path.computeMetrics()) {
+      var d = 0.0;
+      while (d < m.length) {
+        canvas.drawPath(m.extractPath(d, math.min(d + dash, m.length)), paint);
+        d += dash + gap;
+      }
     }
   }
 
   @override
-  bool shouldRepaint(_LinePainter old) => true;
+  bool shouldRepaint(TimeChartPainter old) => true;
+}
+
+// ---------------------------------------------------------------------------
+// Legend
+
+/// A short stroke matching a chart line: solid or dashed.
+class LegendStroke extends StatelessWidget {
+  const LegendStroke({super.key, required this.color, this.dashed = false});
+  final Color color;
+  final bool dashed;
+
+  @override
+  Widget build(BuildContext context) => CustomPaint(
+    size: const Size(18, 8),
+    painter: _StrokePainter(color, dashed),
+  );
+}
+
+class _StrokePainter extends CustomPainter {
+  _StrokePainter(this.color, this.dashed);
+  final Color color;
+  final bool dashed;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = dashed ? 1.5 : 1.75
+      ..strokeCap = StrokeCap.round;
+    final y = size.height / 2;
+    if (!dashed) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
+      return;
+    }
+    for (var x = 0.0; x < size.width; x += 9) {
+      canvas.drawLine(
+        Offset(x, y),
+        Offset(math.min(x + 5, size.width), y),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(_StrokePainter old) =>
+      old.color != color || old.dashed != dashed;
+}
+
+/// "── Download  - - Upload" with values.
+class ChartLegend extends StatelessWidget {
+  const ChartLegend({super.key, required this.entries});
+
+  /// (label, value, color, dashed)
+  final List<(String, String, Color, bool)> entries;
+
+  @override
+  Widget build(BuildContext context) => Wrap(
+    spacing: 16,
+    runSpacing: 4,
+    children: [
+      for (final (label, value, color, dashed) in entries)
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            LegendStroke(color: color, dashed: dashed),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: const TextStyle(color: NX.textDim, fontSize: 12.5),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              value,
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                fontFeatures: NX.tabular,
+              ),
+            ),
+          ],
+        ),
+    ],
+  );
 }

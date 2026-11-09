@@ -1,36 +1,91 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
 import 'monitor_models.dart';
+import 'time_series.dart';
 
-/// Rolling series for charts; one sample per monitor-update (1-5 s).
+export 'time_series.dart';
+
+/// Rolling, timestamped series for charts and headlines. Each reading keeps
+/// the host's own timestamp, so charts plot real elapsed time even when pushes
+/// arrive irregularly or after a reconnect.
 class MonitorHistory {
-  MonitorHistory([Map<String, List<double>>? series]) : series = series ?? {};
-  final Map<String, List<double>> series;
-  static const capacity = 150;
-  List<double> operator [](String key) => series[key] ?? const [];
-  MonitorHistory add(Vitals v) {
-    final next = {for (final e in series.entries) e.key: List<double>.of(e.value)};
+  MonitorHistory([Map<String, List<Sample>>? series]) : series = series ?? {};
+
+  /// Evenly spaced values ending at [end] (tests and previews).
+  factory MonitorHistory.values(
+    Map<String, List<double>> values, {
+    int stepMs = 2000,
+    int? end,
+  }) {
+    final last = end ?? DateTime.now().millisecondsSinceEpoch;
+    return MonitorHistory({
+      for (final e in values.entries)
+        e.key: [
+          for (var i = 0; i < e.value.length; i++)
+            Sample(last - (e.value.length - 1 - i) * stepMs, e.value[i]),
+        ],
+    });
+  }
+
+  final Map<String, List<Sample>> series;
+
+  /// What the charts show.
+  static const window = Duration(minutes: 5);
+
+  /// What is kept (a little more than [window], bounded in count).
+  static const keep = Duration(minutes: 6);
+  static const capacity = 400;
+
+  /// Samples for [key], oldest first.
+  List<Sample> samples(String key) => series[key] ?? const [];
+
+  /// Values only, oldest first.
+  List<double> operator [](String key) => [for (final s in samples(key)) s.v];
+
+  /// Window stats for [key] ending at its latest sample.
+  SeriesStats? stats(String key, {Duration window = window, int? end}) =>
+      statsOf(samples(key), window, end: end);
+
+  /// Adds every metric of [v] at the host time [at] (milliseconds). A sample
+  /// at or before the series' last time replaces nothing and is dropped, so a
+  /// one-shot refresh racing a push never draws a step backwards.
+  MonitorHistory add(Vitals v, {int? at}) {
+    final t = at ?? (v.timestamp > 0 ? v.timestamp : 0);
+    if (t <= 0) return this;
+    final next = {
+      for (final e in series.entries) e.key: List<Sample>.of(e.value),
+    };
     void push(String key, double? value) {
-      if (value == null) return;
+      if (value == null || !value.isFinite) return;
       final list = next.putIfAbsent(key, () => []);
-      list.add(value);
-      if (list.length > capacity) list.removeRange(0, list.length - capacity);
+      if (list.isNotEmpty && list.last.t >= t) return;
+      list.add(Sample(t, value));
+      final oldest = t - keep.inMilliseconds;
+      var drop = 0;
+      while (drop < list.length && list[drop].t < oldest) {
+        drop++;
+      }
+      drop = math.max(drop, list.length - capacity);
+      if (drop > 0) list.removeRange(0, drop);
     }
 
+    final gpu = v.mainGpu;
     push('cpu', v.cpu);
     push('ram', v.ramPercent);
-    push('gpu', v.mainGpu?.busy);
-    push('vram', v.mainGpu?.vramPercent);
     push('cpuTemp', v.cpuTempC);
-    push('gpuTemp', v.mainGpu?.hotspotC ?? v.mainGpu?.tempC);
+    push('gpu', gpu?.busy);
+    push('vram', gpu?.vramPercent);
+    // The hottest GPU sensor, the one that throttles (same as the headline).
+    push('gpuTemp', gpu?.hotspotC ?? gpu?.tempC);
+    push('gpuPower', gpu?.powerW);
     push('netRx', v.netRx);
     push('netTx', v.netTx);
     push('diskRead', v.diskRead);
     push('diskWrite', v.diskWrite);
-    push('gpuPower', v.mainGpu?.powerW);
     return MonitorHistory(next);
   }
 }
@@ -64,7 +119,12 @@ class MonitorNotifier extends Notifier<MonitorState> {
     if (last != null && snapshot.at.isBefore(last.at)) return;
     state = MonitorState(
       snapshot: snapshot,
-      history: (state.history ?? MonitorHistory()).add(snapshot.vitals),
+      history: (state.history ?? MonitorHistory()).add(
+        snapshot.vitals,
+        at: snapshot.vitals.timestamp > 0
+            ? snapshot.vitals.timestamp
+            : snapshot.at.millisecondsSinceEpoch,
+      ),
     );
   }
 
@@ -92,10 +152,8 @@ class MonitorNotifier extends Notifier<MonitorState> {
   Future<String> launch(String appId) =>
       _action('monitor.appAction', {'appId': appId, 'action': 'launch'});
 
-  Future<String> remoteAction(String service, String action) => _action(
-    'monitor.remoteAction',
-    {'service': service, 'action': action},
-  );
+  Future<String> remoteAction(String service, String action) =>
+      _action('monitor.remoteAction', {'service': service, 'action': action});
 
   Future<String> _action(String method, Map<String, dynamic> params) async {
     final client = _client;

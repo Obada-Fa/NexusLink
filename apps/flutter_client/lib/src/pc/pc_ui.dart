@@ -24,7 +24,7 @@ Key? stillKey(BuildContext context, Object? value) =>
 // ---------------------------------------------------------------------------
 // Formatting
 
-String fmtTemp(double? c) => c == null ? '—' : '${c.round()}°C';
+String fmtTemp(double? c) => c == null ? '—' : '${c.round()} °C';
 
 String fmtPct(double v) =>
     v > 0 && v < 10 ? '${v.toStringAsFixed(1)}%' : '${v.round()}%';

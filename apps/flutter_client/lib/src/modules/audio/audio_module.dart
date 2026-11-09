@@ -37,7 +37,12 @@ class AudioModule extends NexusModule
 
   @override
   CapabilityRequirement get requires =>
-      const CapabilityRequirement.anyOf(['audio.source', 'audio.sink', 'mic']);
+      const CapabilityRequirement.anyOf([
+        'audio.source',
+        'audio.sink',
+        'mic',
+        'phone_mic',
+      ]);
 
   @override
   Set<TargetPlatform> get platforms => const {TargetPlatform.android};

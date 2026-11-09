@@ -19,8 +19,9 @@ class GpuVitals {
   double? get busy => _dn(json['busyPercent']);
   double? get vramUsed => _dn(json['vramUsedBytes']);
   double? get vramTotal => _dn(json['vramTotalBytes']);
-  double? get vramPercent =>
-      vramUsed != null && (vramTotal ?? 0) > 0 ? vramUsed! / vramTotal! * 100 : null;
+  double? get vramPercent => vramUsed != null && (vramTotal ?? 0) > 0
+      ? vramUsed! / vramTotal! * 100
+      : null;
   double? get tempC => _dn(json['tempC']);
   double? get hotspotC => _dn(json['hotspotC']);
   double? get memTempC => _dn(json['memTempC']);
@@ -40,8 +41,7 @@ class Vitals {
   int get timestamp => _i(json['timestamp']);
   String get hostname => json['hostname'] as String? ?? 'PC';
   int get uptimeSeconds => _i(json['uptimeSeconds']);
-  List<double> get load =>
-      (json['load'] as List? ?? const []).map(_d).toList();
+  List<double> get load => (json['load'] as List? ?? const []).map(_d).toList();
   String get cpuModel => _cpu['model'] as String? ?? 'CPU';
   int get cores => _i(_cpu['cores']);
   double get cpu => _d(_cpu['percent']);
@@ -150,8 +150,7 @@ String formatBytes(double bytes, {int digits = 1}) {
   return '${v.toStringAsFixed(i < 2 ? 0 : digits)} ${units[i]}';
 }
 
-String formatRate(double bytesPerSecond) =>
-    '${formatBytes(bytesPerSecond)}/s';
+String formatRate(double bytesPerSecond) => '${formatBytes(bytesPerSecond)}/s';
 
 String formatUptime(int seconds) {
   final d = seconds ~/ 86400;

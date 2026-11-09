@@ -14,6 +14,8 @@ import '../../shell/module.dart';
 import '../../shell/target_actions.dart';
 import '../../theme/nexus_theme.dart';
 import '../../theme/nx_widgets.dart';
+import '../../pc/phone_mic.dart';
+import '../../state/connection.dart';
 import 'audio_messages.dart';
 import 'audio_runtime.dart';
 
@@ -51,12 +53,19 @@ class _AudioScreenState extends ConsumerState<AudioScreen> {
   Widget build(BuildContext context) {
     final ctx = widget.ctx;
     final target = ctx.target;
-    final online = ctx.isReachable(UtilityIds.audio);
+    // PCs without Nexus Audio still get NexusLink's older phone mic here.
+    final hasAudio = target.has(UtilityIds.audio);
+    final online = ctx.isReachable(
+      hasAudio ? UtilityIds.audio : UtilityIds.nexuslink,
+    );
     return Scaffold(
       body: SafeArea(
         bottom: false,
         child: ListenableBuilder(
-          listenable: Listenable.merge([AudioRuntime.view, AudioRuntime.blocked]),
+          listenable: Listenable.merge([
+            AudioRuntime.view,
+            AudioRuntime.blocked,
+          ]),
           builder: (context, _) {
             final view = AudioRuntime.view.value;
             final blocked = AudioRuntime.blockedFor(target.id);
@@ -65,73 +74,100 @@ class _AudioScreenState extends ConsumerState<AudioScreen> {
               key: const ValueKey('audio-screen'),
               padding: const EdgeInsets.only(bottom: 40),
               children: [
-                _Header(pc: target.name, online: online, live: view.onStreams.length),
-                if (blocked != null)
-                  _Banner(
-                    key: const ValueKey('audio-blocked'),
-                    color: NX.waiting,
-                    icon: Icons.key_off_rounded,
-                    text: blocked,
-                    actions: [
-                      TextButton(onPressed: _scan, child: const Text('Scan QR')),
-                    ],
-                  )
-                else if (view.pairAgain)
-                  _Banner(
-                    key: const ValueKey('audio-pair-again'),
-                    color: NX.waiting,
-                    icon: Icons.link_off,
-                    text:
-                        '${target.name} no longer accepts this phone for '
-                        'Audio. Scan the QR code from Nexus Utilities to pair '
-                        'again.',
-                    actions: [
-                      TextButton(onPressed: _scan, child: const Text('Scan QR')),
-                    ],
-                  ),
-                if (view.problem case final p?)
-                  _Banner(
-                    key: const ValueKey('audio-problem'),
-                    color: p.openSettings ? NX.waiting : NX.failed,
-                    icon: p.openSettings
-                        ? Icons.mic_off_rounded
-                        : Icons.error_outline_rounded,
-                    text: p.message,
-                    actions: [
-                      TextButton(
-                        onPressed: AudioRuntime.dismissProblem,
-                        child: const Text('Dismiss'),
-                      ),
-                      if (p.openSettings)
+                _Header(
+                  pc: target.name,
+                  online: online,
+                  live: view.onStreams.length,
+                ),
+                if (!hasAudio) ...[
+                  const _LegacyMic(audioPaired: false),
+                ] else ...[
+                  if (blocked != null)
+                    _Banner(
+                      key: const ValueKey('audio-blocked'),
+                      color: NX.waiting,
+                      icon: Icons.key_off_rounded,
+                      text: blocked,
+                      actions: [
                         TextButton(
-                          onPressed: AudioRuntime.openSettings,
-                          child: const Text('Open settings'),
+                          onPressed: _scan,
+                          child: const Text('Scan QR'),
                         ),
-                      if (p.pairAgain)
-                        TextButton(onPressed: _scan, child: const Text('Scan QR')),
-                    ],
-                  ),
-                const NxSectionHeader('Streams'),
-                for (final s in AudioStream.values)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(NX.pad, 0, NX.pad, NX.gap),
-                    child: StreamCard(
-                      stream: s,
-                      view: view,
-                      pc: target.name,
-                      enabled: ready,
-                      onChanged: (on) => AudioRuntime.setStream(s, on),
+                      ],
+                    )
+                  else if (view.pairAgain)
+                    _Banner(
+                      key: const ValueKey('audio-pair-again'),
+                      color: NX.waiting,
+                      icon: Icons.link_off,
+                      text:
+                          '${target.name} no longer accepts this phone for '
+                          'Audio. Scan the QR code from Nexus Utilities to pair '
+                          'again.',
+                      actions: [
+                        TextButton(
+                          onPressed: _scan,
+                          child: const Text('Scan QR'),
+                        ),
+                      ],
+                    ),
+                  if (view.problem case final p?)
+                    _Banner(
+                      key: const ValueKey('audio-problem'),
+                      color: p.openSettings ? NX.waiting : NX.failed,
+                      icon: p.openSettings
+                          ? Icons.mic_off_rounded
+                          : Icons.error_outline_rounded,
+                      text: p.message,
+                      actions: [
+                        TextButton(
+                          onPressed: AudioRuntime.dismissProblem,
+                          child: const Text('Dismiss'),
+                        ),
+                        if (p.openSettings)
+                          TextButton(
+                            onPressed: AudioRuntime.openSettings,
+                            child: const Text('Open settings'),
+                          ),
+                        if (p.pairAgain)
+                          TextButton(
+                            onPressed: _scan,
+                            child: const Text('Scan QR'),
+                          ),
+                      ],
+                    ),
+                  const NxSectionHeader('Streams'),
+                  for (final s in AudioStream.values)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        NX.pad,
+                        0,
+                        NX.pad,
+                        NX.gap,
+                      ),
+                      child: StreamCard(
+                        stream: s,
+                        view: view,
+                        pc: target.name,
+                        enabled: ready,
+                        onChanged: (on) => AudioRuntime.setStream(s, on),
+                      ),
+                    ),
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(NX.pad + 4, 4, NX.pad + 4, 0),
+                    child: Text(
+                      'Streams keep running when you leave the app. Stop them '
+                      'here, from the live bar on the home screen, or from the '
+                      'notification.',
+                      style: TextStyle(
+                        color: NX.textFaint,
+                        fontSize: 12.5,
+                        height: 1.4,
+                      ),
                     ),
                   ),
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(NX.pad + 4, 4, NX.pad + 4, 0),
-                  child: Text(
-                    'Streams keep running when you leave the app. Stop them '
-                    'here, from the live bar on the home screen, or from the '
-                    'notification.',
-                    style: TextStyle(color: NX.textFaint, fontSize: 12.5, height: 1.4),
-                  ),
-                ),
+                  const _LegacyMic(audioPaired: true),
+                ],
               ],
             );
           },
@@ -164,12 +200,20 @@ class _Header extends StatelessWidget {
             children: [
               const Text(
                 'Audio',
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, letterSpacing: -.3),
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: -.3,
+                ),
               ),
               const SizedBox(height: 2),
               Row(
                 children: [
-                  LiveDot(color: online ? NX.working : NX.idle, size: 7, pulse: false),
+                  LiveDot(
+                    color: online ? NX.working : NX.idle,
+                    size: 7,
+                    pulse: false,
+                  ),
                   const SizedBox(width: 6),
                   Flexible(
                     child: Text(
@@ -232,7 +276,10 @@ class StreamCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              _StreamBadge(icon: streamIcon(stream), color: on ? color : NX.idle),
+              _StreamBadge(
+                icon: streamIcon(stream),
+                color: on ? color : NX.idle,
+              ),
               const SizedBox(width: 14),
               Expanded(
                 child: Column(
@@ -240,12 +287,19 @@ class StreamCard extends StatelessWidget {
                   children: [
                     Text(
                       streamTitle(stream),
-                      style: const TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700),
+                      style: const TextStyle(
+                        fontSize: 16.5,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
                     const SizedBox(height: 2),
                     Text(
                       streamDescription(stream, pc),
-                      style: const TextStyle(color: NX.textDim, fontSize: 12.5, height: 1.3),
+                      style: const TextStyle(
+                        color: NX.textDim,
+                        fontSize: 12.5,
+                        height: 1.3,
+                      ),
                     ),
                   ],
                 ),
@@ -346,9 +400,7 @@ class MicLevelMeter extends StatelessWidget {
                   duration: const Duration(milliseconds: 90),
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(2),
-                    color: i < lit
-                        ? _segmentColor(i / segments)
-                        : NX.surface3,
+                    color: i < lit ? _segmentColor(i / segments) : NX.surface3,
                   ),
                 ),
               ),
@@ -393,7 +445,12 @@ class _Banner extends StatelessWidget {
             children: [
               Icon(icon, color: color, size: 20),
               const SizedBox(width: 10),
-              Expanded(child: Text(text, style: const TextStyle(fontSize: 13.5, height: 1.35))),
+              Expanded(
+                child: Text(
+                  text,
+                  style: const TextStyle(fontSize: 13.5, height: 1.35),
+                ),
+              ),
             ],
           ),
           Row(mainAxisAlignment: MainAxisAlignment.end, children: actions),
@@ -401,4 +458,61 @@ class _Banner extends StatelessWidget {
       ),
     ),
   );
+}
+
+/// NexusLink's older phone-mic control: the only mic on PCs without Nexus
+/// Audio, and a collapsed fallback on PCs that have it.
+class _LegacyMic extends ConsumerWidget {
+  const _LegacyMic({required this.audioPaired});
+  final bool audioPaired;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(connectionStatusProvider);
+    final client = ref.watch(activeClientProvider);
+    final supported = client?.supports('mic.v1') == true;
+    if (audioPaired) {
+      if (!supported) return const SizedBox.shrink();
+      return const Padding(
+        padding: EdgeInsets.only(top: 16),
+        child: ExpansionTile(
+          key: ValueKey('legacy-mic'),
+          tilePadding: EdgeInsets.symmetric(horizontal: NX.pad),
+          shape: Border(),
+          collapsedShape: Border(),
+          title: Text('Use as PC mic (older method)'),
+          subtitle: Text(
+            'Through NexusLink, for when Audio isn’t working',
+            style: TextStyle(color: NX.textDim, fontSize: 12.5),
+          ),
+          children: [PhoneMicSection(key: ValueKey('pc-mic'))],
+        ),
+      );
+    }
+    return Column(
+      key: const ValueKey('legacy-mic'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(NX.pad, 8, NX.pad, 4),
+          child: Text(
+            'Nexus Audio isn’t set up on this PC. You can still use the '
+            'phone as its microphone through NexusLink.',
+            style: TextStyle(color: NX.textDim, fontSize: 13, height: 1.4),
+          ),
+        ),
+        if (supported)
+          const PhoneMicSection(key: ValueKey('pc-mic'))
+        else
+          const Padding(
+            padding: EdgeInsets.fromLTRB(NX.pad, 12, NX.pad, 0),
+            child: Text(
+              'This PC’s NexusLink host doesn’t support the phone mic yet. '
+              'Update it, or pair Nexus Audio from Nexus Utilities.',
+              style: TextStyle(color: NX.textFaint, fontSize: 12.5),
+            ),
+          ),
+      ],
+    );
+  }
 }

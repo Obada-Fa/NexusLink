@@ -24,7 +24,15 @@ class Capability {
 }
 
 const phase1Capabilities = <String, List<String>>{
-  UtilityIds.nexuslink: ['screen', 'apps', 'files', 'terminal', 'agents'],
+  UtilityIds.nexuslink: [
+    'screen',
+    'apps',
+    'files',
+    'terminal',
+    'agents',
+    // NexusLink's older phone mic (mic.v1), shown under Audio.
+    'phone_mic',
+  ],
   UtilityIds.remote: ['input', 'dictation'],
   UtilityIds.audio: ['audio.source', 'audio.sink', 'mic'],
   // audio.source = PC speakers can stream to the phone
