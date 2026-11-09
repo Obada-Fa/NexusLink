@@ -68,12 +68,17 @@ class AppInfoScreen extends ConsumerStatefulWidget {
 }
 
 class _AppInfoScreenState extends ConsumerState<AppInfoScreen> {
+  /// The last live entry, kept only to name what went away.
   AppEntry? _last;
 
   @override
   Widget build(BuildContext context) {
-    final entry = currentEntry(ref, widget.entryKey) ?? _last;
-    _last = entry;
+    // Launchable apps stay listed (in the drawer) after they close, so a
+    // missing entry is something that can't be reopened from here: a terminal
+    // agent that exited, a window or phone session that closed. Its commands
+    // would act on nothing (or on a reused id), so none are offered.
+    final entry = currentEntry(ref, widget.entryKey);
+    if (entry != null) _last = entry;
     final apps = ref.watch(appsProvider).value ?? const <AppInfo>[];
     ref.watch(
       launcherPreferencesProvider(ref.watch(connectionProvider).hostUrl ?? ''),
@@ -84,7 +89,7 @@ class _AppInfoScreenState extends ConsumerState<AppInfoScreen> {
         owner: 'app-info',
         intervalMs: 2000,
         child: entry == null
-            ? const Center(child: Text('This app is no longer open.'))
+            ? _Gone(last: _last)
             : ValueListenableBuilder<Map<String, String>>(
                 valueListenable: appProgress,
                 builder: (context, progress, _) =>
@@ -279,6 +284,36 @@ class _AppInfoScreenState extends ConsumerState<AppInfoScreen> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// The entry went away while App info was open: say so, with no actions.
+class _Gone extends StatelessWidget {
+  const _Gone({this.last});
+  final AppEntry? last;
+
+  @override
+  Widget build(BuildContext context) {
+    final last = this.last;
+    final text = last == null
+        ? 'This app is no longer open.'
+        : '${last.name} is no longer open.';
+    return Center(
+      key: const ValueKey('app-info-gone'),
+      child: Padding(
+        padding: const EdgeInsets.all(NX.pad),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (last != null) ...[
+              AppIconTile(icon: last.icon, name: last.name, size: 52),
+              const SizedBox(height: 14),
+            ],
+            Text(text, textAlign: TextAlign.center),
+          ],
+        ),
+      ),
     );
   }
 }

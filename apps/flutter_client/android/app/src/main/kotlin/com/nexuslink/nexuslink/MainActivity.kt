@@ -121,13 +121,30 @@ class MainActivity : FlutterActivity() {
                         stopService(Intent(this,LiveActivityService::class.java))
                         result.success(null)
                     }
-                    "live.pendingTask" -> {val target=intent.getStringExtra("host");val id=intent.getStringExtra("taskId");val approval=intent.getBooleanExtra("approval",false);intent.removeExtra("taskId");intent.removeExtra("host");intent.removeExtra("approval");result.success(if(target==null)null else mapOf("taskId" to id,"host" to target,"approval" to approval))}
+                    "live.pendingTask" -> result.success(takeTaskLink(intent))
                     else -> result.notImplemented()
                 }
             } catch(e:Exception) { result.error("ANDROID",e.message,null) }
         }
     }
-    override fun onNewIntent(intent:Intent) {super.onNewIntent(intent);setIntent(intent);if(::channel.isInitialized)channel.invokeMethod("openTask",mapOf("taskId" to intent.getStringExtra("taskId"),"host" to intent.getStringExtra("host"),"approval" to intent.getBooleanExtra("approval",false)))}
+    override fun onNewIntent(intent:Intent) {
+        super.onNewIntent(intent);setIntent(intent)
+        // Warm start. Only task links (they name their PC) are forwarded; once
+        // delivered they are removed so live.pendingTask can't replay them.
+        if(::channel.isInitialized)takeTaskLink(intent)?.let{channel.invokeMethod("openTask",it)}
+    }
+    /** A tapped task link: taskId, host (the PC), approval and, from newer notifications,
+     *  requestId (the exact approval request). Older intents simply lack requestId. Consumed once. */
+    private fun takeTaskLink(intent:Intent):Map<String,Any?>? {
+        val host=intent.getStringExtra("host")
+        val link=if(host.isNullOrEmpty())null else mapOf(
+            "taskId" to intent.getStringExtra("taskId"),
+            "host" to host,
+            "approval" to intent.getBooleanExtra("approval",false),
+            "requestId" to intent.getStringExtra("requestId"))
+        for(key in listOf("taskId","host","approval","requestId"))intent.removeExtra(key)
+        return link
+    }
     override fun onResume(){super.onResume();LiveActivityService.visible=true;LiveActivityService.instance?.updateOverlay();resumeMonitoring()}
     /** Monitoring the user left on but Android stopped (or refused to restart in the background) resumes when the app is opened. */
     private fun resumeMonitoring(){

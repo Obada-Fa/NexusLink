@@ -100,19 +100,23 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     await shell.autoConnect();
   }
 
+  int _notificationGeneration = 0;
+
   /// A tapped agent notification: switch to its PC and open Agents.
   Future<void> _openTask(
     Map<String, dynamic> args, {
     bool coldStart = false,
   }) async {
     final shell = ref.read(shellProvider.notifier);
+    final generation = ++_notificationGeneration;
     if (coldStart) resetAutoConnect();
-    final host = args['host'] as String?;
-    ref.read(pendingTaskProvider.notifier).select(args['taskId'] as String?);
-    ref
-        .read(approvalCheckProvider.notifier)
-        .select(args['approval'] == true ? args['taskId'] as String? : null);
-    if (host != null) {
+    final host = args['host'];
+    final link = taskLinkFromIntent(args);
+    // A newer tap replaces any older link. The new one is only published
+    // after the old screens are popped, so a chat list still showing (for
+    // this PC or another) can't take it and then be closed under it.
+    ref.read(pendingTaskProvider.notifier).select(null);
+    if (host is String && host.trim().isNotEmpty) {
       final url = normalizeHostWsUrl(host);
       final target = shell.targetForUrl(url);
       if (target != null) {
@@ -123,15 +127,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         try {
           await shell.addNexusLink(url);
         } catch (e) {
-          if (mounted) {
+          if (mounted && generation == _notificationGeneration) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(content: Text('Connect to the alert’s PC: $e')),
             );
           }
+          return;
         }
       }
     }
+    if (!mounted || generation != _notificationGeneration) return;
     _openModule('agents', fromScratch: true);
+    // The fresh Agents list takes it once connected to the link's PC.
+    ref.read(pendingTaskProvider.notifier).select(link);
   }
 
   /// Module ids pushed above home, bottom to top.
@@ -149,12 +157,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     final ctx = ref.read(moduleContextProvider);
     if (module == null || ctx == null) return;
     _ensureConnected(module, ctx);
-    unawaited(
-      ref
-          .read(lastDestinationsProvider.notifier)
-          .record(ctx.target.id, module.id)
-          .catchError((_) {}),
-    );
+    // Continue remembers where you went from Home. A module opened from
+    // inside another one (chat → project files), or returned to, is a detour:
+    // recording it would replace "Continue → that chat" with the detour.
+    if (fromScratch || _moduleStack.isEmpty) {
+      unawaited(
+        ref
+            .read(lastDestinationsProvider.notifier)
+            .record(ctx.target.id, module.id)
+            .catchError((_) {}),
+      );
+    }
     final nav = Navigator.of(context);
     if (fromScratch) {
       nav.popUntil((r) => r.settings.name == _homeRouteName || r.isFirst);
@@ -687,7 +700,12 @@ class _HomeView extends ConsumerWidget {
                           onTap: () {
                             ref
                                 .read(pendingTaskProvider.notifier)
-                                .select('chat:${approvals.first.chatId}');
+                                .select(
+                                  TaskLink(
+                                    'chat:${approvals.first.chatId}',
+                                    hostUrl: url!,
+                                  ),
+                                );
                             onOpenModule('agents');
                           },
                         )
@@ -704,10 +722,16 @@ class _HomeView extends ConsumerWidget {
                           onTap: () {
                             // Reopen the task, not just the tool.
                             if (last.chatId != null &&
-                                last.moduleId == 'agents') {
+                                last.moduleId == 'agents' &&
+                                url != null) {
                               ref
                                   .read(pendingTaskProvider.notifier)
-                                  .select('chat:${last.chatId}');
+                                  .select(
+                                    TaskLink(
+                                      'chat:${last.chatId}',
+                                      hostUrl: url,
+                                    ),
+                                  );
                             } else if (last.path != null &&
                                 last.moduleId == 'files') {
                               ref
@@ -1079,6 +1103,27 @@ String? continueLabel(LastDestination last, {String? project}) {
   final path = last.path;
   if (path != null && path.isNotEmpty) return folderDisplayName(path);
   return project;
+}
+
+/// The task a tapped notification names (`openTask` / `live.pendingTask`
+/// arguments: `taskId`, `host`, `approval`, and since 1.0.47 `requestId`).
+/// Older intents have no `requestId`; those without a PC or task open none.
+TaskLink? taskLinkFromIntent(Map<String, dynamic> args) {
+  final id = args['taskId'];
+  final host = args['host'];
+  if (id is! String || id.isEmpty || host is! String || host.trim().isEmpty) {
+    return null;
+  }
+  final request = args['requestId'];
+  final approval = args['approval'] == true;
+  return TaskLink(
+    id,
+    hostUrl: normalizeHostWsUrl(host),
+    approval: approval,
+    requestId: approval && request is String && request.isNotEmpty
+        ? request
+        : null,
+  );
 }
 
 /// "Offline · seen 2 h ago" once the PC has been reachable before.

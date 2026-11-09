@@ -81,7 +81,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
     await _load();
     if (!mounted) return;
     _bind();
-    if (mounted) await _openPending(ref.read(pendingTaskProvider));
+    if (mounted) await _openPending();
   }
 
   void _bind() {
@@ -400,21 +400,32 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
     if (mounted) await _load(quiet: true);
   }
 
-  Future<void> _openPending(String? task) async {
-    if (task == null || !_repo.online || !mounted) return;
-    ref.read(pendingTaskProvider.notifier).select(null);
+  /// Opens the pending notification / Continue link once this list is the
+  /// top-level one, connected to the link's own PC. A link for another PC
+  /// waits (the shell is switching to it; this list rebinds when it does).
+  Future<void> _openPending() async {
+    if (widget.folder != null || !mounted || !_repo.online) return;
+    // A list being popped (a notification tap starts from Home) is not it.
+    if (ModalRoute.of(context)?.isCurrent == false) return;
+    final link = ref.read(pendingTaskProvider.notifier).takeFor(_repo.address);
+    if (link == null) return;
+    final task = link.id;
     try {
       if (task.startsWith('chat:')) {
         final page = await _repo.client!.requestMap('chat.historyPage', {
           'chatId': task.substring(5),
           'limit': 5,
         });
-        if (!mounted) return;
+        if (!mounted ||
+            !link.isFor(_repo.address) ||
+            ModalRoute.of(context)?.isCurrent == false) {
+          return;
+        }
         final chat = page['chat'];
         if (chat is! Map) throw StateError('This chat is no longer available');
         await _open(ChatSummary(Map<String, dynamic>.from(chat)));
       } else {
-        unawaited(_sayIfAnswered(task));
+        if (link.approval) unawaited(_sayIfAnswered(link));
         final chat = _items
             .where((row) => row['agentSessionId'] == task)
             .firstOrNull;
@@ -439,16 +450,18 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
 
   /// Opened from an approval notification: if the PC has nothing left to
   /// answer in that chat, say so instead of leaving the user hunting for it.
-  Future<void> _sayIfAnswered(String task) async {
-    if (ref.read(approvalCheckProvider) != task) return;
-    ref.read(approvalCheckProvider.notifier).select(null);
+  Future<void> _sayIfAnswered(TaskLink link) async {
     final client = _repo.client;
     if (client == null || !client.supports('agent.pendingApprovals')) return;
     try {
       final pending = await client.requestList('agent.pendingApprovals', {
-        'agentSessionId': task,
+        'agentSessionId': link.id,
       });
-      if (!mounted || pending.isNotEmpty) return;
+      if (!mounted ||
+          !identical(client, _repo.client) ||
+          approvalStillPending(link, pending)) {
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
@@ -668,8 +681,14 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
 
   @override
   Widget build(BuildContext context) {
-    ref.listen<String?>(pendingTaskProvider, (_, task) {
-      unawaited(_openPending(task));
+    ref.listen<TaskLink?>(pendingTaskProvider, (_, link) {
+      if (link != null) unawaited(_openPending());
+    });
+    // A link for this PC that arrived while connecting opens once connected.
+    ref.listen<RpcStatus>(connectionStatusProvider, (prev, next) {
+      if (next == RpcStatus.connected && prev != RpcStatus.connected) {
+        unawaited(_openPending());
+      }
     });
     final status = ref.watch(connectionStatusProvider);
     ref.listen(chatRepositoryProvider, (_, _) {

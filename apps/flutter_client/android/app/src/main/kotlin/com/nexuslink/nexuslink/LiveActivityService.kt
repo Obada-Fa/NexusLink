@@ -161,11 +161,17 @@ class LiveActivityService:Service() {
     }
     /** Drop this socket and reconnect with backoff (fresh authentication). */
     private fun reconnect(){val gen=generation;socket?.cancel();lost(gen)}
-    /** [approval]: the tap is for an approval request, so the app can say if it was already answered. */
-    private fun openTask(id:String?=null,approval:Boolean=false):PendingIntent {
+    /** [approval]: the tap is for an approval request, so the app can say if it was already answered.
+     *  [requestId]: that exact request, so a second request in the same session is told apart. */
+    private fun openTask(id:String?=null,approval:Boolean=false,requestId:String?=null):PendingIntent {
+        val request=requestId?.takeIf{approval && it.isNotEmpty()}
         val intent=Intent(this,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP).putExtra("taskId",id).putExtra("host",host).putExtra("approval",approval)
-        val code=(id?.hashCode()?:0)+(if(approval)1 else 0)
-        return PendingIntent.getActivity(this,code,intent,PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        if(request!=null)intent.putExtra("requestId",request)
+        // Extras don't make PendingIntents distinct, so FLAG_UPDATE_CURRENT would rewrite an
+        // earlier card's extras with a later one's: key each by PC, task and request.
+        val key="$host|${id.orEmpty()}|${if(approval)"approval" else "open"}|${request.orEmpty()}"
+        if(Build.VERSION.SDK_INT>=29)intent.setIdentifier(key)
+        return PendingIntent.getActivity(this,key.hashCode(),intent,PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
     private fun builder(channel:String)=if(Build.VERSION.SDK_INT>=26)Notification.Builder(this,channel) else Notification.Builder(this)
     private fun notification():Notification {
@@ -416,7 +422,7 @@ class LiveActivityService:Service() {
             .setContentTitle(heading).setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText("$body\n${preview.take(2048)}"))
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setAutoCancel(true).setOnlyAlertOnce(true)
-            .setGroup("tasks:$hostId").setContentIntent(openTask(task,kind=="approval-requested"))
+            .setGroup("tasks:$hostId").setContentIntent(openTask(task,kind=="approval-requested",record.optString("requestId")))
         if(prefs.getBoolean("actions",false)){
             if(kind=="approval-requested"){
                 if(record.optBoolean("previewComplete") && record.optJSONArray("availableActions")?.toString()?.contains("approve")==true)
@@ -427,7 +433,7 @@ class LiveActivityService:Service() {
                 card.addAction(NotificationCompat.Action.Builder(0,"Reply",actionIntent(record,"reply")).addRemoteInput(remoteInput).build())
             }
         }
-        card.addAction(NotificationCompat.Action.Builder(0,"Open on phone",openTask(task,kind=="approval-requested")).build())
+        card.addAction(NotificationCompat.Action.Builder(0,"Open on phone",openTask(task,kind=="approval-requested",record.optString("requestId"))).build())
         card.extend(NotificationCompat.WearableExtender().setDismissalId(tag))
         manager.notify(tag,id,card.build())
     }
@@ -462,7 +468,7 @@ class LiveActivityService:Service() {
             .put("title",sessions[task]?.optString("title")?:title).put("preview",body).put("ts",e.optLong("ts")).toString())
         manager.notify((task+kind).hashCode(),builder("task_attention").setSmallIcon(iconRes)
             .setContentTitle(title).setContentText(body).setVisibility(Notification.VISIBILITY_PRIVATE)
-            .setAutoCancel(true).setContentIntent(openTask(task,kind=="permission-request")).build())
+            .setAutoCancel(true).setContentIntent(openTask(task,kind=="permission-request",e.optString("refId").ifEmpty{e.optString("requestId")})).build())
     }
     fun updateOverlay(){
         if(Looper.myLooper()!=Looper.getMainLooper()){handler.post{updateOverlay()};return}

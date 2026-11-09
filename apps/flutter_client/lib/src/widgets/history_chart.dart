@@ -410,9 +410,17 @@ class TimeChartPainter extends CustomPainter {
     double x(int t) => w <= 0 ? right : (t - start) / w * right;
 
     if (axis) {
+      var previousY = double.infinity;
+      final labelHeight = _text(label(ax.max)).height + 2;
       for (final t in ticks) {
         final yy = y(t).roundToDouble() + .5;
         canvas.drawLine(Offset(0, yy), Offset(right, yy), grid);
+        if (t != ax.min &&
+            t != ticks.last &&
+            (previousY - yy < labelHeight || yy - top < labelHeight)) {
+          continue;
+        }
+        previousY = yy;
         final tp = _text(label(t));
         tp.paint(canvas, Offset(right + 8, yy - tp.height / 2));
       }
@@ -435,15 +443,23 @@ class TimeChartPainter extends CustomPainter {
 
     /// Runs of reduced points, split where the samples have a long gap.
     List<List<Offset>> runs(List<Sample> raw) {
-      final pts = reducePeaks(raw, buckets, start: start, end: last);
       final out = <List<Offset>>[];
-      Sample? prev;
-      for (final s in pts) {
-        if (prev == null || s.t - prev.t > chartGapBreak.inMilliseconds) {
-          out.add([]);
+      var startIndex = 0;
+      for (var i = 1; i <= raw.length; i++) {
+        if (i < raw.length &&
+            raw[i].t - raw[i - 1].t <= chartGapBreak.inMilliseconds) {
+          continue;
         }
-        out.last.add(Offset(x(s.t), y(s.v)));
-        prev = s;
+        // Split on real samples first. Reduction alone can put two retained
+        // peaks far apart even when the host reported continuously.
+        final points = reducePeaks(
+          raw.sublist(startIndex, i),
+          buckets,
+          start: start,
+          end: last,
+        );
+        out.add([for (final point in points) Offset(x(point.t), y(point.v))]);
+        startIndex = i;
       }
       return out;
     }

@@ -300,7 +300,6 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         _loading = false;
         _error = null;
       });
-      _openPendingTask();
       unawaited(_seedBackgroundApprovals());
       if (widget.initialTaskId != null && _active == null) {
         final task = _sessions
@@ -2786,17 +2785,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     super.dispose();
   }
 
-  void _openPendingTask() {
-    final id = ref.read(pendingTaskProvider);
-    final task = _sessions.where((s) => s.agentSessionId == id).firstOrNull;
-    if (task == null) return;
-    ref.read(pendingTaskProvider.notifier).select(null);
-    unawaited(_openSession(task));
-  }
+  // Notification / Continue links (pendingTaskProvider) are opened only by
+  // the top-level chat library once it is connected to the link's PC; a
+  // chat screen never takes them (it may belong to another PC).
 
   @override
   Widget build(BuildContext context) {
-    ref.listen<String?>(pendingTaskProvider, (_, id) => _openPendingTask());
     ref.listen<RpcStatus>(connectionStatusProvider, (prev, next) {
       if (next == RpcStatus.connected && prev != RpcStatus.connected) {
         // Foreground resume always resyncs (events were missed). In-app socket
