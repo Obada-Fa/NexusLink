@@ -42,14 +42,35 @@ android {
             keyPassword = releaseKeyPassword
         }
     }
+    // "Nexus Test" (debug/profile) builds are signed with one permanent test key
+    // when the four NEXUSLINK_TEST_* variables are set, so every test release
+    // installs as an update. Without them Gradle falls back to the machine's
+    // debug key, which phones with a released test build will refuse.
+    val testStore = System.getenv("NEXUSLINK_TEST_KEYSTORE")
+    val testSigning = listOf(
+        testStore,
+        System.getenv("NEXUSLINK_TEST_STORE_PASSWORD"),
+        System.getenv("NEXUSLINK_TEST_KEY_ALIAS"),
+        System.getenv("NEXUSLINK_TEST_KEY_PASSWORD"),
+    ).none { it.isNullOrBlank() }
+    if (testSigning) {
+        signingConfigs.create("nexuslinkTest") {
+            storeFile = file(testStore!!)
+            storePassword = System.getenv("NEXUSLINK_TEST_STORE_PASSWORD")
+            keyAlias = System.getenv("NEXUSLINK_TEST_KEY_ALIAS")
+            keyPassword = System.getenv("NEXUSLINK_TEST_KEY_PASSWORD")
+        }
+    }
     buildTypes {
         debug {
             applicationIdSuffix = ".test"
             manifestPlaceholders["appLabel"] = "Nexus Test"
+            if (testSigning) signingConfig = signingConfigs.getByName("nexuslinkTest")
         }
         maybeCreate("profile").apply {
             applicationIdSuffix = ".test"
             manifestPlaceholders["appLabel"] = "Nexus Test"
+            if (testSigning) signingConfig = signingConfigs.getByName("nexuslinkTest")
         }
         release {
             manifestPlaceholders["appLabel"] = "Nexus"

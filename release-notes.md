@@ -2,7 +2,11 @@
 
 - New **Files** tile on the home screen: browse the PC's folders, preview text files and images, and download files to the phone (saved in `Downloads/NexusLink`). Before, this was only reachable through Terminal → Files.
 
-The PC host is unchanged since 1.0.43. Like 1.0.44, this is a profile build signed with a different key from 1.0.43, so if you are coming from 1.0.43, uninstall the old Nexus Test app first.
+**One last uninstall:** test builds are now signed with one permanent test key, so from this version on, new test releases install as a normal update. Earlier test builds were each signed with a different throwaway key, so uninstall the old Nexus Test app once before installing this one (you will need to scan the PC's QR code again).
+
+Test releases are now profile builds: smaller and faster than the debug builds before.
+
+The PC host is unchanged since 1.0.43.
 
 This is a test build.
 
