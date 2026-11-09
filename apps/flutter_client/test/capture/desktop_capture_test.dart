@@ -173,7 +173,15 @@ void main() {
         ('Memory', 'memory'),
         ('Network & disk', 'io'),
       ]) {
-        await tester.tap(find.text(tab).last);
+        final tabLabel = find.text(tab).last;
+        await tester.ensureVisible(tabLabel);
+        await settle(tester);
+        await tester.tap(tabLabel);
+        await settle(tester, 6);
+        expect(
+          find.byKey(PageStorageKey('monitor-$name')).hitTestable(),
+          findsOneWidget,
+        );
         await shot(tester, '$tag-06-monitor-$name');
       }
       await tester.pageBack();

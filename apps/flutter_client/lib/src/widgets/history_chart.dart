@@ -52,7 +52,7 @@ double chartGutter(BuildContext context, {double base = 40}) =>
     base * chartLabelSize(context) / 10;
 
 double chartLabelSize(BuildContext context) =>
-    MediaQuery.textScalerOf(context).scale(10).clamp(10, 15).toDouble();
+    MediaQuery.textScalerOf(context).scale(11).clamp(11, 19).toDouble();
 
 /// A gap longer than this between two samples breaks the line (the phone was
 /// away or the PC was offline) instead of drawing a misleading ramp.
@@ -155,6 +155,43 @@ class _BarsPainter extends CustomPainter {
 // ---------------------------------------------------------------------------
 // Time chart
 
+/// Coordinates the inspection cursor across the plots on one monitor page.
+class ChartInspection extends StatefulWidget {
+  const ChartInspection({super.key, required this.child});
+  final Widget child;
+
+  @override
+  State<ChartInspection> createState() => _ChartInspectionState();
+}
+
+class _ChartInspectionState extends State<ChartInspection> {
+  final cursor = ValueNotifier<int?>(null);
+
+  @override
+  void dispose() {
+    cursor.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      _InspectionScope(notifier: cursor, child: widget.child);
+}
+
+class _InspectionScope extends InheritedNotifier<ValueNotifier<int?>> {
+  const _InspectionScope({required super.notifier, required super.child});
+}
+
+/// Leaves missing history and the interior of a connection gap empty.
+Sample? nearestReading(List<Sample> samples, int t) {
+  if (samples.isEmpty || t < samples.first.t || t > samples.last.t) return null;
+  final next = samples.indexWhere((s) => s.t >= t);
+  if (next == 0 || samples[next].t == t) return samples[next];
+  final a = samples[next - 1], b = samples[next];
+  if (b.t - a.t > chartGapBreak.inMilliseconds) return null;
+  return t - a.t <= b.t - t ? a : b;
+}
+
 /// A line chart over elapsed time.
 ///
 /// Charts stacked to compare (load above temperature above power) pass the
@@ -178,6 +215,7 @@ class TimeChart extends StatelessWidget {
     this.gutter,
     this.axis = true,
     this.timeLabels = false,
+    this.markPeak = false,
   });
   final List<Sample> samples;
 
@@ -213,33 +251,54 @@ class TimeChart extends StatelessWidget {
   /// Elapsed-time labels under the plot ("5 min … now").
   final bool timeLabels;
 
+  final bool markPeak;
+
   @override
-  Widget build(BuildContext context) => ExcludeSemantics(
-    child: RepaintBoundary(
-      child: SizedBox(
-        height: height,
-        width: double.infinity,
-        child: CustomPaint(
-          painter: TimeChartPainter(
-            samples: samples,
-            secondary: secondary,
-            end: end ?? latestTime([samples, ?secondary]),
-            window: window,
-            max: max,
-            fromZero: fromZero,
-            label: format ?? (v) => '${_trim(v)}$unit',
-            color: color,
-            secondaryColor: secondaryColor,
-            fill: fill,
-            gutter: gutter,
-            axis: axis,
-            timeLabels: timeLabels,
-            labelSize: chartLabelSize(context),
-          ),
-        ),
-      ),
-    ),
-  );
+  Widget build(BuildContext context) {
+    final cursor = context
+        .dependOnInheritedWidgetOfExactType<_InspectionScope>()
+        ?.notifier;
+    final last = end ?? latestTime([samples, ?secondary]);
+    final painter = TimeChartPainter(
+      samples: samples,
+      secondary: secondary,
+      end: last,
+      window: window,
+      max: max,
+      fromZero: fromZero,
+      label: format ?? (v) => '${_trim(v)}$unit',
+      color: color,
+      secondaryColor: secondaryColor,
+      fill: fill,
+      gutter: gutter,
+      axis: axis,
+      timeLabels: timeLabels,
+      labelSize: chartLabelSize(context),
+      markPeak: markPeak,
+      cursor: cursor?.value,
+    );
+    final chart = SizedBox(
+      height: height,
+      width: double.infinity,
+      child: CustomPaint(painter: painter),
+    );
+    if (cursor == null || last == null) return chart;
+    void inspect(Offset local) {
+      final plot = painter.plot;
+      if (plot == null || plot.width <= 0) return;
+      final fraction = (local.dx / plot.width).clamp(0.0, 1.0);
+      cursor.value = last - ((1 - fraction) * window.inMilliseconds).round();
+    }
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onLongPressStart: (event) => inspect(event.localPosition),
+      onLongPressMoveUpdate: (event) => inspect(event.localPosition),
+      onLongPressEnd: (_) => cursor.value = null,
+      onLongPressCancel: () => cursor.value = null,
+      child: chart,
+    );
+  }
 
   static String _trim(double v) =>
       v == v.roundToDouble() ? '${v.round()}' : v.toStringAsFixed(1);
@@ -262,6 +321,8 @@ class TimeChartPainter extends CustomPainter {
     required this.axis,
     required this.timeLabels,
     required this.labelSize,
+    this.markPeak = false,
+    this.cursor,
   });
   final List<Sample> samples;
   final List<Sample>? secondary;
@@ -277,16 +338,18 @@ class TimeChartPainter extends CustomPainter {
   final bool axis;
   final bool timeLabels;
   final double labelSize;
+  final bool markPeak;
+  final int? cursor;
 
   /// Set after [paint]: the plot area and the endpoint marker's centre.
   Rect? plot;
   Offset? endpoint;
 
-  TextPainter _text(String s) => TextPainter(
+  TextPainter _text(String s, [Color ink = NX.textDim]) => TextPainter(
     text: TextSpan(
       text: s,
       style: TextStyle(
-        color: NX.textFaint,
+        color: ink,
         fontSize: labelSize,
         fontFamily: 'monospace',
         fontFeatures: NX.tabular,
@@ -333,7 +396,11 @@ class TimeChartPainter extends CustomPainter {
     } else if (gutter != null) {
       right = size.width - gutter!;
     }
-    final top = axis ? labelSize * .7 : 3.0;
+    final top = markPeak
+        ? labelSize * 2.3
+        : axis
+        ? labelSize * .7
+        : 3.0;
     final timeBand = timeLabels ? labelSize + 6 : 0.0;
     final bottom = size.height - timeBand - (axis ? labelSize * .7 : 3.0);
     plot = Rect.fromLTRB(0, top, right, bottom);
@@ -398,7 +465,7 @@ class TimeChartPainter extends CustomPainter {
         );
       }
     }
-    if (main.isEmpty) return;
+
     for (final run in runs(main)) {
       if (run.length < 2) {
         canvas.drawCircle(run.first, 1.5, Paint()..color = color);
@@ -419,10 +486,56 @@ class TimeChartPainter extends CustomPainter {
           ..strokeWidth = 1.75,
       );
     }
-    final dot = Offset(x(main.last.t), y(main.last.v));
-    endpoint = dot;
-    canvas.drawCircle(dot, 4, Paint()..color = NX.bg);
-    canvas.drawCircle(dot, 2.75, Paint()..color = color);
+    if (main.isNotEmpty) {
+      final dot = Offset(x(main.last.t), y(main.last.v));
+      endpoint = dot;
+      canvas.drawCircle(dot, axis ? 4 : 2.5, Paint()..color = NX.bg);
+      canvas.drawCircle(dot, axis ? 2.75 : 1.75, Paint()..color = color);
+    }
+    void tag(String text, Offset at) {
+      final tp = _text(text, NX.text);
+      final dx = (at.dx - tp.width / 2).clamp(
+        0.0,
+        math.max(0.0, right - tp.width),
+      );
+      final dy = math.max(0.0, at.dy - tp.height - 7);
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(dx - 2, dy - 1, tp.width + 4, tp.height + 2),
+          const Radius.circular(3),
+        ),
+        Paint()..color = NX.bg,
+      );
+      tp.paint(canvas, Offset(dx.toDouble(), dy));
+    }
+
+    final time = cursor;
+    if (time != null && time >= start && time <= last) {
+      final xx = x(time);
+      canvas.drawLine(
+        Offset(xx, top),
+        Offset(xx, bottom),
+        Paint()..color = NX.textDim,
+      );
+      final sample = nearestReading(main, time);
+      final ago = fmtElapsed(Duration(milliseconds: last - time));
+      tag(
+        '${sample == null ? '—' : label(sample.v)} · ${ago == 'now' ? ago : '$ago ago'}',
+        Offset(xx, top),
+      );
+      if (sample != null) {
+        canvas.drawCircle(
+          Offset(x(sample.t), y(sample.v)),
+          3.5,
+          Paint()..color = color,
+        );
+      }
+    } else if (markPeak && main.isNotEmpty) {
+      final peak = main.reduce((a, b) => a.v >= b.v ? a : b);
+      final at = Offset(x(peak.t), y(peak.v));
+      canvas.drawCircle(at, 3, Paint()..color = color);
+      tag('Peak ${label(peak.v)}', at);
+    }
   }
 
   static Path _path(List<Offset> pts) {

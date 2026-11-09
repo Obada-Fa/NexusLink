@@ -326,18 +326,12 @@ class _ReadingsTable extends StatelessWidget {
         // Columns need ~300 dp at normal text; below that, secondary
         // readings wrap under their metric. History lines only when roomy.
         final wide = c.maxWidth >= 300 * scale;
-        final spark = c.maxWidth >= 360 * scale;
+
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             for (var i = 0; i < rows.length; i++) ...[
-              _ReadingRow(
-                reading: rows[i],
-                wide: wide,
-                spark: spark,
-                live: live,
-                scale: scale,
-              ),
+              _ReadingRow(reading: rows[i], wide: wide, live: live),
               if (dividerAfter == i + 1)
                 const Divider(height: 1, thickness: 1, color: NX.line),
             ],
@@ -363,127 +357,86 @@ class _ReadingRow extends StatelessWidget {
   const _ReadingRow({
     required this.reading,
     required this.wide,
-    required this.spark,
+
     required this.live,
-    required this.scale,
   });
   final _Reading reading;
   final bool wide;
-  final bool spark;
+
   final bool live;
-  final double scale;
-
-  static const _sparkWidth = 56.0;
-
-  static double _peak(List<Sample> s) {
-    var hi = 0.0;
-    for (final x in s) {
-      if (x.v > hi) hi = x.v;
-    }
-    return hi <= 0 ? 1 : hi;
-  }
-
-  Text _cell(String text, Color color, {bool bold = false, TextAlign? align}) =>
-      Text(
-        text,
-        maxLines: 1,
-        softWrap: false,
-        overflow: TextOverflow.fade,
-        textAlign: align,
-        style: readingStyle.copyWith(
-          color: live ? color : NX.textDim,
-          fontWeight: bold ? FontWeight.w700 : FontWeight.w400,
-        ),
-      );
 
   @override
   Widget build(BuildContext context) {
     final r = reading;
     final label = Text(
       r.label,
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.w600),
+      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
     );
-    final cells = r.cells;
-    final head = r.primary ? cells.first : null;
-    final rest = r.primary ? cells.skip(1).toList() : cells;
-    final bars = combinedRate(r.history, r.historySecondary);
-    final history = spark && bars.length >= 2
-        ? Padding(
-            padding: const EdgeInsets.only(left: 12),
-            child: SizedBox(
-              width: _sparkWidth,
-              child: HistoryBars(
-                samples: bars,
-                color: live ? NX.accent : NX.idle,
-                max: r.historyMax ?? _peak(bars),
-                width: _sparkWidth,
-                height: 20,
-              ),
+    final details = r.primary ? r.cells.skip(1) : const <(String, Color)>[];
+    final numbers = r.primary ? r.cells.take(1) : r.cells;
+    final description = Wrap(
+      spacing: 7,
+      children: [
+        for (final cell in details)
+          Text(
+            cell.$1,
+            style: TextStyle(
+              fontSize: 12,
+              color: live && cell.$2 != NX.text ? cell.$2 : NX.textDim,
+              fontFeatures: NX.tabular,
             ),
-          )
-        : spark
-        ? const SizedBox(width: _sparkWidth + 12)
-        : null;
-
-    final Widget body;
-    if (wide) {
-      body = Row(
-        children: [
-          SizedBox(width: 76 * scale, child: label),
-          if (head != null)
-            SizedBox(
-              width: 52 * scale,
-              child: _cell(
-                head.$1,
-                head.$2,
-                bold: true,
-                align: TextAlign.right,
-              ),
-            ),
-          for (final cell in rest)
-            Expanded(
-              flex: rest.length == 1 && head != null ? 2 : 1,
-              child: _cell(cell.$1, cell.$2, align: TextAlign.right),
-            ),
-          if (rest.isEmpty) const Spacer(),
-          ?history,
-        ],
-      );
-    } else {
-      body = Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(child: label),
-              if (head != null) _cell(head.$1, head.$2, bold: true),
-            ],
           ),
-          if (rest.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Wrap(
-                spacing: 16,
-                runSpacing: 2,
-                children: [
-                  for (final cell in rest)
-                    Text(
-                      cell.$1,
-                      style: readingStyle.copyWith(
-                        fontSize: 13,
-                        color: live
-                            ? (cell.$2 == NX.text ? NX.textDim : cell.$2)
-                            : NX.textFaint,
-                      ),
-                    ),
-                ],
-              ),
+      ],
+    );
+    final values = Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        for (final cell in numbers)
+          Text(
+            cell.$1,
+            textAlign: TextAlign.end,
+            style: TextStyle(
+              fontSize: r.primary ? 23 : 13,
+              fontFamily: r.primary ? null : 'monospace',
+              fontWeight: FontWeight.w600,
+              fontFeatures: NX.tabular,
+              color: live ? cell.$2 : NX.textDim,
             ),
-        ],
-      );
-    }
+          ),
+      ],
+    );
+    final trace = TimeChart(
+      samples: r.history,
+      secondary: r.historySecondary.isEmpty ? null : r.historySecondary,
+      max: r.historyMax,
+      height: 29,
+      axis: false,
+      color: live ? NX.accent : NX.textDim,
+    );
+    final body = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(flex: 4, child: label),
+            if (wide)
+              Expanded(
+                flex: 5,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  child: trace,
+                ),
+              ),
+            Flexible(
+              flex: r.primary ? 3 : 6,
+              child: Align(alignment: Alignment.centerRight, child: values),
+            ),
+          ],
+        ),
+        if (details.isNotEmpty) description,
+        if (!wide && r.history.isNotEmpty) trace,
+      ],
+    );
     return Semantics(
       button: r.onTap != null,
       label: r.semantics,

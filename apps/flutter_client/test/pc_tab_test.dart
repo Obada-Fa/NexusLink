@@ -553,7 +553,10 @@ void main() {
     expect(find.byKey(const ValueKey('cpu-temp-chart')), findsOneWidget);
     expect(find.byKey(const ValueKey('processes-cpu')), findsOneWidget);
     // Peak includes the latest reading.
-    expect(find.textContaining('peak 49%'), findsOneWidget);
+    expect(
+      find.bySemanticsLabel(RegExp('CPU load history.*peak 49%')),
+      findsOneWidget,
+    );
     // Load and temperature plots share edges.
     final load = tester.getRect(find.byKey(const ValueKey('cpu-load-chart')));
     final temp = tester.getRect(find.byKey(const ValueKey('cpu-temp-chart')));
@@ -900,7 +903,10 @@ void main() {
       await tester.tap(find.bySemanticsLabel(RegExp('^CPU 42 percent')));
       await settle(tester);
       for (final tab in ['CPU', 'GPU', 'Memory', 'Network & disk']) {
-        await tester.tap(find.text(tab).last);
+        final tabLabel = find.text(tab).last;
+        await tester.ensureVisible(tabLabel);
+        await settle(tester);
+        await tester.tap(tabLabel);
         await settle(tester, 8);
         final list = find
             .descendant(

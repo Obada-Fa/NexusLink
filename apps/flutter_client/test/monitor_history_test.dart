@@ -235,6 +235,69 @@ void main() {
       },
     );
 
+    test(
+      'inspection never borrows a reading across a gap or before a sensor started',
+      () {
+        const series = [Sample(1000, 11), Sample(2000, 12), Sample(40000, 91)];
+        expect(nearestReading(series, 0), isNull);
+        expect(nearestReading(series, 1600), series[1]);
+        expect(nearestReading(series, 2100), isNull);
+        expect(nearestReading(series, 40000), series.last);
+        expect(nearestReading(series, 41000), isNull);
+      },
+    );
+
+    testWidgets('holding a chart inspects one host time across both plots', (
+      tester,
+    ) async {
+      const samples = [Sample(0, 40), Sample(10000, 60)];
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: ChartInspection(
+              child: Column(
+                children: [
+                  TimeChart(
+                    samples: samples,
+                    max: 100,
+                    window: Duration(seconds: 10),
+                  ),
+                  TimeChart(
+                    samples: samples,
+                    max: 100,
+                    window: Duration(seconds: 10),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      List<TimeChartPainter> painters() => tester
+          .widgetList<CustomPaint>(
+            find.descendant(
+              of: find.byType(TimeChart),
+              matching: find.byType(CustomPaint),
+            ),
+          )
+          .map((w) => w.painter! as TimeChartPainter)
+          .toList();
+      final position =
+          tester.getTopLeft(find.byType(TimeChart).first) +
+          Offset(painters().first.plot!.width * .5, 45);
+      final gesture = await tester.startGesture(position);
+      await tester.pump(const Duration(milliseconds: 600));
+      await tester.pump();
+      expect(painters().map((p) => p.cursor), [5000, 5000]);
+      await gesture.moveBy(const Offset(50, 0));
+      await tester.pump();
+      expect(painters().first.cursor, greaterThan(5000));
+      expect(painters().last.cursor, painters().first.cursor);
+      await gesture.up();
+      await tester.pump();
+      expect(painters().map((p) => p.cursor), [null, null]);
+    });
+
     test('elapsed labels', () {
       expect(fmtElapsed(const Duration(minutes: 5)), '5 min');
       expect(fmtElapsed(const Duration(seconds: 150)), '2.5 min');

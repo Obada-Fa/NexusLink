@@ -13,6 +13,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../monitor/monitor_models.dart';
 import '../monitor/monitor_provider.dart';
 import '../theme/nexus_theme.dart';
+import '../rpc/rpc_client.dart';
+import '../state/connection.dart';
 import '../theme/nx_widgets.dart';
 import '../widgets/history_chart.dart';
 import 'desktop_overview.dart' show DesktopStatusLine;
@@ -106,10 +108,12 @@ class _MonitorPage extends ConsumerWidget {
             MonitorFocus.memory => _memory(context, snapshot.vitals, h),
             MonitorFocus.io => _io(context, snapshot.vitals, h),
           };
-    return ListView(
-      key: PageStorageKey('monitor-${focus.name}'),
-      padding: const EdgeInsets.fromLTRB(NX.pad, 16, NX.pad, 32),
-      children: children,
+    return ChartInspection(
+      child: ListView(
+        key: PageStorageKey('monitor-${focus.name}'),
+        padding: const EdgeInsets.fromLTRB(NX.pad, 16, NX.pad, 32),
+        children: children,
+      ),
     );
   }
 }
@@ -132,7 +136,6 @@ List<Widget> _cpu(BuildContext context, Vitals v, MonitorHistory h) {
       ].join(' · '),
       value: fmtPct(v.cpu),
       semantics: 'CPU load ${v.cpu.round()} percent',
-      action: _ProcessesButton(sort: ProcessSort.cpu),
     ),
     _PrimaryPlot(
       key: const ValueKey('cpu-load-chart'),
@@ -159,6 +162,10 @@ List<Widget> _cpu(BuildContext context, Vitals v, MonitorHistory h) {
       )
     else
       const _Unavailable('Temperature'),
+    const Align(
+      alignment: Alignment.centerLeft,
+      child: _ProcessesButton(sort: ProcessSort.cpu),
+    ),
     if (threads.isNotEmpty) _Threads(threads),
     _StatGrid([
       PcStat(label: 'CLOCK', value: fmtGHz(v.cpuMHz)),
@@ -414,7 +421,6 @@ List<Widget> _memory(BuildContext context, Vitals v, MonitorHistory h) {
       value: fmtPct(v.ramPercent),
       valueColor: v.ramPercent >= 90 ? NX.waiting : NX.text,
       semantics: 'Memory ${v.ramPercent.round()} percent in use',
-      action: _ProcessesButton(sort: ProcessSort.memory),
     ),
     _PrimaryPlot(
       key: const ValueKey('ram-chart'),
@@ -424,6 +430,10 @@ List<Widget> _memory(BuildContext context, Vitals v, MonitorHistory h) {
       unit: '%',
       what: 'Memory use',
       timeLabels: true,
+    ),
+    const Align(
+      alignment: Alignment.centerLeft,
+      child: _ProcessesButton(sort: ProcessSort.memory),
     ),
     _Section(
       title: 'Breakdown',
@@ -509,6 +519,7 @@ List<Sample> _scaled(List<Sample> s, double by) =>
 List<Widget> _io(BuildContext context, Vitals v, MonitorHistory h) {
   final rx = h.samples('netRx'), tx = h.samples('netTx');
   final rd = h.samples('diskRead'), wr = h.samples('diskWrite');
+  final end = latestTime([rx, tx, rd, wr]);
   final iface = v.primaryInterface;
   final netCaption = [
     if (iface != null) interfaceKind('${iface['name']}'),
@@ -518,6 +529,7 @@ List<Widget> _io(BuildContext context, Vitals v, MonitorHistory h) {
   return [
     _FlowPlot(
       key: const ValueKey('net-chart'),
+      end: end,
       first: true,
       title: 'Network',
       caption: netCaption.isEmpty ? null : netCaption,
@@ -526,6 +538,7 @@ List<Widget> _io(BuildContext context, Vitals v, MonitorHistory h) {
     ),
     _FlowPlot(
       key: const ValueKey('disk-chart'),
+      end: end,
       title: 'Disk',
       caption: nvme == null ? null : 'NVMe ${fmtTemp(nvme)}',
       captionWarn: (nvme ?? 0) >= 70,
@@ -541,12 +554,14 @@ class _FlowPlot extends StatelessWidget {
   const _FlowPlot({
     super.key,
     required this.title,
+    required this.end,
     required this.a,
     required this.b,
     this.caption,
     this.captionWarn = false,
     this.first = false,
   });
+  final int? end;
   final bool first;
   final String title;
   final (String, String, List<Sample>) a;
@@ -556,11 +571,16 @@ class _FlowPlot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final end = latestTime([a.$3, b.$3]);
-    final sa = statsOf(a.$3, _window), sb = statsOf(b.$3, _window);
+    final sa = statsOf(a.$3, _window, end: end),
+        sb = statsOf(b.$3, _window, end: end);
     final unit = _rateUnit(
       [sa?.peak ?? 0, sb?.peak ?? 0].reduce((x, y) => x > y ? x : y),
     );
+    final scaleMax = niceAxis(
+      0,
+      math.max(sa?.peak ?? 0, sb?.peak ?? 0) / unit.size,
+      fromZero: true,
+    ).max;
     String axis(double v) => v == 0
         ? '0'
         : '${v == v.roundToDouble() ? v.round() : v.toStringAsFixed(1)} ${unit.label}';
@@ -578,30 +598,45 @@ class _FlowPlot extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            ChartLegend(
-              entries: [
-                (a.$1, a.$2, NX.accent, false),
-                (b.$1, b.$2, NX.textDim, true),
-              ],
-            ),
-            const SizedBox(height: 10),
-            if (end == null)
-              const _Collecting()
-            else
-              TimeChart(
-                samples: _scaled(a.$3, unit.size),
-                secondary: _scaled(b.$3, unit.size),
-                end: end,
-                format: axis,
-                height: 120,
-                timeLabels: true,
+            for (final lane in [a, b]) ...[
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 5),
+                child: Wrap(
+                  spacing: 10,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(
+                      lane.$1,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 16,
+                      ),
+                    ),
+                    Text(
+                      lane.$2,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontFeatures: NX.tabular,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            if (sa != null && sb != null)
-              _Stats(
-                text:
-                    'peak ${a.$1.toLowerCase()} ${fmtIecRate(sa.peak)} · '
-                    '${b.$1.toLowerCase()} ${fmtIecRate(sb.peak)}',
-              ),
+              if (lane.$3.isEmpty)
+                const _Collecting()
+              else
+                TimeChart(
+                  samples: _scaled(lane.$3, unit.size),
+                  end: end,
+                  format: axis,
+                  max: scaleMax,
+                  gutter: chartGutter(context, base: 68),
+                  color: lane == a ? NX.accent : NX.textDim,
+                  fill: true,
+                  height: lane == a ? 68 : 68 + chartLabelSize(context) + 6,
+                  timeLabels: lane == b,
+                ),
+            ],
           ],
         ),
       ),
@@ -711,73 +746,67 @@ class _Batteries extends StatelessWidget {
 // Building blocks
 
 /// Hardware name and the current value, shown once above the primary plot.
-class _Headline extends StatelessWidget {
+class _Headline extends ConsumerWidget {
   const _Headline({
     required this.title,
     required this.subtitle,
     required this.value,
     required this.semantics,
     this.valueColor = NX.text,
-    this.action,
   });
   final String title;
   final String subtitle;
   final String value;
   final Color valueColor;
   final String semantics;
-  final Widget? action;
 
   @override
-  Widget build(BuildContext context) => Padding(
+  Widget build(BuildContext context, WidgetRef ref) => Padding(
     padding: const EdgeInsets.only(bottom: 10),
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  if (subtitle.isNotEmpty)
-                    Text(
-                      subtitle,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: NX.textDim, fontSize: 12.5),
-                    ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-            Semantics(
-              label: semantics,
-              excludeSemantics: true,
-              child: Text(
+        Text(
+          title,
+          style: const TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.w600,
+            letterSpacing: -.4,
+          ),
+        ),
+        if (subtitle.isNotEmpty)
+          Text(
+            subtitle,
+            style: const TextStyle(color: NX.textDim, fontSize: 14),
+          ),
+        const SizedBox(height: 12),
+        Semantics(
+          label: semantics,
+          excludeSemantics: true,
+          child: Wrap(
+            spacing: 10,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
                 value,
                 style: TextStyle(
-                  fontSize: 30,
-                  fontWeight: FontWeight.w800,
+                  fontSize: 48,
+                  height: 1.1,
+                  fontWeight: FontWeight.w500,
                   color: valueColor,
                   fontFeatures: NX.tabular,
-                  letterSpacing: -.5,
+                  letterSpacing: -2,
                 ),
               ),
-            ),
-          ],
+              Text(
+                ref.watch(connectionStatusProvider) == RpcStatus.connected
+                    ? 'Current'
+                    : 'Last reading',
+                style: TextStyle(color: NX.textDim, fontSize: 14),
+              ),
+            ],
+          ),
         ),
-        if (action != null)
-          Padding(padding: const EdgeInsets.only(top: 6), child: action),
       ],
     ),
   );
@@ -841,12 +870,13 @@ class _PrimaryPlot extends StatelessWidget {
                     unit: unit,
                     fill: true,
                     gutter: gutter,
-                    height: 120,
+                    height: 158,
+                    markPeak: true,
                     timeLabels: timeLabels,
                   ),
                   _Stats(
                     text:
-                        'peak ${s.peak.round()}$unit · avg ${s.average.round()}$unit'
+                        'Average ${s.average.round()}$unit'
                         '${_shortWindow(s)}',
                   ),
                 ],
