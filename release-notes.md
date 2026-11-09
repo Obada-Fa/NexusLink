@@ -1,3 +1,19 @@
+## NexusLink Test 1.0.44+50 — One app, one scan
+
+**Nexus app (phase 1)**
+- One scan pairs everything: scanning the Nexus Utilities QR code on the PC sets up NexusLink, Remote and Audio together. Typing the details in still works as a fallback.
+- New home screen with a tile per module (Desktop, Agents, Terminal, Remote, Audio), a device picker for your saved PCs and a live bar showing what's running.
+- If a PC stops accepting the phone, a banner offers to pair again.
+- **Remote:** control the PC over a pinned, encrypted connection.
+- **Audio (Android):** stream audio between the phone and the PC.
+
+**Naming**
+- Agent names in the app are now neutral: "Code Agent", "Desktop agent", and model names without a brand prefix.
+
+The PC host is unchanged since 1.0.43; keep using `NexusLink-Host-Setup.exe` from that release.
+
+This is a test build. Real audio streams, a real Remote connection and a full QR scan against a live PC have not been tested on a phone yet.
+
 ## NexusLink Test 1.0.43+49 — See every project's agents at once
 
 **Arena**
@@ -40,23 +56,23 @@ This is a test build. Physical-device acceptance is still pending.
 
 **Arena: a pannable pixel campus**
 - Each project you worked on in the last 7 days (or that has an agent running now) gets its own room. Rooms that need you come first.
-- Every agent is a pixel character at its own desk, styled by app (Claude, Codex, Antigravity, Cursor, OpenCode). It types while editing, goes to the bookshelf while reading or browsing, works at the server rack while running commands, waits by the door when it needs you, relaxes in the lounge when it's done, and sleeps after a few quiet hours. Agents walk between spots when their state changes.
+- Every agent is a pixel character at its own desk, styled by app (Code Agent, Codex, Antigravity, Cursor, OpenCode). It types while editing, goes to the bookshelf while reading or browsing, works at the server rack while running commands, waits by the door when it needs you, relaxes in the lounge when it's done, and sleeps after a few quiet hours. Agents walk between spots when their state changes.
 - Orchestrators wear a red tie and a crown, and their workers sit right next to them. Sub-agents show up as small robots beside their agent.
 - Drag to pan and pinch to zoom. Use the bottom-left buttons to zoom or fit the whole campus, and the minimap to jump around. Tap a name plate to list a room's agents, or use **List everyone**.
 - Tap the **Needs you / Your turn / Working** chips to fly to the next agent in that state.
 - Tap anyone to open their sheet with **Open chat**, the current step, plan, sub-agents and, if one is waiting, the approval.
 - Confetti when an agent finishes, smoke when it fails, desk lamps at night.
 
-**Answer Claude from the phone (PC tab → Phone approvals)**
-- Turn on **Approve Claude from this phone** to see Claude's permission prompts on the phone: **Allow**, **Deny** or **Deny with a note**.
-- Answer Claude's multiple-choice questions (or type your own answer), and approve a plan or send it back with feedback.
-- This uses Claude Code's official permission hook. Whichever answers first, the phone or the PC, wins, and the PC dialog closes when you answer on the phone. If the phone isn't reachable, Claude asks on the PC as usual.
-- Claude Desktop sessions always show up. Terminal `claude` sessions only show up with **Hold terminal prompts for me** turned on.
+**Answer agent prompts from the phone (PC tab → Phone approvals)**
+- Turn on **Approve agent prompts from this phone** to see your agent's permission prompts on the phone: **Allow**, **Deny** or **Deny with a note**.
+- Answer the agent's multiple-choice questions (or type your own answer), and approve a plan or send it back with feedback.
+- This uses the agent's official permission hook. Whichever answers first, the phone or the PC, wins, and the PC dialog closes when you answer on the phone. If the phone isn't reachable, the agent asks on the PC as usual.
+- Desktop agent sessions always show up. Terminal CLI agent sessions only show up with **Hold terminal prompts for me** turned on.
 - You get a notification if a prompt is still waiting after 10 seconds.
 - Codex isn't supported yet: it needs its hook trusted once in Codex's `/hooks` screen.
 
 **Monitor accuracy**
-- A finished agent no longer shows "Needs you". Claude Desktop's after-turn summary now shows as **Your turn**, a separate section you can swipe away. "Needs you" is kept for agents that are really blocked on an approval, a question or a plan.
+- A finished agent no longer shows "Needs you". The desktop agent's after-turn summary now shows as **Your turn**, a separate section you can swipe away. "Needs you" is kept for agents that are really blocked on an approval, a question or a plan.
 - Workers are linked to the orchestrator that started them, and "Reported to its orchestrator" no longer asks for you.
 - Sub-agents are tracked with their own state. A sub-agent waiting on approval flags its parent.
 - Running commands are detected more reliably.
@@ -81,12 +97,12 @@ NexusLink is now an agent monitor first. The previous version is saved as the gi
 **Monitor tab (Mission Control)**
 - One screen for every agent on the PC: counters for Working / Needs you / Done today (tap to filter), "Needs you" and "Live now" cards with the current step, a ticking timer, plan progress and the last message, then recent chats grouped by day.
 - Live PC vitals strip (CPU, GPU, RAM with temperatures, network).
-- Agent apps strip: Claude, Codex, Antigravity, Cursor and agent CLIs with CPU/memory and one-tap Restart, Quit or Force stop. A frozen app is flagged "Frozen?".
+- Agent apps strip: Desktop agent, Codex, Antigravity, Cursor and agent CLIs with CPU/memory and one-tap Restart, Quit or Force stop. A frozen app is flagged "Frozen?".
 - RustDesk alert with one-tap Restart when it can't reach the desktop.
 - **Arena**: every agent is a fox at its own desk — it sprints while running commands, sniffs while reading, pounces while editing, barks when it needs you, celebrates when it finishes and naps when idle. The den's campfire burns with CPU load and the moon glows with GPU load.
 - Projects view groups chats by folder.
 - **Mark as done**: swipe a "Needs you" card sideways, or long-press any chat (cards, rows, Arena foxes) for Open, Mark as done, Flag again, Hide from Monitor and Open project files. Undo is offered. The mark is kept on the PC, so it applies everywhere until that chat does something new.
-- "Needs you" that an app infers (for example Claude Desktop's needs-action flag) clears by itself after 8 hours without activity. Real pending approvals in chats NexusLink is running never expire.
+- "Needs you" that an app infers (for example the desktop agent's needs-action flag) clears by itself after 8 hours without activity. Real pending approvals in chats NexusLink is running never expire.
 
 **PC tab**
 - Vitals: CPU / GPU / RAM gauges with temperature glow, detail sheets (per-core load, GPU hotspot/memory temperature, power vs cap, fan, VRAM, swap), network, disk, storage warning, peripheral batteries.

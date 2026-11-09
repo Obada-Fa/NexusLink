@@ -298,7 +298,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
                               ? 'All apps'
                               : {
                                   'codex': 'Codex',
-                                  'claude': 'Claude Code',
+                                  'claude': 'Code Agent',
                                   'cursor': 'Cursor',
                                   'opencode': 'OpenCode',
                                   'antigravity': 'Antigravity',

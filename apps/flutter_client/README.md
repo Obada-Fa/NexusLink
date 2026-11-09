@@ -12,7 +12,7 @@ The client dynamically adapts its color palette, iconography, and UI controls ba
 
 * **Cursor CLI**: Sleek monochromatic dark theme (`#0E0E12` canvas, `#18181C` assistant bubbles, `#2B2D37` zinc user bubbles).
 * **Antigravity**: Deep violet palette with purple accent highlights and interactive approval cards.
-* **Claude Code**: Dark terracotta palette with styled markdown code blocks.
+* **Code Agent**: Dark terracotta palette with styled markdown code blocks.
 * **OpenCode**: Dark emerald/teal theme with reasoning transcript stream views.
 
 ---

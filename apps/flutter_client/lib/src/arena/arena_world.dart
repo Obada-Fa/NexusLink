@@ -1122,7 +1122,7 @@ class ArenaAgentSheet extends ConsumerWidget {
             const Padding(
               padding: EdgeInsets.fromLTRB(NX.pad, 0, NX.pad, 8),
               child: Text(
-                'Answer this on the PC, or turn on Phone approvals in the PC tab to answer Claude prompts here.',
+                'Answer this on the PC, or turn on Phone approvals in the PC tab to answer agent prompts here.',
                 style: TextStyle(
                   color: NX.textDim,
                   fontSize: 12.5,

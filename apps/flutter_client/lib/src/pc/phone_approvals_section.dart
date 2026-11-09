@@ -25,11 +25,11 @@ class _PhoneApprovalsSectionState extends ConsumerState<PhoneApprovalsSection> {
     if (claude == true) {
       final ok = await confirmPcAction(
         context,
-        title: 'Approve Claude from this phone?',
+        title: 'Approve agent prompts from this phone?',
         body:
             'NexusLink adds a hook to ~/.claude/settings.json on the PC (a backup is kept). '
-            'Claude then also sends its permission prompts, questions and plans here. '
-            'If you don’t answer, Claude shows its normal prompt on the PC; nothing is ever approved for you.',
+            'Your agent then also sends its permission prompts, questions and plans here. '
+            'If you don’t answer, the agent shows its normal prompt on the PC; nothing is ever approved for you.',
         confirm: 'Turn on',
         icon: Icons.verified_user_outlined,
       );
@@ -77,9 +77,9 @@ class _PhoneApprovalsSectionState extends ConsumerState<PhoneApprovalsSection> {
                 SwitchListTile(
                   value: installed,
                   onChanged: _busy ? null : (on) => _set(claude: on),
-                  title: const Text('Approve Claude from this phone'),
+                  title: const Text('Approve agent prompts from this phone'),
                   subtitle: const Text(
-                    'Allow or deny, answer questions and approve plans for Claude Desktop and claude CLI sessions. '
+                    'Allow or deny, answer questions and approve plans for desktop agent and CLI agent sessions. '
                     'Sessions started after you turn this on pick it up.',
                   ),
                 ),
@@ -90,7 +90,7 @@ class _PhoneApprovalsSectionState extends ConsumerState<PhoneApprovalsSection> {
                       : (on) => _set(holdTerminal: on),
                   title: const Text('Hold terminal prompts for me'),
                   subtitle: const Text(
-                    'Claude Desktop prompts always show on both. A claude CLI prompt in a terminal waits for this phone '
+                    'Desktop agent prompts always show on both. A CLI agent prompt in a terminal waits for this phone '
                     '(up to 30 min) before showing there; turn on while you’re away.',
                   ),
                 ),

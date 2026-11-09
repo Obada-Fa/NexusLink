@@ -1511,10 +1511,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             AgentModelOption(id: 'composer-2.5', name: 'Composer 2.5'),
             AgentModelOption(id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex'),
             AgentModelOption(id: 'cursor-grok-4.6-medium', name: 'Grok 4.6'),
-            AgentModelOption(id: 'claude-opus-5-medium', name: 'Claude Opus 5'),
+            AgentModelOption(id: 'claude-opus-5-medium', name: 'Opus 5'),
             AgentModelOption(
               id: 'claude-sonnet-5-thinking-medium',
-              name: 'Claude Sonnet 5',
+              name: 'Sonnet 5',
             ),
           ],
           images: true,
@@ -1553,9 +1553,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             AgentModelOption(id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro'),
             AgentModelOption(
               id: 'claude-sonnet-4-6',
-              name: 'Claude Sonnet 4.6',
+              name: 'Sonnet 4.6',
             ),
-            AgentModelOption(id: 'claude-opus-4-6', name: 'Claude Opus 4.6'),
+            AgentModelOption(id: 'claude-opus-4-6', name: 'Opus 4.6'),
             AgentModelOption(id: 'gpt-oss-120b', name: 'GPT-OSS 120B'),
           ],
           images: true,
@@ -1695,6 +1695,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           currentTitle == 'OpenCode' ||
           currentTitle == 'Cursor CLI' ||
           currentTitle == 'Claude Code' ||
+          currentTitle == 'Code Agent' ||
           currentTitle == 'Demo Agent' ||
           _agents.any((a) => a.name == currentTitle || a.id == currentTitle);
       if (isDefaultTitle && text.isNotEmpty) {

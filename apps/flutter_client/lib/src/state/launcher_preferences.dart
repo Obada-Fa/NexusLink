@@ -42,7 +42,6 @@ class LauncherPreferences {
     'AnyDesk',
     'ChatGPT',
     'Antigravity',
-    'Claude',
     'NexusLink Server',
   ];
   final List<String> recent = [];

@@ -3,7 +3,7 @@ export function agentSourceLabel(agentId: string, source?: string): string {
   if (given) return given;
   switch (agentId) {
     case 'claude':
-      return 'Claude Code';
+      return 'Code Agent';
     case 'cursor':
       return 'Cursor';
     case 'opencode':

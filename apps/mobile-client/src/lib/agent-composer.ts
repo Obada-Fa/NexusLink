@@ -32,8 +32,8 @@ const CURSOR_MODELS: AgentModelOption[] = [
   { id: 'composer-2.5', name: 'Composer 2.5' },
   { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex' },
   { id: 'cursor-grok-4.6-medium', name: 'Grok 4.6' },
-  { id: 'claude-opus-5-medium', name: 'Claude Opus 5' },
-  { id: 'claude-sonnet-5-thinking-medium', name: 'Claude Sonnet 5' },
+  { id: 'claude-opus-5-medium', name: 'Opus 5' },
+  { id: 'claude-sonnet-5-thinking-medium', name: 'Sonnet 5' },
 ];
 
 const OPENCODE_MODELS: AgentModelOption[] = [
@@ -45,8 +45,8 @@ const OPENCODE_MODELS: AgentModelOption[] = [
 const ANTIGRAVITY_MODELS: AgentModelOption[] = [
   { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash' },
   { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro' },
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
-  { id: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
+  { id: 'claude-sonnet-4-6', name: 'Sonnet 4.6' },
+  { id: 'claude-opus-4-6', name: 'Opus 4.6' },
   { id: 'gpt-oss-120b', name: 'GPT-OSS 120B' },
 ];
 

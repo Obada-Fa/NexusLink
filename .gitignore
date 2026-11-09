@@ -17,3 +17,4 @@ out/
 # Local tool scratch
 .codex-remote-attachments/
 __pycache__/
+CLAUDE.md

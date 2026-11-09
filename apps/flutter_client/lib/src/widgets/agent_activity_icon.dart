@@ -108,7 +108,6 @@ class AgentMark extends StatelessWidget {
     final painter = switch (agentId) {
       'cursor' => _CursorLogoPainter(color),
       'antigravity' => _AntigravityLogoPainter(color),
-      'claude' => _ClaudeLogoPainter(color),
       'opencode' => _OpenCodeLogoPainter(color),
       _ => null,
     };
@@ -132,7 +131,7 @@ String agentSourceLabel(String agentId, [String? source]) {
   final given = source?.trim() ?? '';
   if (given.isNotEmpty) return given;
   return switch (agentId) {
-    'claude' => 'Claude Code',
+    'claude' => 'Code Agent',
     'cursor' => 'Cursor',
     'opencode' => 'OpenCode',
     'antigravity' => 'Antigravity',
@@ -411,37 +410,6 @@ class _AntigravityLogoPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _AntigravityLogoPainter old) =>
       old.color != color;
-}
-
-/// Official Claude mark (Anthropic spark mark).
-class _ClaudeLogoPainter extends CustomPainter {
-  _ClaudeLogoPainter(this.color);
-
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    canvas.scale(size.shortestSide / 24);
-    final path = Path()
-      ..moveTo(12.0, 2.0)
-      ..lineTo(14.4, 9.6)
-      ..lineTo(22.0, 12.0)
-      ..lineTo(14.4, 14.4)
-      ..lineTo(12.0, 22.0)
-      ..lineTo(9.6, 14.4)
-      ..lineTo(2.0, 12.0)
-      ..lineTo(9.6, 9.6)
-      ..close();
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = color
-        ..style = PaintingStyle.fill,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _ClaudeLogoPainter old) => old.color != color;
 }
 
 /// OpenCode mark (terminal chevron prompt).

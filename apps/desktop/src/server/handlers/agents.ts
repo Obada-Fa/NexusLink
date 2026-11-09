@@ -180,8 +180,8 @@ const CURSOR_MODELS: AgentModelOption[] = [
   { id: 'composer-2.5', name: 'Composer 2.5', supportsEffort: true },
   { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', supportsEffort: true },
   { id: 'cursor-grok-4.6-medium', name: 'Grok 4.6', supportsEffort: true },
-  { id: 'claude-opus-5-medium', name: 'Claude Opus 5', supportsEffort: true },
-  { id: 'claude-sonnet-5-thinking-medium', name: 'Claude Sonnet 5', supportsEffort: true },
+  { id: 'claude-opus-5-medium', name: 'Opus 5', supportsEffort: true },
+  { id: 'claude-sonnet-5-thinking-medium', name: 'Sonnet 5', supportsEffort: true },
   { id: 'gpt-5.6-sol-medium', name: 'GPT-5.6', supportsEffort: true },
 ];
 
@@ -198,8 +198,8 @@ const OPENCODE_MODELS: AgentModelOption[] = [
 const ANTIGRAVITY_MODELS: AgentModelOption[] = [
   { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash', supportsEffort: true },
   { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', supportsEffort: true },
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', supportsEffort: false },
-  { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', supportsEffort: false },
+  { id: 'claude-sonnet-4-6', name: 'Sonnet 4.6', supportsEffort: false },
+  { id: 'claude-opus-4-6', name: 'Opus 4.6', supportsEffort: false },
   { id: 'gpt-oss-120b', name: 'GPT-OSS 120B', supportsEffort: false },
 ];
 
@@ -239,7 +239,7 @@ const AGENT_DEFS: AgentDef[] = [
 
   {
     id: 'claude',
-    name: 'Claude Code',
+    name: 'Code Agent',
     bin: 'claude',
     capabilities: {
       modes: ['agent', 'plan'],
@@ -1200,6 +1200,7 @@ export function isDefaultSessionTitle(title: string | undefined, agentId?: strin
     current === 'OpenCode' ||
     current === 'Cursor CLI' ||
     current === 'Claude Code' ||
+    current === 'Code Agent' ||
     current === 'Demo Agent'
   );
 }
@@ -2645,7 +2646,7 @@ class ClaudeAdapter implements AgentAdapter {
         }
         return;
       }
-      const cleaned = sanitizeCliError(fail.text ?? '', 'Claude Code');
+      const cleaned = sanitizeCliError(fail.text ?? '', 'Code Agent');
       emit(this.session, withoutDuplicateResult({ kind: 'error', text: cleaned }, this.streamedText));
     }).catch(() => {});
     return this.proc;
@@ -2786,7 +2787,7 @@ class ClaudeAdapter implements AgentAdapter {
     const nextKey = `${opts?.model ?? ''}|${opts?.mode ?? 'agent'}|${opts?.thinking ?? ''}`;
     if (this.hasPrompted && !this.resumeId && (!this.proc || this.proc.exitCode !== null || this.proc.killed || this.spawnKey !== nextKey)) {
       setBusy(this.session, false);
-      emit(this.session, { kind: 'error', text: 'Cannot continue Claude conversation: provider session ID was not recovered.' });
+      emit(this.session, { kind: 'error', text: 'Cannot continue this conversation: provider session ID was not recovered.' });
       return;
     }
     const proc = this.ensureProc(opts);
@@ -2801,7 +2802,7 @@ class ClaudeAdapter implements AgentAdapter {
       stdin.flush?.();
     } catch {
       setBusy(this.session, false);
-      emit(this.session, { kind: 'error', text: 'failed to reach the Claude Code process' });
+      emit(this.session, { kind: 'error', text: 'failed to reach the Code Agent process' });
     }
   }
 
@@ -3578,7 +3579,7 @@ class MockAdapter implements AgentAdapter {
         emit(s, { kind: 'tool-end', refId: 'mock-1', toolOutput: 'demo\n' });
         emit(s, {
           kind: 'text',
-          text: `You said: "${text}"${extras}\n\nThis is the **demo agent** — install Claude Code, Cursor CLI, OpenCode, or Antigravity on the PC to chat with a real agent here.\n\n\`\`\`diff\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,4 @@\n # NexusLink\n+Phone OS for your PC\n\`\`\``,
+          text: `You said: "${text}"${extras}\n\nThis is the **demo agent** — install Code Agent, Cursor CLI, OpenCode, or Antigravity on the PC to chat with a real agent here.\n\n\`\`\`diff\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,4 @@\n # NexusLink\n+Phone OS for your PC\n\`\`\``,
         });
         setBusy(s, false);
         emit(s, { kind: 'result', text: '' });

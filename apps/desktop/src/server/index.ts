@@ -214,7 +214,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
     desktopSessionsDir: joinPath(providerRoots().claudeDesktop, 'claude-code-sessions'),
     onChange: items => broadcastAll({ type: 'approvals-changed', items }),
     push: item => void sendAgentPushNotification({
-      title: item.kind === 'question' ? 'Claude is asking you' : item.kind === 'plan' ? 'Claude has a plan to approve' : 'Claude needs approval',
+      title: item.kind === 'question' ? 'Your agent is asking you' : item.kind === 'plan' ? 'Your agent has a plan to approve' : 'Your agent needs approval',
       body: item.title, kind: 'external-approval',
     }),
   }).start();
