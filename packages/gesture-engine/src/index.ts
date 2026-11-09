@@ -1,19 +1,18 @@
 // NexusLink Gesture Engine v2
 //
-// Direct-manipulation touch translation (architecture.md Module C). The default
-// `direct` mode treats the finger as touching content at an absolute host
-// coordinate: a one-finger pan is a momentum scroll, not a cursor drag. The legacy
-// relative-cursor behaviour survives as `trackpad` mode (a.k.a. Precision mode).
+// Native-touch translation (architecture.md Module C). The default `direct`
+// mode is RustDesk-style: the finger *is* the pointer. Tap = click, one-finger
+// pan = left drag, long-press = right click, two-finger pan = scroll. The
+// legacy relative-cursor behaviour survives as `trackpad` (Precision mode).
 //
 // Public surface (`GestureEngine`, `attach`/`detach`, `setHostDimensions`,
 // `scaleToHost`, and the exported sensitivity constants) is preserved. Internals
 // are delegated to ./classifier, ./scroll-physics, and ./input-mapper.
 
 import {
-  resolveAxis,
-  projectToAxis,
   isTap,
   isDoubleTap,
+  TAP_MAX_MOVE_PX,
   type Axis,
   type GestureState,
 } from './classifier';
@@ -67,7 +66,7 @@ export interface FrameScheduler {
 }
 
 export interface GestureOptions {
-  /** 'direct' (default): one-finger pan = momentum scroll. 'trackpad': relative cursor. */
+  /** 'direct' (default): finger-as-pointer. 'trackpad': relative cursor. */
   mode?: GestureMode;
   /** Force relative-cursor control with reduced sensitivity (overrides mode). */
   precision?: boolean;
@@ -96,9 +95,14 @@ function defaultScheduler(): FrameScheduler {
   };
 }
 
+export type ScaleFit = 'contain' | 'fill';
+
 /**
  * Map a touch point within a (possibly letterboxed) view element to the
- * corresponding pixel on the host screen. Unchanged from v1.
+ * corresponding pixel on the host screen.
+ *
+ * `contain` (default): letterbox bars, same as CSS object-fit:contain.
+ * `fill`: stretch to the view (virtual phone sessions — 1:1, no bars).
  */
 export function scaleToHost(
   touchX: number,
@@ -107,9 +111,19 @@ export function scaleToHost(
   viewHeight: number,
   hostWidth: number,
   hostHeight: number,
+  fit: ScaleFit = 'contain',
 ): { x: number; y: number } {
   if (viewWidth <= 0 || viewHeight <= 0 || hostWidth <= 0 || hostHeight <= 0) {
     return { x: 0, y: 0 };
+  }
+
+  if (fit === 'fill') {
+    const scaledX = (touchX / viewWidth) * hostWidth;
+    const scaledY = (touchY / viewHeight) * hostHeight;
+    return {
+      x: Math.max(0, Math.min(hostWidth, Math.round(scaledX))),
+      y: Math.max(0, Math.min(hostHeight, Math.round(scaledY))),
+    };
   }
 
   const hostAspect = hostWidth / hostHeight;
@@ -161,6 +175,7 @@ export class GestureEngine {
   private viewHeight = 0;
   private viewOffsetX = 0;
   private viewOffsetY = 0;
+  private fit: ScaleFit = 'contain';
 
   private state: GestureState = 'idle';
   private longPressTimer: ReturnType<typeof setTimeout> | null = null;
@@ -249,6 +264,10 @@ export class GestureEngine {
     this.precision = precision;
   }
 
+  setFit(fit: ScaleFit): void {
+    this.fit = fit;
+  }
+
   get isAttached(): boolean {
     return this.attached;
   }
@@ -278,6 +297,7 @@ export class GestureEngine {
       this.viewHeight,
       this.hostWidth,
       this.hostHeight,
+      this.fit,
     );
   }
 
@@ -407,24 +427,15 @@ export class GestureEngine {
     const rawDy = host.y - this.lastPos.y;
 
     if (this.effectiveMode() === 'direct') {
-      this.state = 'scrolling';
-      // Lock axis once travel is decisive.
-      if (this.axis === 'none') {
-        this.axis = resolveAxis(host.x - this.startPos.x, host.y - this.startPos.y);
-      }
-      const proj = projectToAxis(rawDx, rawDy, this.axis);
-      // Content tracks the finger: scroll delta is opposite to finger travel.
-      const sdx = -proj.dx;
-      const sdy = -proj.dy;
-      this.velocity.addSample(sdx, sdy, this.now());
-      this.scrollCarryX += sdx;
-      this.scrollCarryY += sdy;
-      const ix = Math.trunc(this.scrollCarryX);
-      const iy = Math.trunc(this.scrollCarryY);
-      if (ix !== 0 || iy !== 0) {
-        this.scrollCarryX -= ix;
-        this.scrollCarryY -= iy;
-        this.emit({ type: 'mouse-scroll', deltaX: ix, deltaY: iy, x: host.x, y: host.y });
+      // Native touch: one-finger pan = left-button drag at the finger.
+      // Button-down at the original aim point so a tap-then-slide still hits.
+      if (this.dist(host, this.startPos) > TAP_MAX_MOVE_PX) {
+        if (!this.dragStarted) {
+          this.dragStarted = true;
+          this.state = 'dragging';
+          this.emit({ type: 'drag-start', x: this.startPos.x, y: this.startPos.y });
+        }
+        this.emit({ type: 'drag-move', x: host.x, y: host.y });
       }
     } else {
       // Trackpad: relative cursor movement.
@@ -451,7 +462,6 @@ export class GestureEngine {
 
   private handleMultiMove(t0: Touch, t1: Touch): void {
     this.clearLongPressTimer();
-    this.state = 'pinching';
 
     const midX = (t0.clientX + t1.clientX) / 2;
     const midY = (t0.clientY + t1.clientY) / 2;
@@ -465,11 +475,15 @@ export class GestureEngine {
 
     // Pinch dominates over pan → zoom; otherwise two-finger pan → scroll.
     if (Math.abs(pinchDelta) >= PINCH_MIN_DELTA_PX && Math.abs(pinchDelta) > Math.hypot(panDx, panDy)) {
+      this.state = 'pinching';
       this.emit({ type: 'zoom', scale: pinchDelta * PINCH_ZOOM_SCALE, x: host.x, y: host.y });
     } else {
-      // Content tracks the fingers.
-      this.scrollCarryX += -panDx;
-      this.scrollCarryY += -panDy;
+      this.state = 'scrolling';
+      const sdx = -panDx;
+      const sdy = -panDy;
+      this.velocity.addSample(sdx, sdy, this.now());
+      this.scrollCarryX += sdx;
+      this.scrollCarryY += sdy;
       const ix = Math.trunc(this.scrollCarryX);
       const iy = Math.trunc(this.scrollCarryY);
       if (ix !== 0 || iy !== 0) {
@@ -545,8 +559,8 @@ export class GestureEngine {
         return;
       }
 
-      // A one-finger direct scroll that ended with velocity → momentum fling.
-      if (this.effectiveMode() === 'direct' && this.state === 'scrolling') {
+      // Two-finger scroll released with velocity → momentum fling.
+      if (this.state === 'scrolling' && this.maxTouches >= 2) {
         this.startInertia();
       }
     }

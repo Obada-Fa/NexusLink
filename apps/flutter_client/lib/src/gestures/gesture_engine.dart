@@ -1,11 +1,9 @@
 // Dart port of the NexusLink `GestureEngine` facade
 // (packages/gesture-engine/src/index.ts).
 //
-// Direct-manipulation touch translation (architecture.md Module C). The
-// default `direct` mode treats the finger as touching content at an absolute
-// host coordinate: a one-finger pan is a momentum scroll, not a cursor drag.
-// The legacy relative-cursor behaviour survives as `trackpad` mode (a.k.a.
-// Precision mode).
+// Native-touch translation (architecture.md Module C). Default `direct` mode
+// is RustDesk-style: the finger *is* the pointer (tap / drag / long-press).
+// The legacy relative-cursor behaviour survives as `trackpad` (Precision).
 //
 // Differences from the TS class, dictated by the Flutter environment:
 //  - No DOM attach/detach; the owning widget forwards pointer events via
@@ -49,6 +47,7 @@ class GestureEngine {
   double _hostHeight = 1080;
   double _viewWidth = 0;
   double _viewHeight = 0;
+  ScaleFit _fit = ScaleFit.contain;
 
   // Host coordinate a fling stays anchored at (last finger position).
   double _anchorX = 0;
@@ -74,13 +73,17 @@ class GestureEngine {
     _classifier.precision = precision;
   }
 
+  void setFit(ScaleFit fit) {
+    _fit = fit;
+  }
+
   GestureState get state => _classifier.state;
 
   bool get inertiaActive => _inertia.isActive;
 
   ({double x, double y}) _toHost(double viewX, double viewY) {
     return scaleToHost(
-        viewX, viewY, _viewWidth, _viewHeight, _hostWidth, _hostHeight);
+        viewX, viewY, _viewWidth, _viewHeight, _hostWidth, _hostHeight, _fit);
   }
 
   void onTouchStart(List<TouchPoint> touches, double timestampMs) {

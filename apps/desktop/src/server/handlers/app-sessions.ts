@@ -267,6 +267,8 @@ export async function createAppSession(
       '-dpi', String(Math.round(96 * geo.dpr)),
       '-nolisten', 'tcp',
       '+extension', 'RANDR',
+      // No visible pointer — the phone finger *is* the pointer.
+      '-nocursor',
     ],
     { stdout: 'ignore', stderr: 'ignore' } as unknown as SpawnOpts,
   );
