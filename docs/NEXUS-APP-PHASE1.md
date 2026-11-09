@@ -371,3 +371,7 @@ A codes against D's §3 API. If D hasn't landed when A integrates, A finishes ev
 ## 9. Not in phase 1
 
 Hub gateway and multiplexed TLS (P2), merged foreground service (P2), package manager and store (P3), receiver mode, Cast, TV remote, launcher shortcuts and Quick Settings tiles (P4), iOS audio, party mode, retiring `phone_mic.dart` / `mic.ts`.
+
+## 10. After phase 1
+
+UX refinement (Home, pairing, programming loop, PC tools, polish) is planned in [`NEXUS-REFINE-PLAN.md`](NEXUS-REFINE-PLAN.md).

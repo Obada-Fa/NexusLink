@@ -360,7 +360,10 @@ Future<void> pumpPcTab(
   double textScale = 1,
   FakeConnection? connection,
   Widget Function(Widget tab)? wrap,
+  bool details = false,
 }) async {
+  // Vitals, processes and remote access live on PC details.
+  final tab = details ? const PcDetailsScreen() : const LauncherScreen();
   tester.view.physicalSize = size * 3;
   tester.view.devicePixelRatio = 3;
   addTearDown(tester.view.reset);
@@ -381,9 +384,7 @@ Future<void> pumpPcTab(
           ).copyWith(textScaler: TextScaler.linear(textScale)),
           child: child!,
         ),
-        home: wrap == null
-            ? const LauncherScreen()
-            : wrap(const LauncherScreen()),
+        home: wrap == null ? tab : wrap(tab),
       ),
     ),
   );
@@ -411,7 +412,7 @@ void main() {
   testWidgets('hero gauges render live values and open the detail sheet', (
     tester,
   ) async {
-    await pumpPcTab(tester, FakeMonitor());
+    await pumpPcTab(tester, FakeMonitor(), details: true);
 
     expect(find.text('obada-PC'), findsOneWidget);
     Finder gauge(String value) =>
@@ -445,7 +446,7 @@ void main() {
   });
 
   testWidgets('flow strip warns about the nearly full disk', (tester) async {
-    await pumpPcTab(tester, FakeMonitor());
+    await pumpPcTab(tester, FakeMonitor(), details: true);
     await scrollTo(tester, find.text('PRO X Wireless'));
     expect(find.text('18.2 GB free'), findsOneWidget);
     expect(find.text('LOW'), findsOneWidget);
@@ -457,7 +458,7 @@ void main() {
   testWidgets('a stuck app shows Frozen? and Restart confirms, shows '
       'progress, then calls appAction', (tester) async {
     final monitor = FakeMonitor()..pendingApp = Completer<String>();
-    await pumpPcTab(tester, monitor);
+    await pumpPcTab(tester, monitor, details: true);
 
     final claude = find.byKey(const ValueKey('agent-app-claude-desktop'));
     await scrollTo(tester, claude);
@@ -511,7 +512,7 @@ void main() {
     tester,
   ) async {
     final monitor = FakeMonitor();
-    await pumpPcTab(tester, monitor);
+    await pumpPcTab(tester, monitor, details: true);
 
     await scrollTo(tester, find.byTooltip('More actions for Codex'));
     await tester.tap(find.byTooltip('More actions for Codex'));
@@ -577,7 +578,7 @@ void main() {
       remoteReply:
           'This PC needs a one-time setup to let NexusLink restart RustDesk: run `sudo bash packaging/rustdesk/install.sh` in the NexusLink folder.',
     );
-    await pumpPcTab(tester, monitor);
+    await pumpPcTab(tester, monitor, details: true);
 
     await scrollTo(tester, find.text('Restart RustDesk'));
     expect(find.textContaining('Auto-repaired 3 min ago'), findsOneWidget);
@@ -632,6 +633,19 @@ void main() {
       sawDesktop |= find.text('Your desktop').evaluate().isNotEmpty;
     }
     expect(sawDesktop, isTrue);
+    // PC details at the same size.
+    await pumpPcTab(
+      tester,
+      FakeMonitor(),
+      size: const Size(320, 640),
+      textScale: 1.3,
+      details: true,
+    );
+    for (var i = 0; i < 30; i++) {
+      await tester.drag(mainList, const Offset(0, -300));
+      await settle(tester, 2);
+      expect(tester.takeException(), isNull);
+    }
     // And each detail page, opened from its gauge and scrolled to the end.
     await tester.fling(mainList, const Offset(0, 6000), 3000);
     await settle(tester, 8);

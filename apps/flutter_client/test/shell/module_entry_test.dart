@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nexuslink/src/shell/shell_navigator.dart';
 import 'package:nexuslink/main.dart';
 import 'package:nexuslink/src/session/store.dart';
 import 'package:nexuslink/src/session/target.dart';
@@ -59,7 +60,29 @@ void main() {
     );
     expect(find.byType(NavigationBar), findsNothing);
 
-    // Back returns home (only the home route below).
+    // Back returns to Terminal, where the jump started, on its own tab.
+    await tester.binding.handlePopRoute();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(
+      tester.widget<WorkspaceShell>(find.byType(WorkspaceShell)).tabs,
+      [WorkspaceTabs.terminal, WorkspaceTabs.files],
+    );
+    expect(ref.read(workspaceTabProvider), WorkspaceTabs.terminal);
+
+    // A jump to a module that is already open goes back to it, not deeper.
+    ref.read(workspaceTabProvider.notifier).select(WorkspaceTabs.pc);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    ShellNavigator.instance.openModule('terminal');
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(
+      tester.widget<WorkspaceShell>(find.byType(WorkspaceShell)).tabs,
+      [WorkspaceTabs.terminal, WorkspaceTabs.files],
+    );
+
+    // Back again returns home.
     await tester.binding.handlePopRoute();
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));

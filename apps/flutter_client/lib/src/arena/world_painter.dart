@@ -696,6 +696,14 @@ class LivePainter extends CustomPainter {
         Paint()..color = const Color(0x88101218),
       );
     }
+    if (f.zoom < .4) {
+      // Overview: agent tags would be unreadable, so each room shows its
+      // name and how many agents need you, at a legible on-screen size.
+      final onScreen = size.width / f.world.size.width * f.zoom;
+      for (final room in f.world.rooms) {
+        _overviewBadge(canvas, room, onScreen);
+      }
+    }
     if (f.zoom >= .4) {
       final occupied = <Rect>[];
       // The selected agent always gets its label; nearby labels never overlap it.
@@ -1197,4 +1205,50 @@ class StaticPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(StaticPainter old) => old.picture != picture;
+}
+
+/// A room's name and attention count, sized to read ~13 px on screen.
+void _overviewBadge(Canvas canvas, WorldRoom room, double onScreen) {
+  if (onScreen <= 0) return;
+  final unit = 1 / onScreen; // world units per screen pixel
+  final needs = room.needsYou;
+  final text = TextPainter(
+    text: TextSpan(
+      children: [
+        TextSpan(
+          text: room.name,
+          style: TextStyle(
+            color: const Color(0xFFF7E9C6),
+            fontSize: 13 * unit,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        if (needs > 0)
+          TextSpan(
+            text: '  $needs need${needs == 1 ? 's' : ''} you',
+            style: TextStyle(
+              color: const Color(0xFFFFC857),
+              fontSize: 12 * unit,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+      ],
+    ),
+    textDirection: TextDirection.ltr,
+    maxLines: 1,
+    ellipsis: '…',
+  )..layout(maxWidth: room.rect.width - 8 * unit);
+  final pad = Offset(6 * unit, 3 * unit);
+  final box = Rect.fromCenter(
+    center: room.rect.center,
+    width: text.width + pad.dx * 2,
+    height: text.height + pad.dy * 2,
+  );
+  canvas.drawRRect(
+    RRect.fromRectAndRadius(box, Radius.circular(6 * unit)),
+    Paint()
+      ..color = needs > 0 ? const Color(0xE6352A10) : const Color(0xD9101820),
+  );
+  text.paint(canvas, box.topLeft + pad);
+  text.dispose();
 }

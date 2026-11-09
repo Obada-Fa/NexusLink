@@ -129,12 +129,7 @@ class _DevicePickerScreenState extends ConsumerState<DevicePickerScreen> {
     try {
       await ref
           .read(shellProvider.notifier)
-          .addNexusLink(
-            url,
-            pairingCode: code,
-            name: name,
-            icon: _newIcon,
-          );
+          .addNexusLink(url, pairingCode: code, name: name, icon: _newIcon);
       if (!mounted || generation != _connectGeneration) return;
       _pairingController.clear();
       setState(() => _connectingUrl = null);
@@ -184,19 +179,20 @@ class _DevicePickerScreenState extends ConsumerState<DevicePickerScreen> {
     final shell = ref.watch(shellProvider);
     final wake = ref.watch(wakeFlowProvider);
     final targets = shell.targets;
-    final showTyped = _showTyped ?? targets.isEmpty;
+    // QR is the main way in; Wi-Fi discovery and the typed address wait
+    // under "Other ways to connect" unless a pairing needs them.
+    final showOther = _showTyped ?? false;
     final busy = _connecting || wake?.active == true;
     return Scaffold(
-      appBar: widget.isRoot
-          ? null
-          : AppBar(title: const Text('Devices')),
+      appBar: widget.isRoot ? null : AppBar(title: const Text('Devices')),
       body: SafeArea(
         top: widget.isRoot,
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
           children: [
             if (widget.isRoot) const _BrandHeader(),
-            if (_connecting && targets.any((t) => nexusLinkUrlOf(t) == _connectingUrl))
+            if (_connecting &&
+                targets.any((t) => nexusLinkUrlOf(t) == _connectingUrl))
               _ConnectingCard(
                 label: lastHostLabel(_connectingUrl!),
                 onCancel: _cancelConnect,
@@ -230,7 +226,8 @@ class _DevicePickerScreenState extends ConsumerState<DevicePickerScreen> {
                 style: TextStyle(color: Colors.white38, fontSize: 12),
               ),
               const SizedBox(height: 24),
-            ],
+            ] else
+              const _ConnectIntro(),
             FilledButton.icon(
               key: const ValueKey('scan-pair'),
               onPressed: busy ? null : _scanQr,
@@ -242,7 +239,7 @@ class _DevicePickerScreenState extends ConsumerState<DevicePickerScreen> {
               ),
               icon: const Icon(Icons.qr_code_scanner_rounded),
               label: Text(
-                targets.isEmpty ? 'Scan QR code from PC' : 'Add a device',
+                targets.isEmpty ? 'Scan QR code' : 'Add a device',
                 style: const TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.w700,
@@ -250,82 +247,91 @@ class _DevicePickerScreenState extends ConsumerState<DevicePickerScreen> {
               ),
             ),
             const SizedBox(height: 8),
-            const Text(
-              'On your PC: Nexus Utilities → Add phone. One scan pairs '
-              'NexusLink, Remote and Audio.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: NX.textDim, fontSize: 12.5),
-            ),
+            if (targets.isNotEmpty)
+              const Text(
+                'On your PC, open Nexus Utilities → Add phone. One scan pairs '
+                'NexusLink, Remote and Audio.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: NX.textDim, fontSize: 12.5),
+              ),
             const SizedBox(height: 14),
-            OutlinedButton.icon(
-              onPressed: _scanning || busy ? null : _discover,
-              icon: _scanning
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.wifi_find),
-              label: Text(_scanning ? 'Scanning…' : 'Find a PC on this Wi-Fi'),
+            TextButton.icon(
+              key: const ValueKey('other-ways'),
+              onPressed: () => setState(() => _showTyped = !showOther),
+              icon: Icon(
+                showOther
+                    ? Icons.expand_less_rounded
+                    : Icons.expand_more_rounded,
+              ),
+              label: const Text('Other ways to connect'),
             ),
-            for (final host in _hosts)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: NxCard(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 10,
-                  ),
-                  onTap: busy
-                      ? null
-                      : () => _connectTyped(
-                          host.wsUrl,
-                          name: _nameController.text.trim().isEmpty
-                              ? host.name
-                              : _nameController.text.trim(),
-                        ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.computer, color: NX.accent),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              host.name,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            Text(
-                              '${host.address}:${host.port}',
-                              style: const TextStyle(
-                                color: NX.textDim,
-                                fontSize: 12.5,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      if (_connectingUrl == normalizeHostWsUrl(host.wsUrl))
-                        const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                    ],
-                  ),
+            if (showOther) ...[
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _scanning || busy ? null : _discover,
+                icon: _scanning
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.wifi_find),
+                label: Text(
+                  _scanning ? 'Scanning…' : 'Find a PC on this Wi-Fi',
                 ),
               ),
-            const SizedBox(height: 8),
-            if (!showTyped)
-              TextButton(
-                onPressed: () => setState(() => _showTyped = true),
-                child: const Text('Type the address instead'),
-              )
-            else
+              for (final host in _hosts)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: NxCard(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 10,
+                    ),
+                    onTap: busy
+                        ? null
+                        : () => _connectTyped(
+                            host.wsUrl,
+                            name: _nameController.text.trim().isEmpty
+                                ? host.name
+                                : _nameController.text.trim(),
+                          ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.computer, color: NX.accent),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                host.name,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              Text(
+                                '${host.address}:${host.port}',
+                                style: const TextStyle(
+                                  color: NX.textDim,
+                                  fontSize: 12.5,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (_connectingUrl == normalizeHostWsUrl(host.wsUrl))
+                          const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
               ..._typedForm(busy),
+            ],
           ],
         ),
       ),
@@ -361,7 +367,8 @@ class _DevicePickerScreenState extends ConsumerState<DevicePickerScreen> {
       decoration: const InputDecoration(
         labelText: 'PC address',
         hintText: 'e.g. 100.64.0.5',
-        helperText: 'Your PC’s Tailscale IP or name. The port is added for you.',
+        helperText:
+            'Your PC’s Tailscale IP or name. The port is added for you.',
         border: OutlineInputBorder(),
       ),
     ),
@@ -435,6 +442,31 @@ class _DevicePickerScreenState extends ConsumerState<DevicePickerScreen> {
       child: const Text('Connect'),
     ),
   ];
+}
+
+/// First run: what to do on the PC before scanning.
+class _ConnectIntro extends StatelessWidget {
+  const _ConnectIntro();
+
+  @override
+  Widget build(BuildContext context) => const Padding(
+    padding: EdgeInsets.only(bottom: 20),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Connect your computer',
+          style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+        ),
+        SizedBox(height: 8),
+        Text(
+          'On your PC, open Nexus Utilities → Add phone, then scan the QR '
+          'code it shows. One scan pairs NexusLink, Remote and Audio.',
+          style: TextStyle(color: NX.textDim, fontSize: 14.5, height: 1.4),
+        ),
+      ],
+    ),
+  );
 }
 
 class _BrandHeader extends StatelessWidget {

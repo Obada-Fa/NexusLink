@@ -212,7 +212,6 @@ void main() {
           home: Scaffold(
             body: SizedBox(
               width: 200,
-              height: 156,
               child: ModuleTile(
                 tile: const HomeTile(module, TileStatus.ready),
                 ctx: ctx,

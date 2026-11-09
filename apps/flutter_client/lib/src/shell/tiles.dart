@@ -59,6 +59,101 @@ List<HomeTile> homeTiles(
     ),
 ];
 
+/// Home groups tools by what they're for (refine plan §1).
+enum ToolGroup { workspace, pcTools }
+
+String toolGroupTitle(ToolGroup g) => switch (g) {
+  ToolGroup.workspace => 'Workspace',
+  ToolGroup.pcTools => 'PC tools',
+};
+
+/// Fixed order inside each group so positions stay put across PCs.
+const toolGroupOrder = <ToolGroup, List<String>>{
+  ToolGroup.workspace: ['agents', 'terminal', 'files'],
+  ToolGroup.pcTools: ['desktop', 'remote', 'audio'],
+};
+
+ToolGroup toolGroupOf(NexusModule module) =>
+    toolGroupOrder[ToolGroup.workspace]!.contains(module.id)
+    ? ToolGroup.workspace
+    : ToolGroup.pcTools;
+
+/// [tiles] split into groups, in group order; empty groups are left out.
+/// Known modules follow [toolGroupOrder]; unknown ones keep their relative
+/// order at the end of PC tools.
+List<(ToolGroup, List<HomeTile>)> groupTiles(List<HomeTile> tiles) {
+  int rank(HomeTile t) {
+    final order = toolGroupOrder[toolGroupOf(t.module)]!;
+    final i = order.indexOf(t.module.id);
+    return i < 0 ? order.length : i;
+  }
+
+  final result = <(ToolGroup, List<HomeTile>)>[];
+  for (final g in ToolGroup.values) {
+    final inGroup = [
+      for (var i = 0; i < tiles.length; i++)
+        if (toolGroupOf(tiles[i].module) == g) (i, tiles[i]),
+    ];
+    if (inGroup.isEmpty) continue;
+    // Stable: equal ranks keep their incoming order.
+    inGroup.sort((a, b) {
+      final r = rank(a.$2).compareTo(rank(b.$2));
+      return r != 0 ? r : a.$1.compareTo(b.$1);
+    });
+    result.add((g, [for (final e in inGroup) e.$2]));
+  }
+  return result;
+}
+
+/// Lays tiles out two per row with equal heights, or one per row when the
+/// screen is narrow or the text is large. Tiles grow to fit their text.
+class ToolGrid extends StatelessWidget {
+  const ToolGrid({super.key, required this.children});
+  final List<Widget> children;
+
+  /// One column below this width per tile (logical px, after text scaling).
+  static const minTileWidth = 168.0;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final scale = MediaQuery.textScalerOf(context).scale(14) / 14;
+      final perTile = (constraints.maxWidth - NX.gap) / 2;
+      final columns = scale > 1.3 || perTile < minTileWidth ? 1 : 2;
+      final rows = <Widget>[];
+      for (var i = 0; i < children.length; i += columns) {
+        final row = children.sublist(
+          i,
+          (i + columns).clamp(0, children.length),
+        );
+        rows.add(
+          Padding(
+            padding: EdgeInsets.only(top: i == 0 ? 0 : NX.gap),
+            child: columns == 1
+                ? row.single
+                : IntrinsicHeight(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Expanded(child: row[0]),
+                        const SizedBox(width: NX.gap),
+                        Expanded(
+                          child: row.length > 1 ? row[1] : const SizedBox(),
+                        ),
+                      ],
+                    ),
+                  ),
+          ),
+        );
+      }
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: rows,
+      );
+    },
+  );
+}
+
 class ModuleTile extends StatelessWidget {
   const ModuleTile({
     super.key,
@@ -78,7 +173,8 @@ class ModuleTile extends StatelessWidget {
     if (module is BlockableModule) {
       return ListenableBuilder(
         listenable: (module as BlockableModule).blockedChanges,
-        builder: (context, _) => _build(context, moduleBlockedReason(module, ctx)),
+        builder: (context, _) =>
+            _build(context, moduleBlockedReason(module, ctx)),
       );
     }
     return _build(context, null);
@@ -94,7 +190,7 @@ class ModuleTile extends StatelessWidget {
         ? Text(
             blocked,
             key: ValueKey('tile-blocked-${module.id}'),
-            maxLines: 1,
+            maxLines: 2,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(color: NX.waiting, fontSize: 12),
           )
@@ -120,6 +216,7 @@ class ModuleTile extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(16, 16, 14, 14),
           onTap: onTap,
           child: Column(
+            mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
@@ -148,10 +245,10 @@ class ModuleTile extends StatelessWidget {
                   },
                 ],
               ),
-              const Spacer(),
+              const SizedBox(height: 14),
               Text(
                 module.title,
-                maxLines: 1,
+                maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   fontSize: 18,
@@ -163,7 +260,7 @@ class ModuleTile extends StatelessWidget {
                 const SizedBox(height: 3),
                 Text(
                   subtitle,
-                  maxLines: 1,
+                  maxLines: 3,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(color: NX.textDim, fontSize: 12.5),
                 ),

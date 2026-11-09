@@ -32,7 +32,7 @@ class RemoteModule extends NexusModule
   String get title => 'Remote';
 
   @override
-  String get subtitle => 'Trackpad · Keyboard · Dictation';
+  String get subtitle => 'Use phone as trackpad or keyboard';
 
   @override
   Color get accent => NX.waiting;

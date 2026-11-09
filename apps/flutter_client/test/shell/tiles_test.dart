@@ -86,7 +86,6 @@ void main() {
               for (final s in [TileStatus.ready, TileStatus.offline])
                 SizedBox(
                   width: 190,
-                  height: 156,
                   child: ModuleTile(
                     tile: HomeTile(remote, s),
                     ctx: ctx,

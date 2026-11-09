@@ -59,7 +59,7 @@ class _RemoteHomeScreenState extends State<RemoteHomeScreen> {
                 selectedIndex: page,
                 onDestinationSelected: (value) => setState(() => page = value),
                 destinations: const [
-                  NavigationDestination(icon: Icon(Icons.touch_app), label: 'Remote'),
+                  NavigationDestination(icon: Icon(Icons.touch_app), label: 'Trackpad'),
                   NavigationDestination(icon: Icon(Icons.edit_note), label: 'Write'),
                   NavigationDestination(icon: Icon(Icons.play_circle_outline), label: 'Media'),
                 ],

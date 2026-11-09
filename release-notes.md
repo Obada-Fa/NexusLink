@@ -1,3 +1,29 @@
+## NexusLink Test 1.0.46+52 — Check and resume work
+
+**Home**
+- Home leads with what needs you: a live approval on the connected PC ("Review approval · <project>") opens that chat; otherwise **Continue** takes you back to what you were doing on that PC: the same chat, folder or shell.
+- One PC selector at the top is the only place to switch PCs; **Device settings** holds connect, wake, rename and remove.
+- When the PC is offline Home says so and offers **Reconnect** (and **Wake PC** if set up); when one utility is down it names it.
+- Tools are grouped: **Workspace** (Agents, Terminal, Files) and **PC tools** (Desktop, Remote, Audio). Labels wrap instead of being cut off, and large text switches to one column.
+- First launch leads with **Scan QR code**; Wi-Fi and typed addresses are under **Other ways to connect**. A partial pairing says what is ready and what failed.
+
+**Working loop**
+- Jumping between tools keeps your place: Back returns to the chat, folder or shell you came from (a chat keeps its draft).
+- Chats have a **Project files** button; Files has **Open terminal here** for the folder you are viewing and shows that folder's name as its title.
+- The editor says **Unsaved · not on PC yet** / **Saved to PC**; Git review shows its project.
+- Terminal: the title shows the shell's folder and switches shells; **End shell** moved into the shell options menu.
+- Agents: **New chat** is a labelled button; Live puts "Needs you" ahead of PC vitals; **Forget this PC** moved to Home → Device settings.
+
+**PC tools**
+- Desktop opens on the desktop and apps; vitals, processes, approvals, remote access and the older mic control are under **PC details**.
+- Remote's first tab is **Trackpad**. The screen viewer says the input mode when it changes (View only / Trackpad / Direct touch).
+- Settings are grouped into **This PC** and **This phone**.
+- Arena overview shows each project's name and how many agents need you.
+
+The PC host is unchanged since 1.0.43.
+
+This is a test build.
+
 ## NexusLink Test 1.0.45+51 — Files on the home screen
 
 - New **Files** tile on the home screen: browse the PC's folders, preview text files and images, and download files to the phone (saved in `Downloads/NexusLink`). Before, this was only reachable through Terminal → Files.

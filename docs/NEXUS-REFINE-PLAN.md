@@ -1,0 +1,74 @@
+# Refine Nexus for “my computer in my pocket”
+
+Status: adopted 2026-11-09; first cut of all three passes is in the local checkout (uncommitted, version set to 1.0.46+52, a local profile APK only). Not released: the latest GitHub test release is 1.0.45+51. See the progress log at the end.
+
+**Assessment:** The strongest parts of Nexus are where it speaks in terms of your work. “Needs you” tells you why to open a chat. “Open terminal here” carries a folder into the next task. “Play PC audio here” tells you exactly what will happen. Home is weaker because it gives six tools similar weight without telling you what’s happening on your computer or where you left off.
+
+I’d keep the dark visual identity, the direct access to PC tools, and the pixel-art Arena. I’d make **checking and resuming work** the organizing principle. That’s my design assumption based on your programming use case. I traced the current Flutter screens and menus and inspected the Arena preview. The APK launched on the emulator, but I didn’t complete a live paired-PC walkthrough, so the usability findings below are design judgments rather than observed user-test results.
+
+## 1. Start with Home and pairing
+
+| Surface | What I’d change | Why |
+|---|---|---|
+| **First launch** | Lead with **Connect your computer**, the existing instruction “On your PC, open Nexus Utilities → Add phone,” and **Scan QR code**. Put Wi-Fi discovery and manual entry under **Other ways to connect**. After a partial pairing, name what’s ready and offer **Continue** or **Retry** for the failed utility. | Today the manual form opens by default on a fresh install. Someone who already has the QR code has to read past choices they don’t need. |
+| **Connected Home** | Use one compact PC selector showing its name and connection state. Below it, show one card for a verified pending request, such as **Review approval · NexusLink**. If nothing needs attention, show **Continue** with the last project or session on that PC. With no history, go straight to the tools. | The first useful tap should take you back to work. A new user should also have a clean Home without empty dashboard sections. |
+| **Tools** | Keep a stable order. Put **Agents, Terminal, Files** together under **Workspace**, then **Desktop, Remote control, Audio** under **PC tools**. Keep paired tools in place during connection checks. Let labels wrap and use rows at large text sizes. | Files earns its Home shortcut. Stable positions build muscle memory. The current fixed-height tiles and single-line descriptions spend space on decoration while cutting off useful text. |
+| **Devices and recovery** | Use the PC name as the single device switcher. Put rename, wake configuration, connection details and forget-device actions in **Device settings**. When offline, offer **Reconnect** and, if configured, **Wake PC**. When only one utility fails, name that utility. | Today the Devices icon, PC card and overflow menu can all lead to switching. A single place to switch leaves room to explain what actually needs fixing. |
+
+## 2. Refine the working menus
+
+| Menu | Recommendation and reason |
+|---|---|
+| **Agents and chats** | Keep **Live, Arena, Projects**. Give each a clear job: Live shows what needs a response, Arena shows activity across projects, and Projects finds past work. On Live, put the pending request and project name ahead of vitals. Keep **New chat** visible with a text label. Move **Forget this PC** out of chat options. Forgetting a computer is too consequential to sit beside clearing local chat history. |
+| **Arena** | Preserve the project rooms. They make it possible to recognize *where* work is happening at a glance. In the compact preview, task labels compete for space and some project names are tiny. At overview zoom, emphasize the room name and attention count. Tapping a room or agent should reveal the full task title and next action. Keep **Agent list** visibly labeled as another way to reach the same people and requests. |
+| **Files, editor and Git changes** | Keep Files one tap from Home. Show the current folder prominently, expose **Open terminal here** for the folder you’re already viewing, and keep pinned and recent folders within reach. In the editor, make **Save to PC**, unsaved state and conflict recovery easy to distinguish. Label Git review **Working-tree changes** and show its project. These details answer the questions that matter on a phone: *Where am I? What changed? Did it reach my PC?* |
+| **Terminal** | Use the active shell name and folder as the session switcher. Keep the keyboard, Ctrl, Esc, Tab, arrows and paste within thumb reach. Move **End shell** into the session menu and retain confirmation. Back should leave the shell running. Returning from Files should restore the same shell and scroll position. |
+| **Desktop and mirror** | Make **Open desktop** the first action, followed by running windows and favorite apps. Move processes, vitals and connection diagnostics into **PC details**. In the viewer, show the current input mode in words when it changes, such as **View only** or **Trackpad**. The present “Your PC” screen combines launching an app, monitoring the machine, configuring approvals and managing the mic. Those tasks deserve distinct places. |
+| **Remote control and Audio** | Describe Remote on Home as **Use phone as trackpad or keyboard**. Inside it, use **Trackpad, Write, Media** so the first tab explains what touching the phone does. Keep Audio’s existing directional language and its stop controls on Home and in the notification. Put the older PC microphone control behind a clearly labeled fallback on supported hosts so users can find the right mic without guessing between two implementations. |
+| **Settings and notifications** | Group settings by what they affect. **This PC** owns pairing, wake and host approval configuration. **This phone** owns notifications, the floating pet, and lock-screen actions. Link directly to the relevant setting when a feature needs it. A tapped approval notification should open that request on the correct PC, or explain that it was already answered. |
+
+## 3. Make navigation and visual behavior consistent
+
+- **Preserve the route back to the task.** Home → Files → Back should return Home. Chat → project files → Back should return to that chat. Files → terminal in this folder → Back should restore the folder. Today cross-module navigation can pop back to Home before opening the destination. Update the Flutter navigation layer to carry the originating route, PC, project and session where applicable.
+- **Use color for meaning.** Keep the dark surfaces and cyan accent. Reserve amber for a decision or recovery action, red for failure, and green for an active connection or stream. Pair each state with text. Show a last-updated time on cached activity, and only offer approval actions after confirming the request is current.
+- **Make the interface readable one-handed.** Give primary controls at least a 48 × 48 dp touch area, maintain text contrast, and let content expand with Android font scaling. Apply this first to Home tiles, Arena controls, terminal keys and the editor toolbar. [Android accessibility guidance](https://developer.android.com/guide/topics/ui/accessibility/apps)
+
+## 4. Deliver in three passes
+
+1. **Home, pairing and device recovery.** Build the revised first-run flow, PC selector, attention/resume card and grouped tools. Use existing host capabilities and store the last destination locally per PC. Verify fresh install, returning user, two saved PCs, partial pairing, offline and revoked credentials.
+2. **The programming loop.** Connect Agents, Files, editor, Git changes and Terminal through context-preserving routes. The acceptance walkthrough is concrete: open a pending request from Home, inspect a project file, open a shell in its folder, and return to the original conversation with its draft intact. Repeat after backgrounding the app and after a connection drop.
+3. **Desktop, Remote, Audio and visual polish.** Reorganize PC details and settings, refine input-mode labels, and verify large text, TalkBack, keyboard-open layouts and reduced motion. Complete a physical-phone walkthrough with a paired PC for QR scanning, mirror gestures, audio direction and notification actions.
+
+**The first milestone I’d ship is Home → pending request → project file → back to the same chat.** It turns the product promise into a test you can perform in under a minute and gives the rest of the redesign a concrete standard to meet.
+
+## Progress log
+
+- 2026-11-09: plan adopted. Pass 1 (Home, pairing, device recovery) started on branch `nexus-app-phase1`.
+- 2026-11-09, pass 1:
+  - First launch: "Connect your computer" + PC instruction + **Scan QR code**; Wi-Fi discovery and the typed address sit under **Other ways to connect** (`device_picker.dart`). The pairing progress screen now says what is ready and what failed (`pairingSummary`).
+  - Home: the hero card, Devices icon and hero menu are replaced by one **PC selector** (name + state; the only way to switch) and a **Device settings** sheet (connect/disconnect, wake, wake settings, rename/remove, address, utility pills).
+  - Recovery banner (`homeRecovery`): whole PC offline → **Reconnect** (+ **Wake PC** if configured); one utility down → names it with **Retry**. Hidden while checking/connecting/waking and when the pair-again banner shows.
+  - Attention / Continue card: live `approvals.*` items from the connected PC → "Review approval · <project>" opening that chat; otherwise **Continue** to the last module opened on this PC (`resume_store.dart`, key `nexus-last-module:<targetId>`, forgotten when the target is removed).
+  - Tools grouped **Workspace** (Agents, Terminal, Files) / **PC tools** (Desktop, Remote, Audio) in a `ToolGrid`: tiles grow to fit, labels wrap, one column under 168 dp per tile or text scale > 1.3. Remote reads "Use phone as trackpad or keyboard".
+  - Verified: `flutter analyze` clean; `flutter test` 428 + 1 skipped (11 new in `test/shell/home_refine_test.dart`); no overflow at 412 dp with 1× and 2× text.
+  - Not verified: on an emulator or phone; with a live PC (approval card tap → chat, Continue after a real session).
+  - Pass 1 leftovers: Continue only remembers the module (plus the current project name), not the chat/session; the picker cards still carry their own Wake buttons.
+- 2026-11-09, pass 2 (programming loop):
+  - Cross-module jumps stack instead of popping to Home (`home_screen.dart` `_openModule`): Back returns to where you were, a module already open is returned to, the module underneath gets its own workspace tab back (`workspaceTabForModule`). Notification taps still start from Home.
+  - Chat header **Project files** (`agent_screen.dart`) opens Files at the chat's folder over the chat; Files titles itself with the folder name and has **Open terminal here** for the current folder. Milestone route: Home → approval card → chat → Project files → Open terminal here → Back → Back → same chat, draft intact (no extra code needed for the draft: the chat route stays mounted).
+  - Editor save state in words (`editorSaveState`); Git review header names the project.
+  - Terminal title = shell folder + switcher; End shell moved to a "Shell options" menu with its confirmation.
+  - Agents: labelled **New chat** FAB; vitals strip after "Needs you" on Live; **Forget this PC** removed from chat options (Home → Device settings → Rename or remove covers it; it does not clear cached chats the way the old item did).
+- 2026-11-09, pass 3 (PC tools, polish):
+  - Desktop: Open desktop, apps and running windows on the page; vitals, flow, agent apps, processes, approvals config, remote access and the older Phone mic (with a note pointing to Audio) in **PC details** (`PcDetailsScreen`).
+  - Remote tabs Trackpad / Write / Media. Mirror viewer announces View only / Trackpad / Direct touch on change (snackbar + TalkBack).
+  - Settings grouped **This PC** / **This phone**.
+  - Arena overview (zoom < .4): per-room badge with the project name and "N need you" at ~13 px on screen.
+  - Verified: analyze clean, 432 + 1 skipped tests.
+  - Not done / not verified: physical-phone walkthrough (QR scan, mirror gestures, audio direction, notification actions); TalkBack and reduced-motion pass; tapping a room/agent in Arena to reveal the full task (existing behaviour unchanged); a notification for an already-answered request does not yet say so; 48 dp audit of terminal keys and editor toolbar; "last updated" time on cached Home data.
+- 2026-11-09, review fixes:
+  - **Open terminal here** no longer reattaches another project's shell. Terminal remembers the last shell per PC together with its folder (`terminal:selected-cwd:<host>`) and, when opened for a folder, reuses that shell only if it lives there; otherwise it starts one in the folder (`test/terminal_here_test.dart`).
+  - **Continue** now resumes the task, not just the tool: the per-PC entry also stores the chat (id + title), the Files folder, or the shell (id + folder). Agents → that chat (via `pendingTaskProvider`), Files → that folder (`pendingFolderProvider`), Terminal → its last shell; the card names the chat or folder. Only the module last opened from Home records its task, so Files opened from inside a chat leaves "Continue → that chat" alone.
+  - Verified: analyze clean, 439 + 1 skipped tests (7 new).
+  - Release status corrected: nothing above is committed, pushed, or released yet.
+  - Still not verified: the milestone walkthrough on a device with a live PC (approval → chat → Project files → Open terminal here → back to the same chat and draft, also after backgrounding and a connection drop); physical QR, mirror, audio, notification and accessibility checks.

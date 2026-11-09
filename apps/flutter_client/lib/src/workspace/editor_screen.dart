@@ -1,3 +1,4 @@
+import '../theme/nexus_theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
@@ -330,11 +331,37 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                   horizontal: 16,
                   vertical: 4,
                 ),
-                child: Text(
-                  doc.path,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 12),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        doc.path,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Builder(
+                      builder: (context) {
+                        final (label, color) = editorSaveState(
+                          dirty: doc.dirty,
+                          saving: doc.saving,
+                          writable: doc.writable,
+                          failed: doc.error != null,
+                        );
+                        return Text(
+                          label,
+                          key: const ValueKey('editor-save-state'),
+                          style: TextStyle(
+                            color: color,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        );
+                      },
+                    ),
+                  ],
                 ),
               ),
               if (!doc.writable)
@@ -575,4 +602,19 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
             theme: atomOneDarkTheme,
           );
   }
+}
+
+/// The editor's save state in words, coloured by meaning: amber = needs a
+/// decision (unsaved, failed), green = on the PC.
+(String, Color) editorSaveState({
+  required bool dirty,
+  required bool saving,
+  required bool writable,
+  bool failed = false,
+}) {
+  if (!writable) return ('Read only', Colors.white54);
+  if (saving) return ('Saving to PC…', Colors.white70);
+  if (dirty && failed) return ('Not saved · see below', NX.waiting);
+  if (dirty) return ('Unsaved · not on PC yet', NX.waiting);
+  return ('Saved to PC', NX.working);
 }

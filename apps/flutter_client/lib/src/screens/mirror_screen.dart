@@ -7,6 +7,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -1398,6 +1399,28 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     );
   }
 
+  /// Says the new input mode in words (and to TalkBack) when it changes.
+  void _announceMode() {
+    final label = mirrorInputModeLabel(viewOnly: _viewOnly, mouse: _mouseMode);
+    SemanticsService.sendAnnouncement(
+      View.of(context),
+      label,
+      Directionality.of(context),
+    );
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    messenger
+      ?..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          key: const ValueKey('mirror-mode-label'),
+          content: Text(label, textAlign: TextAlign.center),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(milliseconds: 1400),
+          width: 200,
+        ),
+      );
+  }
+
   void _toggleViewOnly() {
     setState(() {
       _viewOnly = !_viewOnly;
@@ -1415,11 +1438,13 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       _ensureCursorPlaced();
       _syncPointerFromHost();
     }
+    _announceMode();
     _scheduleHideChrome();
   }
 
   void _toggleMouseMode() {
     setState(() => _mouseMode = !_mouseMode);
+    _announceMode();
     _pointerView.value = null;
     _engine.setMode(_gestureMode);
     if (_mouseMode) {
@@ -1813,3 +1838,11 @@ class _ArrowCursorPainter extends CustomPainter {
   @override
   bool shouldRepaint(_ArrowCursorPainter old) => old.tip != tip;
 }
+
+/// The viewer's input mode in words.
+String mirrorInputModeLabel({required bool viewOnly, required bool mouse}) =>
+    viewOnly
+    ? 'View only'
+    : mouse
+    ? 'Trackpad'
+    : 'Direct touch';

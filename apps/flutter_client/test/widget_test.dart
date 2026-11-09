@@ -21,7 +21,13 @@ void main() {
     await tester.pumpWidget(const ProviderScope(child: NexusApp()));
     await tester.pumpAndSettle();
     expect(find.text('Nexus'), findsOneWidget);
-    expect(find.text('Scan QR code from PC'), findsOneWidget);
+    expect(find.text('Connect your computer'), findsOneWidget);
+    expect(find.text('Scan QR code'), findsOneWidget);
+    // Wi-Fi discovery and the typed address wait under "Other ways".
+    expect(find.text('PC address'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('other-ways')));
+    await tester.pumpAndSettle();
+    expect(find.text('Find a PC on this Wi-Fi'), findsOneWidget);
     expect(find.text('PC address'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.text('Connect'),
@@ -40,12 +46,23 @@ void main() {
     await tester.pumpWidget(const ProviderScope(child: NexusApp()));
     await tester.pumpAndSettle();
     expect(find.text('My PC'), findsOneWidget);
-    expect(find.text('Desktop'), findsOneWidget);
+    expect(find.text('WORKSPACE'), findsOneWidget);
     expect(find.text('Agents'), findsOneWidget);
     expect(find.text('Terminal'), findsOneWidget);
-    // Not paired on this phone, so no auto-connect; tiles say Offline.
+    // Not paired on this phone, so no auto-connect: the PC reads offline and
+    // Home offers to reconnect.
+    expect(find.text('My PC is offline'), findsOneWidget);
+    expect(find.text('Reconnect'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Desktop'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('PC TOOLS'), findsOneWidget);
     expect(find.text('Offline'), findsWidgets);
-    await tester.tap(find.byTooltip('Devices'));
+    await tester.drag(find.byType(Scrollable).first, const Offset(0, 2000));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('pc-selector')));
     await tester.pumpAndSettle();
     expect(find.text('YOUR DEVICES'), findsOneWidget);
     expect(find.text('Tap to open'), findsOneWidget);
@@ -87,6 +104,6 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Work laptop'), findsNothing);
     expect(await TargetStore.load(), isEmpty);
-    expect(find.text('PC address'), findsOneWidget);
+    expect(find.text('Connect your computer'), findsOneWidget);
   });
 }

@@ -21,6 +21,30 @@ IconData _utilityIcon(String id) => switch (id) {
   _ => Icons.extension_outlined,
 };
 
+String _joinNames(List<String> names) => names.length < 2
+    ? names.join()
+    : '${names.sublist(0, names.length - 1).join(', ')} and ${names.last}';
+
+/// After a run settles with at least one failure: what is ready and what
+/// isn't. Null while busy or when nothing failed.
+String? pairingSummary(List<EnrollProgress> rows, {required bool busy}) {
+  if (busy) return null;
+  final failed = [
+    for (final r in rows)
+      if (r.state == EnrollState.failed) utilityLabel(r.utility),
+  ];
+  if (failed.isEmpty) return null;
+  final ready = [
+    for (final r in rows)
+      if (r.state == EnrollState.done) utilityLabel(r.utility),
+  ];
+  final didnt = '${_joinNames(failed)} didn’t pair. Tap Retry, or continue '
+      'and pair it later from Home.';
+  if (ready.isEmpty) return '${_joinNames(failed)} didn’t pair. Tap Retry.';
+  return '${_joinNames(ready)} ${ready.length == 1 ? 'is' : 'are'} ready. '
+      '$didnt';
+}
+
 /// One row per utility: working / done / failed (with reason and Retry).
 /// Pops with the saved target.
 class PairingProgressScreen extends StatefulWidget {
@@ -67,6 +91,7 @@ class _PairingProgressScreenState extends State<PairingProgressScreen> {
   Widget build(BuildContext context) {
     final run = widget.run;
     final done = run.target != null;
+    final summary = pairingSummary(run.rows, busy: run.busy);
     return Scaffold(
       backgroundColor: NX.bg,
       appBar: AppBar(title: Text('Pairing ${run.bundle.pcName}')),
@@ -77,6 +102,19 @@ class _PairingProgressScreenState extends State<PairingProgressScreen> {
               child: ListView(
                 padding: const EdgeInsets.all(NX.pad),
                 children: [
+                  if (summary != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: NX.gap),
+                      child: Text(
+                        summary,
+                        key: const ValueKey('pairing-summary'),
+                        style: const TextStyle(
+                          color: NX.text,
+                          fontSize: 14.5,
+                          height: 1.35,
+                        ),
+                      ),
+                    ),
                   for (final row in run.rows)
                     Padding(
                       padding: const EdgeInsets.only(bottom: NX.gap),

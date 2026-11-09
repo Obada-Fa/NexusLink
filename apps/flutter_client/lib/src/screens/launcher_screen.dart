@@ -411,7 +411,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
         title: const Text('Your PC'),
         actions: [
           IconButton(
-            tooltip: 'PC settings',
+            tooltip: 'Settings',
             icon: const Icon(Icons.settings_outlined),
             onPressed: () => Navigator.of(
               context,
@@ -444,18 +444,56 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
                   controller: _list,
                   physics: const AlwaysScrollableScrollPhysics(),
                   padding: const EdgeInsets.only(top: 4, bottom: 32),
+                  // Opening the desktop comes first; monitoring and
+                  // configuration live in PC details.
                   children: monitor
                       ? [
-                          const PcHeroSection(key: ValueKey('pc-hero')),
                           ...screen,
-                          const PcFlowSection(key: ValueKey('pc-flow')),
-                          const AgentAppsSection(key: ValueKey('pc-agents')),
-                          const TopProcessesSection(key: ValueKey('pc-top')),
-                          const PhoneApprovalsSection(
-                            key: ValueKey('pc-approvals'),
+                          const SizedBox(height: 16),
+                          _pad(
+                            NxCard(
+                              key: const ValueKey('pc-details-entry'),
+                              onTap: () => Navigator.of(context).push(
+                                MaterialPageRoute<void>(
+                                  settings: const RouteSettings(
+                                    name: 'pc-details',
+                                  ),
+                                  builder: (_) => const PcDetailsScreen(),
+                                ),
+                              ),
+                              child: const Row(
+                                children: [
+                                  Icon(Icons.monitor_heart_outlined),
+                                  SizedBox(width: 14),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'PC details',
+                                          style: TextStyle(
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                        SizedBox(height: 2),
+                                        Text(
+                                          'Vitals, processes, approvals, '
+                                          'remote access and the older mic',
+                                          style: TextStyle(
+                                            color: NX.textDim,
+                                            fontSize: 13,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  Icon(Icons.chevron_right_rounded),
+                                ],
+                              ),
+                            ),
                           ),
-                          const PhoneMicSection(key: ValueKey('pc-mic')),
-                          const RemoteAccessSection(key: ValueKey('pc-remote')),
                         ]
                       : [
                           _pad(_header(context)),
@@ -864,4 +902,40 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
       },
     );
   }
+}
+
+/// Monitoring and per-PC configuration, moved off the Desktop page so that
+/// page is about opening the desktop and apps.
+class PcDetailsScreen extends ConsumerWidget {
+  const PcDetailsScreen({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => Scaffold(
+    appBar: AppBar(title: const Text('PC details')),
+    body: MonitorDemand(
+      owner: 'pc-details',
+      intervalMs: 2000,
+      child: ListView(
+        padding: const EdgeInsets.only(top: 4, bottom: 32),
+        children: const [
+          PcHeroSection(key: ValueKey('pc-hero')),
+          PcFlowSection(key: ValueKey('pc-flow')),
+          AgentAppsSection(key: ValueKey('pc-agents')),
+          TopProcessesSection(key: ValueKey('pc-top')),
+          NxSectionHeader('Settings for this PC'),
+          PhoneApprovalsSection(key: ValueKey('pc-approvals')),
+          RemoteAccessSection(key: ValueKey('pc-remote')),
+          Padding(
+            padding: EdgeInsets.fromLTRB(NX.pad, 20, NX.pad, 0),
+            child: Text(
+              'For the PC microphone, use Audio on Home first. The control '
+              'below is the older fallback for hosts without Nexus Audio.',
+              style: TextStyle(color: NX.textDim, fontSize: 12.5),
+            ),
+          ),
+          PhoneMicSection(key: ValueKey('pc-mic')),
+        ],
+      ),
+    ),
+  );
 }

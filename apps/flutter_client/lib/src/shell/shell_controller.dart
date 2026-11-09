@@ -18,6 +18,7 @@ import 'capabilities.dart';
 import 'module.dart';
 import 'module_extras.dart';
 import 'module_registry.dart';
+import 'resume_store.dart';
 import 'module_signals.dart';
 import 'reachability.dart';
 
@@ -410,6 +411,12 @@ class ShellController extends Notifier<ShellState> {
       }
     }
     _prober.forget(targetId);
+    unawaited(
+      ref
+          .read(lastDestinationsProvider.notifier)
+          .forget(targetId)
+          .catchError((_) {}),
+    );
     final targets = [
       for (final t in state.targets)
         if (t.id != targetId) t,

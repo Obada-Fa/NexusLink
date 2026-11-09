@@ -34,6 +34,7 @@ import '../widgets/link_actions.dart';
 import '../widgets/not_connected_view.dart';
 import 'cwd_picker.dart';
 import 'terminal_screen.dart';
+import '../workspace/files_screen.dart';
 import '../workspace/project.dart';
 import '../workspace/changes_screen.dart';
 import '../chats/chat_models.dart';
@@ -2859,6 +2860,20 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   ),
                 ),
           actions: [
+            if ((_active?.cwd ?? '').isNotEmpty)
+              IconButton(
+                key: const ValueKey('chat-project-files'),
+                tooltip: 'Project files',
+                icon: const Icon(Icons.folder_open_outlined),
+                // Pushed over the chat: Back returns here, draft intact.
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    settings: const RouteSettings(name: 'chat-files'),
+                    builder: (_) =>
+                        WorkspaceFilesScreen(initialPath: _active!.cwd),
+                  ),
+                ),
+              ),
             if (_active != null &&
                 (!_isLibrary || _chatSummary.json['managed'] == true))
               IconButton(

@@ -81,3 +81,21 @@ class PendingTask extends Notifier<String?> {
 final pendingTaskProvider = NotifierProvider<PendingTask, String?>(
   PendingTask.new,
 );
+
+/// A folder Files should show next (Home's Continue). Consumed once.
+class PendingFolder extends Notifier<String?> {
+  @override
+  String? build() => null;
+  void select(String? path) => state = path;
+
+  /// Returns the pending folder and clears it.
+  String? take() {
+    final path = state;
+    if (path != null) state = null;
+    return path;
+  }
+}
+
+final pendingFolderProvider = NotifierProvider<PendingFolder, String?>(
+  PendingFolder.new,
+);

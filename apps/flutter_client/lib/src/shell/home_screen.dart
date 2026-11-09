@@ -8,6 +8,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../monitor/approvals.dart';
 import '../rpc/rpc_client.dart';
 import '../session/target.dart';
 import '../state/connection.dart';
@@ -23,6 +24,8 @@ import 'live_bar.dart';
 import 'module.dart';
 import 'module_extras.dart';
 import 'module_registry.dart';
+import '../state/last_cwd.dart';
+import 'resume_store.dart';
 import 'shell_controller.dart';
 import 'shell_navigator.dart';
 import 'target_actions.dart';
@@ -125,10 +128,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         }
       }
     }
-    _openModule('agents');
+    _openModule('agents', fromScratch: true);
   }
 
-  void _openModule(String moduleId) {
+  /// Module ids pushed above home, bottom to top.
+  final _moduleStack = <String>[];
+
+  /// Opens [moduleId] on top of whatever is showing, so Back returns there
+  /// (a chat keeps its draft). A module already open is returned to instead
+  /// of stacked twice. [fromScratch] (notification taps) starts from home.
+  void _openModule(String moduleId, {bool fromScratch = false}) {
     if (!mounted) return;
     final module = ref
         .read(moduleListProvider)
@@ -137,14 +146,40 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     final ctx = ref.read(moduleContextProvider);
     if (module == null || ctx == null) return;
     _ensureConnected(module, ctx);
-    final nav = Navigator.of(context);
-    nav.popUntil((r) => r.settings.name == _homeRouteName || r.isFirst);
-    nav.push(
-      MaterialPageRoute<void>(
-        settings: RouteSettings(name: 'module:${module.id}'),
-        builder: (_) => _ModuleRoute(module: module),
-      ),
+    unawaited(
+      ref
+          .read(lastDestinationsProvider.notifier)
+          .record(ctx.target.id, module.id)
+          .catchError((_) {}),
     );
+    final nav = Navigator.of(context);
+    if (fromScratch) {
+      nav.popUntil((r) => r.settings.name == _homeRouteName || r.isFirst);
+    } else if (_moduleStack.contains(module.id)) {
+      nav.popUntil(
+        (r) => r.settings.name == 'module:${module.id}' || r.isFirst,
+      );
+      return;
+    }
+    final below = fromScratch || _moduleStack.isEmpty
+        ? null
+        : _moduleStack.last;
+    _moduleStack.add(module.id);
+    nav
+        .push(
+          MaterialPageRoute<void>(
+            settings: RouteSettings(name: 'module:${module.id}'),
+            builder: (_) => _ModuleRoute(module: module),
+          ),
+        )
+        .whenComplete(() {
+          _moduleStack.remove(module.id);
+          // The module underneath shows its own tab again.
+          final tab = below == null ? null : workspaceTabForModule(below);
+          if (mounted && tab != null && _moduleStack.lastOrNull == below) {
+            ref.read(workspaceTabProvider.notifier).select(tab);
+          }
+        });
   }
 
   /// Opening a NexusLink module dials the shared connection if it is idle.
@@ -310,6 +345,100 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         ),
       );
 
+  Future<void> _reconnect() async {
+    final shell = ref.read(shellProvider.notifier);
+    final target = ref.read(shellProvider).current;
+    if (target != null && target.has(UtilityIds.nexuslink)) {
+      unawaited(shell.connectCurrent().catchError((_) {}));
+    }
+    await shell.probe(force: true);
+  }
+
+  /// Everything about the current PC except switching: connection, wake,
+  /// rename/remove and its address.
+  Future<void> _openDeviceSettings(SavedTarget target) async {
+    final conn = ref.read(connectionProvider);
+    final url = nexusLinkUrlOf(target);
+    final linked =
+        url != null &&
+        conn.hostUrl == url &&
+        conn.status != RpcStatus.disconnected;
+    final reachable = ref.read(moduleContextProvider)?.reachable;
+    final address = targetAddressLabel(target);
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                target.name,
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              if (address.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(address, style: const TextStyle(color: NX.textDim)),
+              ],
+              const SizedBox(height: 12),
+              UtilityPills(target: target, reachable: reachable),
+              const SizedBox(height: 12),
+              if (target.has(UtilityIds.nexuslink))
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(linked ? Icons.link_off : Icons.link),
+                  title: Text(linked ? 'Disconnect' : 'Connect'),
+                  onTap: () =>
+                      Navigator.pop(context, linked ? 'disconnect' : 'connect'),
+                ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.power_settings_new),
+                title: Text(target.wake == null ? 'Set up wake' : 'Wake PC'),
+                onTap: () => Navigator.pop(context, 'wake'),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.settings_outlined),
+                title: const Text('Wake settings'),
+                onTap: () => Navigator.pop(context, 'wakeSettings'),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.edit_outlined),
+                title: const Text('Rename or remove'),
+                onTap: () => Navigator.pop(context, 'edit'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted) return;
+    switch (action) {
+      case 'connect':
+        await ref
+            .read(shellProvider.notifier)
+            .connectCurrent()
+            .catchError((_) {});
+      case 'disconnect':
+        await _disconnect();
+      case 'wake':
+        await _wake(target);
+      case 'wakeSettings':
+        await openWakeSettings(context, ref, target);
+      case 'edit':
+        await editTarget(context, ref, target);
+    }
+  }
+
   Future<void> _disconnect() async {
     if (Platform.isAndroid) {
       try {
@@ -330,13 +459,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     return _HomeView(
       target: target,
       onOpenPicker: () => _openPicker(),
+      onDeviceSettings: () => _openDeviceSettings(target),
       onPairAgain: () => _openPicker(pairAgain: target),
       onScanAgain: () => startPairing(context, ref),
       onTile: _onTile,
+      onOpenModule: _openModule,
       onWake: () => _wake(target),
-      onWakeSettings: () => openWakeSettings(context, ref, target),
-      onEdit: () => editTarget(context, ref, target),
-      onDisconnect: _disconnect,
+      onReconnect: _reconnect,
     );
   }
 }
@@ -363,23 +492,23 @@ class _HomeView extends ConsumerWidget {
   const _HomeView({
     required this.target,
     required this.onOpenPicker,
+    required this.onDeviceSettings,
     required this.onPairAgain,
     required this.onScanAgain,
     required this.onTile,
+    required this.onOpenModule,
     required this.onWake,
-    required this.onWakeSettings,
-    required this.onEdit,
-    required this.onDisconnect,
+    required this.onReconnect,
   });
   final SavedTarget target;
   final VoidCallback onOpenPicker;
+  final VoidCallback onDeviceSettings;
   final VoidCallback onPairAgain;
   final VoidCallback onScanAgain;
   final void Function(HomeTile, ModuleContext) onTile;
+  final void Function(String moduleId) onOpenModule;
   final VoidCallback onWake;
-  final VoidCallback onWakeSettings;
-  final VoidCallback onEdit;
-  final VoidCallback onDisconnect;
+  final VoidCallback onReconnect;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -403,6 +532,36 @@ class _HomeView extends ConsumerWidget {
         conn.status == RpcStatus.connected;
     final missing = _missingUtilities(modules, target);
     final wakeHere = wake?.targetId == target.id ? wake : null;
+    final waking = wakeHere?.active == true;
+    final pairAgain = shell.pairAgainTargetId == target.id;
+    final status = _heroStatus(
+      nexusConnected: nexusConnected,
+      connecting: connecting,
+      ctx: ctx,
+      shell: shell,
+      waking: waking ? wakeHere!.message : null,
+    );
+    final recovery = pairAgain
+        ? null
+        : homeRecovery(
+            target,
+            reachable: {
+              ...ctx.reachable,
+              if (nexusConnected) UtilityIds.nexuslink,
+            },
+            probedOnce: shell.probedOnce,
+            busy: connecting || waking || shell.probing,
+          );
+    // Only live approvals from the connected PC count: they are current.
+    final approvals = nexusConnected
+        ? ref.watch(approvalsProvider).items
+        : const <ExternalApproval>[];
+    final last = ref.watch(lastDestinationsProvider)[target.id];
+    final lastTile = last == null
+        ? null
+        : tiles.where((t) => t.module.id == last.moduleId).firstOrNull;
+    final project = nexusConnected ? ref.watch(projectProvider) : null;
+    unawaited(ref.read(lastDestinationsProvider.notifier).load(target.id));
 
     return Scaffold(
       body: SafeArea(
@@ -414,62 +573,27 @@ class _HomeView extends ConsumerWidget {
             slivers: [
               SliverToBoxAdapter(
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(NX.pad, 10, 6, 0),
+                  padding: const EdgeInsets.fromLTRB(NX.pad, 10, 4, 0),
                   child: Row(
                     children: [
-                      const NexusMark(size: 28),
-                      const SizedBox(width: 10),
-                      const Text(
-                        'Nexus',
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: -.3,
+                      Expanded(
+                        child: _PcSelector(
+                          target: target,
+                          status: status,
+                          onTap: onOpenPicker,
                         ),
                       ),
-                      const Spacer(),
                       IconButton(
-                        tooltip: 'Devices',
-                        onPressed: onOpenPicker,
-                        icon: const Icon(Icons.devices_other_rounded),
+                        key: const ValueKey('device-settings'),
+                        tooltip: 'Device settings',
+                        onPressed: onDeviceSettings,
+                        icon: const Icon(Icons.tune_rounded, color: NX.textDim),
                       ),
                     ],
                   ),
                 ),
               ),
-              SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(NX.pad, 10, NX.pad, 0),
-                  child: _TargetHero(
-                    target: target,
-                    ctx: ctx,
-                    status: _heroStatus(
-                      nexusConnected: nexusConnected,
-                      connecting: connecting,
-                      ctx: ctx,
-                      shell: shell,
-                      waking: wakeHere?.active == true
-                          ? wakeHere!.message
-                          : null,
-                    ),
-                    onSwitch: onOpenPicker,
-                    menu: _HeroMenu(
-                      target: target,
-                      nexusConnected: nexusConnected || connecting,
-                      onEdit: onEdit,
-                      onWake: onWake,
-                      onWakeSettings: onWakeSettings,
-                      onDisconnect: onDisconnect,
-                      onConnect: () => ref
-                          .read(shellProvider.notifier)
-                          .connectCurrent()
-                          .catchError((_) {}),
-                      onSwitch: onOpenPicker,
-                    ),
-                  ),
-                ),
-              ),
-              if (shell.pairAgainTargetId == target.id)
+              if (pairAgain)
                 SliverToBoxAdapter(
                   child: _Banner(
                     key: const ValueKey('pair-again-banner'),
@@ -516,24 +640,80 @@ class _HomeView extends ConsumerWidget {
                     ],
                   ),
                 ),
-              SliverToBoxAdapter(child: LiveBar(modules: visible, ctx: ctx)),
-              SliverToBoxAdapter(
-                child: NxSectionHeader(
-                  'Utilities',
-                  count: tiles.length,
-                  trailing: shell.probing
-                      ? const SizedBox(
-                          width: 12,
-                          height: 12,
-                          child: CircularProgressIndicator(strokeWidth: 1.6),
-                        )
-                      : null,
+              if (recovery != null)
+                SliverToBoxAdapter(
+                  child: _Banner(
+                    key: const ValueKey('recovery-banner'),
+                    color: NX.waiting,
+                    icon: recovery.allDown
+                        ? Icons.cloud_off_rounded
+                        : Icons.report_gmailerrorred_rounded,
+                    title: recovery.title,
+                    text: recovery.body,
+                    actions: [
+                      TextButton(
+                        onPressed: onReconnect,
+                        child: Text(recovery.allDown ? 'Reconnect' : 'Retry'),
+                      ),
+                      if (recovery.offerWake)
+                        TextButton(
+                          onPressed: onWake,
+                          child: const Text('Wake PC'),
+                        ),
+                    ],
+                  ),
                 ),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(NX.pad, 12, NX.pad, 0),
+                  child: approvals.isNotEmpty
+                      ? _AttentionCard(
+                          approval: approvals.first,
+                          more: approvals.length - 1,
+                          pcName: target.name,
+                          onTap: () {
+                            ref
+                                .read(pendingTaskProvider.notifier)
+                                .select('chat:${approvals.first.chatId}');
+                            onOpenModule('agents');
+                          },
+                        )
+                      : lastTile != null
+                      ? _ContinueCard(
+                          module: lastTile.module,
+                          at: last!.at,
+                          project: continueLabel(
+                            last,
+                            project: _usesProject(lastTile.module.id)
+                                ? project?.name
+                                : null,
+                          ),
+                          onTap: () {
+                            // Reopen the task, not just the tool.
+                            if (last.chatId != null &&
+                                last.moduleId == 'agents') {
+                              ref
+                                  .read(pendingTaskProvider.notifier)
+                                  .select('chat:${last.chatId}');
+                            } else if (last.path != null &&
+                                last.moduleId == 'files') {
+                              ref
+                                  .read(pendingFolderProvider.notifier)
+                                  .select(last.path);
+                            }
+                            onTile(lastTile, ctx);
+                          },
+                        )
+                      : const SizedBox.shrink(),
+                ),
+              ),
+              SliverToBoxAdapter(
+                child: LiveBar(modules: visible, ctx: ctx),
               ),
               if (tiles.isEmpty)
                 SliverToBoxAdapter(
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: NX.pad),
+                    padding: const EdgeInsets.fromLTRB(NX.pad, 20, NX.pad, 0),
                     child: NxCard(
                       child: Text(
                         'Nothing on ${target.name} works with this phone yet. '
@@ -544,33 +724,46 @@ class _HomeView extends ConsumerWidget {
                   ),
                 )
               else
-                SliverPadding(
-                  padding: const EdgeInsets.symmetric(horizontal: NX.pad),
-                  sliver: SliverGrid(
-                    gridDelegate:
-                        const SliverGridDelegateWithMaxCrossAxisExtent(
-                          maxCrossAxisExtent: 240,
-                          mainAxisSpacing: NX.gap,
-                          crossAxisSpacing: NX.gap,
-                          mainAxisExtent: 156,
-                        ),
-                    delegate: SliverChildBuilderDelegate(
-                      (context, i) => ModuleTile(
-                        tile: tiles[i],
-                        ctx: ctx,
-                        checkingLabel:
-                            connecting &&
-                                tiles[i].module
-                                    .utilitiesFor(ctx)
-                                    .contains(UtilityIds.nexuslink)
-                            ? 'Connecting…'
-                            : 'Checking…',
-                        onTap: () => onTile(tiles[i], ctx),
-                      ),
-                      childCount: tiles.length,
+                for (final (i, (group, groupTiles)) in groupTiles(
+                  tiles,
+                ).indexed) ...[
+                  SliverToBoxAdapter(
+                    child: NxSectionHeader(
+                      toolGroupTitle(group),
+                      trailing: i == 0 && shell.probing
+                          ? const SizedBox(
+                              width: 12,
+                              height: 12,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 1.6,
+                              ),
+                            )
+                          : null,
                     ),
                   ),
-                ),
+                  SliverPadding(
+                    padding: const EdgeInsets.symmetric(horizontal: NX.pad),
+                    sliver: SliverToBoxAdapter(
+                      child: ToolGrid(
+                        children: [
+                          for (final t in groupTiles)
+                            ModuleTile(
+                              tile: t,
+                              ctx: ctx,
+                              checkingLabel:
+                                  connecting &&
+                                      t.module
+                                          .utilitiesFor(ctx)
+                                          .contains(UtilityIds.nexuslink)
+                                  ? 'Connecting…'
+                                  : 'Checking…',
+                              onTap: () => onTile(t, ctx),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               if (missing.isNotEmpty)
                 SliverToBoxAdapter(
                   child: Padding(
@@ -584,7 +777,10 @@ class _HomeView extends ConsumerWidget {
                       onTap: onScanAgain,
                       child: Row(
                         children: [
-                          const Icon(Icons.add_circle_outline, color: NX.accent),
+                          const Icon(
+                            Icons.add_circle_outline,
+                            color: NX.accent,
+                          ),
                           const SizedBox(width: 12),
                           Expanded(
                             child: Text(
@@ -605,6 +801,9 @@ class _HomeView extends ConsumerWidget {
       ),
     );
   }
+
+  static bool _usesProject(String moduleId) =>
+      const {'agents', 'terminal', 'files'}.contains(moduleId);
 
   /// Utilities the target hasn't paired that a compiled-in module could use.
   static List<String> _missingUtilities(
@@ -645,6 +844,59 @@ class _HomeView extends ConsumerWidget {
   }
 }
 
+/// What Home's recovery banner says when part or all of a PC is down.
+class HomeRecovery {
+  const HomeRecovery({
+    required this.title,
+    required this.body,
+    required this.allDown,
+    required this.offerWake,
+  });
+  final String title;
+  final String body;
+  final bool allDown;
+  final bool offerWake;
+}
+
+/// Null while checking, connecting or waking, or when every paired utility
+/// answers. [reachable] includes NexusLink when its connection is up.
+HomeRecovery? homeRecovery(
+  SavedTarget target, {
+  required Set<String> reachable,
+  required bool probedOnce,
+  required bool busy,
+}) {
+  if (!probedOnce || busy) return null;
+  final paired = [
+    for (final u in UtilityIds.all)
+      if (target.has(u)) u,
+  ];
+  final down = [
+    for (final u in paired)
+      if (!reachable.contains(u)) u,
+  ];
+  if (down.isEmpty) return null;
+  if (down.length == paired.length) {
+    return HomeRecovery(
+      title: '${target.name} is offline',
+      body:
+          'Check that the PC is on and Nexus Utilities is running, and that '
+          'this phone is on the same network or Tailscale.',
+      allDown: true,
+      offerWake: target.wake != null,
+    );
+  }
+  final names = down.map(utilityName).join(' and ');
+  return HomeRecovery(
+    title: '$names ${down.length == 1 ? 'isn’t' : 'aren’t'} answering',
+    body:
+        'Other tools on ${target.name} work. Check that $names '
+        '${down.length == 1 ? 'is' : 'are'} running in Nexus Utilities.',
+    allDown: false,
+    offerWake: false,
+  );
+}
+
 class _HeroStatus {
   const _HeroStatus(this.label, this.color, {this.live = false});
   final String label;
@@ -652,38 +904,38 @@ class _HeroStatus {
   final bool live;
 }
 
-class _TargetHero extends StatelessWidget {
-  const _TargetHero({
+/// The one place to switch PCs: name and connection state.
+class _PcSelector extends StatelessWidget {
+  const _PcSelector({
     required this.target,
-    required this.ctx,
     required this.status,
-    required this.onSwitch,
-    required this.menu,
+    required this.onTap,
   });
   final SavedTarget target;
-  final ModuleContext ctx;
   final _HeroStatus status;
-  final VoidCallback onSwitch;
-  final Widget menu;
+  final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
-    final address = targetAddressLabel(target);
-    return NxCard(
-      key: const ValueKey('target-hero'),
-      accent: status.color == NX.working ? NX.accent : null,
-      padding: const EdgeInsets.fromLTRB(16, 16, 4, 16),
-      onTap: onSwitch,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: '${target.name}, ${status.label}. Switch PC',
+    excludeSemantics: true,
+    child: InkWell(
+      key: const ValueKey('pc-selector'),
+      borderRadius: BorderRadius.circular(NX.radiusSm),
+      onTap: onTap,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 56),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Row(
             children: [
-              TargetBadge(icon: target.icon, size: 56),
-              const SizedBox(width: 14),
+              TargetBadge(icon: target.icon, size: 40),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     Row(
                       children: [
@@ -693,7 +945,7 @@ class _TargetHero extends StatelessWidget {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              fontSize: 22,
+                              fontSize: 20,
                               fontWeight: FontWeight.w800,
                               letterSpacing: -.3,
                             ),
@@ -707,7 +959,7 @@ class _TargetHero extends StatelessWidget {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: 2),
                     Row(
                       children: [
                         LiveDot(
@@ -718,9 +970,7 @@ class _TargetHero extends StatelessWidget {
                         const SizedBox(width: 6),
                         Flexible(
                           child: Text(
-                            address.isEmpty
-                                ? status.label
-                                : '${status.label} · $address',
+                            status.label,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
@@ -737,95 +987,163 @@ class _TargetHero extends StatelessWidget {
                   ],
                 ),
               ),
-              menu,
             ],
           ),
-          const SizedBox(height: 12),
-          UtilityPills(target: target, reachable: ctx.reachable),
-        ],
+        ),
       ),
+    ),
+  );
+}
+
+/// A verified pending request on the connected PC.
+class _AttentionCard extends StatelessWidget {
+  const _AttentionCard({
+    required this.approval,
+    required this.more,
+    required this.pcName,
+    required this.onTap,
+  });
+  final ExternalApproval approval;
+  final int more;
+  final String pcName;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final verb = switch (approval.kind) {
+      'question' => 'Answer question',
+      'plan' => 'Review plan',
+      _ => 'Review approval',
+    };
+    final cwd = approval.json['cwd'] as String?;
+    final project = cwd == null
+        ? pcName
+        : cwd.split(RegExp(r'[/\\]')).where((p) => p.isNotEmpty).lastOrNull ??
+              pcName;
+    return _ActionCard(
+      key: const ValueKey('attention-card'),
+      color: NX.waiting,
+      icon: Icons.front_hand_outlined,
+      eyebrow: more > 0 ? 'NEEDS YOU · ${more + 1}' : 'NEEDS YOU',
+      title: '$verb · $project',
+      subtitle: approval.title,
+      onTap: onTap,
     );
   }
 }
 
-class _HeroMenu extends StatelessWidget {
-  const _HeroMenu({
-    required this.target,
-    required this.nexusConnected,
-    required this.onEdit,
-    required this.onWake,
-    required this.onWakeSettings,
-    required this.onDisconnect,
-    required this.onConnect,
-    required this.onSwitch,
+/// Back to the last tool used on this PC.
+class _ContinueCard extends StatelessWidget {
+  const _ContinueCard({
+    required this.module,
+    required this.at,
+    required this.project,
+    required this.onTap,
   });
-  final SavedTarget target;
-  final bool nexusConnected;
-  final VoidCallback onEdit;
-  final VoidCallback onWake;
-  final VoidCallback onWakeSettings;
-  final VoidCallback onDisconnect;
-  final VoidCallback onConnect;
-  final VoidCallback onSwitch;
+  final NexusModule module;
+  final DateTime at;
+  final String? project;
+  final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) => PopupMenuButton<String>(
-    tooltip: 'Device options',
-    icon: const Icon(Icons.more_vert, color: NX.textDim),
-    onSelected: (v) => switch (v) {
-      'edit' => onEdit(),
-      'wake' => onWake(),
-      'wakeSettings' => onWakeSettings(),
-      'disconnect' => onDisconnect(),
-      'connect' => onConnect(),
-      _ => onSwitch(),
-    },
-    itemBuilder: (_) => [
-      if (target.has(UtilityIds.nexuslink))
-        nexusConnected
-            ? const PopupMenuItem(
-                value: 'disconnect',
-                child: ListTile(
-                  leading: Icon(Icons.link_off),
-                  title: Text('Disconnect'),
+  Widget build(BuildContext context) => _ActionCard(
+    key: const ValueKey('continue-card'),
+    color: NX.accent,
+    icon: module.icon,
+    eyebrow: 'CONTINUE',
+    title: project == null ? module.title : '${module.title} · $project',
+    subtitle: 'Last opened ${shortAgo(at)}',
+    onTap: onTap,
+  );
+}
+
+/// What the Continue card names: the chat or folder you were in, else the
+/// selected project (for project tools), else nothing.
+String? continueLabel(LastDestination last, {String? project}) {
+  final title = last.title?.trim();
+  if (last.chatId != null && title != null && title.isNotEmpty) return title;
+  final path = last.path;
+  if (path != null && path.isNotEmpty) return folderDisplayName(path);
+  return project;
+}
+
+/// "just now", "5 min ago", "3 h ago", "2 d ago".
+String shortAgo(DateTime at, {DateTime? now}) {
+  final d = (now ?? DateTime.now()).difference(at);
+  if (d.inMinutes < 1) return 'just now';
+  if (d.inHours < 1) return '${d.inMinutes} min ago';
+  if (d.inDays < 1) return '${d.inHours} h ago';
+  return '${d.inDays} d ago';
+}
+
+class _ActionCard extends StatelessWidget {
+  const _ActionCard({
+    super.key,
+    required this.color,
+    required this.icon,
+    required this.eyebrow,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+  final Color color;
+  final IconData icon;
+  final String eyebrow;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: '$title. $subtitle',
+    excludeSemantics: true,
+    child: NxCard(
+      accent: color,
+      padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
+      onTap: onTap,
+      child: Row(
+        children: [
+          Icon(icon, color: color, size: 26),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  eyebrow,
+                  style: TextStyle(
+                    color: color,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.3,
+                  ),
                 ),
-              )
-            : const PopupMenuItem(
-                value: 'connect',
-                child: ListTile(
-                  leading: Icon(Icons.link),
-                  title: Text('Connect'),
+                const SizedBox(height: 3),
+                Text(
+                  title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 16.5,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
-              ),
-      PopupMenuItem(
-        value: 'wake',
-        child: ListTile(
-          leading: const Icon(Icons.power_settings_new),
-          title: Text(target.wake == null ? 'Set up wake' : 'Wake PC'),
-        ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: NX.textDim, fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Icon(Icons.chevron_right_rounded, color: color),
+        ],
       ),
-      const PopupMenuItem(
-        value: 'wakeSettings',
-        child: ListTile(
-          leading: Icon(Icons.settings_outlined),
-          title: Text('Wake settings'),
-        ),
-      ),
-      const PopupMenuItem(
-        value: 'edit',
-        child: ListTile(
-          leading: Icon(Icons.edit_outlined),
-          title: Text('Rename or remove'),
-        ),
-      ),
-      const PopupMenuItem(
-        value: 'switch',
-        child: ListTile(
-          leading: Icon(Icons.devices_other_rounded),
-          title: Text('Switch device'),
-        ),
-      ),
-    ],
+    ),
   );
 }
 
@@ -850,9 +1168,11 @@ class _Banner extends StatelessWidget {
     required this.icon,
     required this.text,
     required this.actions,
+    this.title,
   });
   final Color color;
   final IconData icon;
+  final String? title;
   final String text;
   final List<Widget> actions;
 
@@ -871,11 +1191,26 @@ class _Banner extends StatelessWidget {
               Icon(icon, color: color, size: 20),
               const SizedBox(width: 10),
               Expanded(
-                child: Text(text, style: const TextStyle(fontSize: 13.5)),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (title != null) ...[
+                      Text(
+                        title!,
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                    ],
+                    Text(text, style: const TextStyle(fontSize: 13.5)),
+                  ],
+                ),
               ),
             ],
           ),
-          Row(mainAxisAlignment: MainAxisAlignment.end, children: actions),
+          Wrap(alignment: WrapAlignment.end, children: actions),
         ],
       ),
     ),

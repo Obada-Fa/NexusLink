@@ -5,8 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../rpc/rpc_client.dart';
 import '../screens/agent_screen.dart';
 import '../state/connection.dart';
-import '../state/last_host.dart';
-import '../workspace/platform_bridge.dart';
+import '../shell/resume_store.dart';
 import '../workspace/project.dart';
 import '../workspace/files_screen.dart';
 import 'chat_models.dart';
@@ -381,44 +380,6 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
     }
   }
 
-  Future<void> _forgetPc() async {
-    if (!await _confirm(
-      'Forget this PC?',
-      'You will need a new pairing code from the PC to reconnect. Saved chats and drafts on this phone are removed.',
-      'Forget',
-    )) {
-      return;
-    }
-    if (!mounted) return;
-    final repository = _repo;
-    final host = await repository.host();
-    final address = repository.address;
-    repository.dispose();
-    ref.read(connectionProvider.notifier).disconnect();
-    if (host != null) await repository.cache.clear(host, includeDrafts: true);
-    if (address != null) await PlatformBridge.removeCredential(address);
-    final prefs = await SharedPreferences.getInstance();
-    if (address != null) await prefs.remove('chat-host:$address');
-    if (prefs.getString('chat-last-host') == host) {
-      await prefs.remove('chat-last-host');
-    }
-    await clearLastHostUrl();
-    if (mounted) {
-      setState(() {
-        _items = [];
-        _health = [];
-        _lastSync = null;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'PC forgotten. Saved chats and drafts removed from this phone.',
-          ),
-        ),
-      );
-    }
-  }
-
   @override
   void dispose() {
     ++_generation;
@@ -432,6 +393,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
   }
 
   Future<void> _open(ChatSummary chat) async {
+    noteResume(ref, 'agents', chatId: chat.id, title: chat.title);
     await Navigator.of(context).push(
       MaterialPageRoute<void>(builder: (_) => AgentScreen(libraryChat: chat)),
     );
@@ -813,7 +775,8 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
             ),
           ),
         ),
-      if (!_folders && monitorHost && top && !_arena)
+      // Live leads with what needs a response; vitals follow "Needs you".
+      if (!_folders && monitorHost && top && !_arena && attention.isEmpty)
         const SliverToBoxAdapter(child: VitalsPulseStrip()),
       if (monitorHost && top && !offline)
         const SliverToBoxAdapter(child: RemoteAccessAlert()),
@@ -944,6 +907,8 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
             ],
           ),
         ],
+        if (monitorHost && top && attention.isNotEmpty)
+          const SliverToBoxAdapter(child: VitalsPulseStrip()),
         if (showRecent && turn.isNotEmpty) ...[
           SliverToBoxAdapter(
             child: NxSectionHeader(
@@ -1086,25 +1051,28 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
             ),
             onPressed: _filters,
           ),
-          IconButton(
-            tooltip: 'New chat',
-            icon: const Icon(Icons.add_comment_outlined),
-            onPressed: offline ? null : _newChat,
-          ),
+          // Forgetting the PC lives in Home → Device settings → Rename or
+          // remove: too consequential to sit beside clearing chat history.
           PopupMenuButton<String>(
             tooltip: 'Chat library options',
-            onSelected: (value) =>
-                value == 'forget' ? _forgetPc() : _clearSaved(),
+            onSelected: (_) => _clearSaved(),
             itemBuilder: (_) => const [
               PopupMenuItem(
                 value: 'clear',
                 child: Text('Clear saved chats on this phone'),
               ),
-              PopupMenuItem(value: 'forget', child: Text('Forget this PC')),
             ],
           ),
         ],
       ),
+      floatingActionButton: offline
+          ? null
+          : FloatingActionButton.extended(
+              key: const ValueKey('new-chat'),
+              onPressed: _newChat,
+              icon: const Icon(Icons.add_comment_outlined),
+              label: const Text('New chat'),
+            ),
       body: body,
     );
   }

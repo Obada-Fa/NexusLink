@@ -75,7 +75,7 @@ void main() {
     expect(targets.last.utilities[UtilityIds.nexuslink]?.wsUrl, laptopUrl);
 
     // Switch PCs through the picker.
-    await tester.tap(find.byTooltip('Devices'));
+    await tester.tap(find.byKey(const ValueKey('pc-selector')));
     await tester.pumpAndSettle();
     expect(find.text('Office PC'), findsOneWidget);
     expect(find.text('Current'), findsOneWidget);
@@ -202,6 +202,13 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('other-ways')));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey('pairing-code')),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
     await tester.enterText(find.byKey(const ValueKey('pc-address')), '10.0.0.7');
     await tester.enterText(
       find.byKey(const ValueKey('pairing-code')),
@@ -218,6 +225,11 @@ void main() {
     await tester.pumpAndSettle();
     expect(FakeConnection.connects, ['ws://10.0.0.7:45678/rpc#12345678']);
     expect(find.text('My PC'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Desktop'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
     expect(find.text('Desktop'), findsOneWidget);
     final saved = (await TargetStore.load()).single;
     expect(saved.id, 'legacy:ws://10.0.0.7:45678/rpc');

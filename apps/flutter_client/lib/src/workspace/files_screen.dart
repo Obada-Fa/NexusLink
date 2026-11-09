@@ -6,9 +6,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
 import '../screens/terminal_screen.dart';
+import '../state/last_cwd.dart';
 import '../theme/nexus_theme.dart';
 import 'editor_screen.dart';
 import 'platform_bridge.dart';
+import '../shell/resume_store.dart';
 import 'project.dart';
 
 const _imageExtensions = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'};
@@ -188,6 +190,7 @@ class _WorkspaceFilesScreenState extends ConsumerState<WorkspaceFilesScreen> {
       final info = await client.requestMap('system.getInfo');
       await _load(
         widget.initialPath ??
+            ref.read(pendingFolderProvider.notifier).take() ??
             ref.read(projectProvider)?.path ??
             info['homeDir'] as String,
       );
@@ -221,6 +224,7 @@ class _WorkspaceFilesScreenState extends ConsumerState<WorkspaceFilesScreen> {
           (result['entries'] as List).map((e) => Map<String, dynamic>.from(e)),
         );
       });
+      noteResume(ref, 'files', path: _path);
       final prefs = await SharedPreferences.getInstance();
       final key = 'folders:${client.hostId}';
       final recent = prefs.getStringList(key) ?? [];
@@ -573,6 +577,12 @@ class _WorkspaceFilesScreenState extends ConsumerState<WorkspaceFilesScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Continue from Home while Files is already open: go to that folder.
+    ref.listen<String?>(pendingFolderProvider, (_, path) {
+      if (path == null || widget.initialPath != null) return;
+      ref.read(pendingFolderProvider.notifier).take();
+      _load(path);
+    });
     ref.listen(connectionStatusProvider, (_, next) {
       if (next.name == 'connected') {
         if (_path == null) {
@@ -584,8 +594,26 @@ class _WorkspaceFilesScreenState extends ConsumerState<WorkspaceFilesScreen> {
     });
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Files'),
+        title: Text(
+          _path == null ? 'Files' : folderDisplayName(_path!),
+          key: const ValueKey('files-folder-title'),
+          overflow: TextOverflow.ellipsis,
+        ),
         actions: [
+          IconButton(
+            key: const ValueKey('files-terminal-here'),
+            tooltip: 'Open terminal here',
+            onPressed: _path == null
+                ? null
+                : () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      settings: const RouteSettings(name: 'files-terminal'),
+                      builder: (_) => TerminalScreen(initialCwd: _path),
+                    ),
+                  ),
+            icon: const Icon(Icons.terminal),
+          ),
           IconButton(
             tooltip: 'Transfers',
             onPressed: () => Navigator.push(
@@ -659,7 +687,11 @@ class _WorkspaceFilesScreenState extends ConsumerState<WorkspaceFilesScreen> {
                     final path = await _input('PC path', initial: _path ?? '/');
                     if (path != null) await _load(path);
                   },
-                  child: Text(_path ?? 'Loading…', maxLines: 2),
+                  child: Text(
+                    _path ?? 'Loading…',
+                    maxLines: 2,
+                    style: const TextStyle(fontSize: 12.5),
+                  ),
                 ),
               ),
               IconButton(

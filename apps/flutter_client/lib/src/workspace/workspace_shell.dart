@@ -428,7 +428,7 @@ class _PcScreenState extends ConsumerState<PcScreen>
     final settings = ref.watch(workspaceSettingsProvider);
     return Scaffold(
       appBar: AppBar(
-        title: const Text('PC settings'),
+        title: const Text('Settings'),
         actions: [
           IconButton(
             tooltip: 'Refresh',
@@ -442,6 +442,7 @@ class _PcScreenState extends ConsumerState<PcScreen>
         children: [
           if (_error != null)
             Text(_error!, style: const TextStyle(color: Colors.amber)),
+          const _SettingsGroup('This PC'),
           Text(
             _info?['hostname'] ?? 'PC',
             style: Theme.of(context).textTheme.headlineSmall,
@@ -483,6 +484,22 @@ class _PcScreenState extends ConsumerState<PcScreen>
               subtitle: Text('${_info!['os']}'),
             ),
           ],
+          ListTile(
+            leading: const Icon(Icons.link_off),
+            title: const Text('Disconnect PC'),
+            subtitle: const Text('PC agents and shells keep running'),
+            onTap: () async {
+              if (Platform.isAndroid) await PlatformBridge.call('live.stop');
+              ref.read(connectionProvider.notifier).disconnect();
+              if (context.mounted) {
+                Navigator.of(
+                  context,
+                  rootNavigator: true,
+                ).popUntil((route) => route.isFirst);
+              }
+            },
+          ),
+          const _SettingsGroup('This phone'),
           SwitchListTile(
             title: const Text('PC status strip'),
             subtitle: const Text('CPU and memory above navigation'),
@@ -623,24 +640,28 @@ class _PcScreenState extends ConsumerState<PcScreen>
               },
             ),
           ],
-          const Divider(),
-          ListTile(
-            leading: const Icon(Icons.link_off),
-            title: const Text('Disconnect PC'),
-            subtitle: const Text('PC agents and shells keep running'),
-            onTap: () async {
-              if (Platform.isAndroid) await PlatformBridge.call('live.stop');
-              ref.read(connectionProvider.notifier).disconnect();
-              if (context.mounted) {
-                Navigator.of(
-                  context,
-                  rootNavigator: true,
-                ).popUntil((route) => route.isFirst);
-              }
-            },
-          ),
         ],
       ),
     );
   }
+}
+
+/// A settings group header: what the settings below affect.
+class _SettingsGroup extends StatelessWidget {
+  const _SettingsGroup(this.title);
+  final String title;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: 12, bottom: 6),
+    child: Text(
+      title.toUpperCase(),
+      style: const TextStyle(
+        color: NX.textFaint,
+        fontSize: 11.5,
+        fontWeight: FontWeight.w800,
+        letterSpacing: 1.4,
+      ),
+    ),
+  );
 }
