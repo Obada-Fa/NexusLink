@@ -82,7 +82,7 @@ class _VitalsSheetState extends ConsumerState<VitalsSheet> {
     return [
       _Headline(
         value: fmtPct(v.cpu),
-        color: NX.heat(v.cpu),
+        color: NX.text,
         title: shortCpuModel(v.cpuModel),
         subtitle: '${v.cores} threads · ${fmtGHz(v.cpuMHz)}',
       ),
@@ -98,7 +98,7 @@ class _VitalsSheetState extends ConsumerState<VitalsSheet> {
         _ChartBlock(
           title: 'Temperature',
           value: fmtTemp(v.cpuTempC),
-          color: NX.tempHeat(v.cpuTempC, warmAt: 70, hotAt: 90),
+          color: NX.accent,
           values: h['cpuTemp'],
           unit: '°',
         ),
@@ -113,6 +113,7 @@ class _VitalsSheetState extends ConsumerState<VitalsSheet> {
               key: stillKey(context, v.perCore.join(',')),
               values: v.perCore,
               height: 56,
+              color: NX.accent,
             ),
           ),
         ),
@@ -146,7 +147,7 @@ class _VitalsSheetState extends ConsumerState<VitalsSheet> {
     return [
       _Headline(
         value: gpu.busy == null ? '—' : fmtPct(gpu.busy!),
-        color: NX.heat(gpu.busy ?? 0),
+        color: NX.text,
         title: shortGpuName(gpu.name),
         subtitle: gpu.coreMHz == null
             ? 'Graphics'
@@ -182,7 +183,7 @@ class _VitalsSheetState extends ConsumerState<VitalsSheet> {
         _ChartBlock(
           title: 'Hotspot temperature',
           value: fmtTemp(gpu.peakTempC),
-          color: NX.tempHeat(gpu.peakTempC, warmAt: 80, hotAt: 100),
+          color: NX.accent,
           values: h['gpuTemp'],
           unit: '°',
         ),
@@ -201,11 +202,16 @@ class _VitalsSheetState extends ConsumerState<VitalsSheet> {
                 value: gpu.powerCapW == null
                     ? fmtWatts(gpu.powerW)
                     : '${gpu.powerW!.round()}/${fmtWatts(gpu.powerCapW)}',
-                color: NX.warm,
+                color: NX.accent,
               ),
               if (h['gpuPower'].length >= 2) ...[
                 const SizedBox(height: 10),
-                Sparkline(values: h['gpuPower'], color: NX.warm, height: 44),
+                Sparkline(
+                  values: h['gpuPower'],
+                  color: NX.accent,
+                  height: 44,
+                  fill: false,
+                ),
               ],
             ],
           ),
@@ -224,6 +230,7 @@ class _VitalsSheetState extends ConsumerState<VitalsSheet> {
               if (h['vram'].length >= 2) ...[
                 const SizedBox(height: 10),
                 Sparkline(
+                  fill: false,
                   values: h['vram'],
                   color: NX.done,
                   max: 100,
@@ -260,7 +267,7 @@ class _VitalsSheetState extends ConsumerState<VitalsSheet> {
     return [
       _Headline(
         value: fmtPct(v.ramPercent),
-        color: NX.heat(v.ramPercent),
+        color: v.ramPercent >= 90 ? NX.waiting : NX.text,
         title: '${fmtGB(v.ramUsed)} in use',
         subtitle:
             '${fmtGB(v.ramTotal - v.ramUsed)} free of ${fmtGB(v.ramTotal)}',
@@ -406,9 +413,8 @@ class _Block extends StatelessWidget {
     child: Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: NX.surface2,
         borderRadius: BorderRadius.circular(NX.radiusSm),
-        border: Border.all(color: NX.line.withValues(alpha: .7)),
+        border: Border.all(color: NX.line),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -492,6 +498,7 @@ class _ChartBlock extends StatelessWidget {
                   label:
                       '$title history: low ${f(lo)}, average ${f(avg)}, peak ${f(hi)}',
                   child: Sparkline(
+                    fill: false,
                     values: values,
                     color: color,
                     max: max,
@@ -550,13 +557,12 @@ class _TempTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = NX.tempHeat(celsius, warmAt: warmAt, hotAt: hotAt);
+    final c = (celsius ?? 0) >= hotAt ? NX.waiting : NX.text;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
-        color: c.withValues(alpha: .10),
         borderRadius: BorderRadius.circular(NX.radiusSm),
-        border: Border.all(color: c.withValues(alpha: .30)),
+        border: Border.all(color: NX.line),
       ),
       child: PcStat(
         label: label.toUpperCase(),
@@ -607,7 +613,7 @@ class _OtherGpu extends StatelessWidget {
           PcStat(
             label: 'TEMP',
             value: fmtTemp(gpu.peakTempC),
-            color: NX.tempHeat(gpu.peakTempC),
+            color: (gpu.peakTempC ?? 0) >= 95 ? NX.waiting : NX.text,
           ),
           if (gpu.powerW != null)
             PcStat(label: 'POWER', value: fmtWatts(gpu.powerW)),
@@ -643,6 +649,12 @@ class _Meter extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MediaQuery.withClampedTextScaling(
     maxScaleFactor: 1.3,
-    child: MeterBar(label: label, percent: percent, value: value, color: color),
+    child: MeterBar(
+      label: label,
+      percent: percent,
+      value: value,
+      color: color ?? (percent >= 90 ? NX.waiting : NX.accent),
+      flat: true,
+    ),
   );
 }

@@ -270,6 +270,7 @@ class AgentAppCard extends StatelessWidget {
       label:
           '${app.name}, ${Status.label(app.state)}, CPU ${app.cpu.round()} percent, memory ${formatBytes(app.memory)}',
       child: NxCard(
+        flat: true,
         accent: stuck
             ? NX.stuck
             : app.state == 'busy'
@@ -498,6 +499,7 @@ class _UsageRow extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
         Expanded(
+          flex: 3,
           child: history.length < 2
               ? SizedBox(height: compact ? 24 : 32)
               : ExcludeSemantics(
@@ -513,9 +515,30 @@ class _UsageRow extends StatelessWidget {
                 ),
         ),
         const SizedBox(width: 12),
-        _Metric(label: 'CPU', value: fmtPct(app.cpu), color: NX.heat(app.cpu)),
-        const SizedBox(width: 12),
-        _Metric(label: 'RAM', value: formatBytes(app.memory), color: NX.text),
+        // Shrinks rather than overflows at large text sizes.
+        Flexible(
+          flex: 2,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.bottomRight,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                _Metric(
+                  label: 'CPU',
+                  value: fmtPct(app.cpu),
+                  color: app.cpu >= 85 ? NX.waiting : NX.text,
+                ),
+                const SizedBox(width: 12),
+                _Metric(
+                  label: 'RAM',
+                  value: formatBytes(app.memory),
+                  color: NX.text,
+                ),
+              ],
+            ),
+          ),
+        ),
       ],
     );
   }

@@ -1,14 +1,15 @@
-// Mobile PC tab: live vitals, agent apps, remote access, top processes, the
-// desktop mirror, and the app launcher (favourites, recents, running windows).
+// Desktop: Overview (live readings, open the desktop, PC details), Apps
+// (favourites, recents, search) and Windows (running windows and app
+// sessions), switched by a bottom navigation bar.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../monitor/monitor_provider.dart';
 import '../pc/agent_apps_section.dart';
+import '../pc/desktop_overview.dart';
 import '../pc/pc_actions.dart';
 import '../pc/pc_sections.dart';
-import '../pc/pc_ui.dart';
 import '../pc/phone_mic.dart';
 import '../pc/remote_access_section.dart';
 import '../pc/phone_approvals_section.dart';
@@ -23,7 +24,6 @@ import '../widgets/app_icon.dart';
 
 import 'mirror_screen.dart';
 import '../workspace/workspace_shell.dart';
-import '../widgets/pc_charts.dart';
 
 class LauncherScreen extends ConsumerStatefulWidget {
   const LauncherScreen({super.key});
@@ -34,59 +34,24 @@ class LauncherScreen extends ConsumerStatefulWidget {
 
 class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   String _search = '';
-  bool _expanded = false;
   bool _busy = false;
-  bool _allWindows = false;
-  final _list = ScrollController();
-  final _appsKey = GlobalKey();
-  final _runningKey = GlobalKey();
+
+  /// 0 Overview · 1 Apps · 2 Windows. Each tab keeps its own scroll position,
+  /// and the search text survives switching tabs.
+  int _tab = 0;
+  final _overviewScroll = ScrollController();
+  final _appsScroll = ScrollController();
+  final _windowsScroll = ScrollController();
+  final _searchField = TextEditingController();
 
   @override
   void dispose() {
-    _list.dispose();
+    _overviewScroll.dispose();
+    _appsScroll.dispose();
+    _windowsScroll.dispose();
+    _searchField.dispose();
     super.dispose();
   }
-
-  /// Scrolls to a section, which the lazy list may not have built yet.
-  Future<void> _reveal(GlobalKey key) async {
-    for (var i = 0; i < 8; i++) {
-      if (!mounted) return;
-      final target = key.currentContext;
-      if (target != null) {
-        if (!target.mounted) return;
-        final duration = motion(target, const Duration(milliseconds: 250));
-        await Scrollable.ensureVisible(
-          target,
-          duration: duration,
-          curve: Curves.easeOut,
-        );
-        return;
-      }
-      if (!_list.hasClients) return;
-      final position = _list.position;
-      if (position.pixels >= position.maxScrollExtent) return;
-      _list.jumpTo(
-        (position.pixels + position.viewportDimension * .8).clamp(
-          0.0,
-          position.maxScrollExtent,
-        ),
-      );
-      await WidgetsBinding.instance.endOfFrame;
-    }
-  }
-
-  Future<void> _showApps() async {
-    if (!_expanded) {
-      setState(() {
-        _expanded = true;
-        _search = '';
-      });
-    }
-    await WidgetsBinding.instance.endOfFrame;
-    await _reveal(_appsKey);
-  }
-
-  static const _maxWindows = 6;
 
   LauncherPreferences? get _preferences => ref
       .read(
@@ -271,7 +236,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   }
 
   void _openWindow(WindowInfo w, List<AppInfo> apps) {
-    Navigator.of(context).push(
+    Navigator.of(context, rootNavigator: true).push(
       MaterialPageRoute(
         builder: (_) => MirrorScreen(
           target: MirrorTarget(
@@ -285,7 +250,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   }
 
   void _attachSession(AppSessionInfo s) {
-    Navigator.of(context).push(
+    Navigator.of(context, rootNavigator: true).push(
       MaterialPageRoute(
         builder: (_) => MirrorScreen(
           target: MirrorTarget(
@@ -331,7 +296,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     // 3. Launch the app. Virtual profile apps go to a virtual session;
     // system desktop apps launch on the real desktop and are adopted into portrait.
     if (a.appId.startsWith('nexus.')) {
-      Navigator.of(context).push(
+      Navigator.of(context, rootNavigator: true).push(
         MaterialPageRoute(
           builder: (_) => MirrorScreen(
             target: MirrorTarget(
@@ -343,7 +308,7 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
         ),
       );
     } else {
-      Navigator.of(context).push(
+      Navigator.of(context, rootNavigator: true).push(
         MaterialPageRoute(
           builder: (_) => MirrorScreen(
             target: MirrorTarget(
@@ -367,9 +332,11 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     ]);
   }
 
-  static Widget _pad(Widget child) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: NX.pad),
-    child: child,
+  void _openDetails() => Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      settings: const RouteSettings(name: 'pc-details'),
+      builder: (_) => const PcDetailsScreen(),
+    ),
   );
 
   @override
@@ -394,115 +361,95 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     final monitor = hasSnapshot || hostSupportsMonitor(client);
     // The shell keeps every visited tab mounted; only stream while shown.
     final visible = TickerMode.valuesOf(context).enabled;
-
-    final screen = <Widget>[
-      const NxSectionHeader('Screen'),
-      _pad(DesktopEntryCard(onOpen: _openDesktop)),
-      const SizedBox(height: 12),
-      KeyedSubtree(
-        key: _appsKey,
-        child: _pad(_appsCard(apps, windows, sessions, preferences, appsAsync)),
-      ),
-      ..._runningWindows(windows, sessions, apps, preferences),
-    ];
+    final running = windows.length + sessions.length;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Your PC'),
+        titleSpacing: NX.pad,
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              desktopTitle(ref),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const DesktopStatusLine(),
+          ],
+        ),
         actions: [
-          IconButton(
-            tooltip: 'Settings',
-            icon: const Icon(Icons.settings_outlined),
-            onPressed: () => Navigator.of(
-              context,
-            ).push(MaterialPageRoute(builder: (_) => const PcScreen())),
-          ),
-          IconButton(
-            tooltip: 'Disconnect from PC',
-            icon: const Icon(Icons.power_settings_new),
-            onPressed: () => disconnectFromPc(context, ref),
+          PopupMenuButton<String>(
+            tooltip: 'More options',
+            icon: const Icon(Icons.more_vert_rounded),
+            onSelected: (action) {
+              if (action == 'settings') {
+                Navigator.of(
+                  context,
+                ).push(MaterialPageRoute(builder: (_) => const PcScreen()));
+              } else {
+                disconnectFromPc(context, ref);
+              }
+            },
+            itemBuilder: (_) => [
+              PopupMenuItem(
+                value: 'settings',
+                child: _menuRow(Icons.settings_outlined, 'Settings'),
+              ),
+              PopupMenuItem(
+                value: 'disconnect',
+                child: _menuRow(Icons.power_settings_new, 'Disconnect from PC'),
+              ),
+            ],
           ),
         ],
       ),
       body: MonitorDemand(
         owner: 'pc',
         intervalMs: 2000,
-        active: visible && monitor,
-        child: Column(
+        active: visible && monitor && _tab == _overviewTab,
+        child: IndexedStack(
+          index: _tab,
           children: [
-            if (monitor)
-              PcQuickActions(
-                onDesktop: () => _openDesktop(false),
-                onApps: _showApps,
-                onRunning: () => _reveal(_runningKey),
-                running: windows.length + sessions.length,
+            _overview(monitor),
+            _appsTab(apps, windows, sessions, preferences, appsAsync),
+            _windowsTab(windows, sessions, apps, preferences),
+          ],
+        ),
+      ),
+      bottomNavigationBar: DecoratedBox(
+        decoration: const BoxDecoration(
+          border: Border(top: BorderSide(color: NX.line)),
+        ),
+        child: NavigationBar(
+          key: const ValueKey('desktop-nav'),
+          selectedIndex: _tab,
+          elevation: 0,
+          labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+          onDestinationSelected: (i) => setState(() => _tab = i),
+          destinations: [
+            const NavigationDestination(
+              icon: Icon(Icons.speed_outlined),
+              selectedIcon: Icon(Icons.speed),
+              label: 'Overview',
+            ),
+            const NavigationDestination(
+              icon: Icon(Icons.apps_outlined),
+              selectedIcon: Icon(Icons.apps),
+              label: 'Apps',
+            ),
+            NavigationDestination(
+              icon: Badge.count(
+                count: running,
+                isLabelVisible: running > 0,
+                child: const Icon(Icons.layers_outlined),
               ),
-            Expanded(
-              child: RefreshIndicator(
-                onRefresh: _refresh,
-                child: ListView(
-                  controller: _list,
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  padding: const EdgeInsets.only(top: 4, bottom: 32),
-                  // Opening the desktop comes first; monitoring and
-                  // configuration live in PC details.
-                  children: monitor
-                      ? [
-                          ...screen,
-                          const SizedBox(height: 16),
-                          _pad(
-                            NxCard(
-                              key: const ValueKey('pc-details-entry'),
-                              onTap: () => Navigator.of(context).push(
-                                MaterialPageRoute<void>(
-                                  settings: const RouteSettings(
-                                    name: 'pc-details',
-                                  ),
-                                  builder: (_) => const PcDetailsScreen(),
-                                ),
-                              ),
-                              child: const Row(
-                                children: [
-                                  Icon(Icons.monitor_heart_outlined),
-                                  SizedBox(width: 14),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          'PC details',
-                                          style: TextStyle(
-                                            fontSize: 16,
-                                            fontWeight: FontWeight.w700,
-                                          ),
-                                        ),
-                                        SizedBox(height: 2),
-                                        Text(
-                                          'Vitals, processes, approvals, '
-                                          'remote access and the older mic',
-                                          style: TextStyle(
-                                            color: NX.textDim,
-                                            fontSize: 13,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  Icon(Icons.chevron_right_rounded),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ]
-                      : [
-                          _pad(_header(context)),
-                          ...screen,
-                          const SizedBox(height: 20),
-                          _pad(const PcCharts()),
-                        ],
-                ),
+              selectedIcon: Badge.count(
+                count: running,
+                isLabelVisible: running > 0,
+                child: const Icon(Icons.layers),
               ),
+              label: 'Windows',
             ),
           ],
         ),
@@ -510,7 +457,68 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     );
   }
 
-  Widget _appsCard(
+  static const _overviewTab = 0;
+
+  Widget _overview(bool monitor) => RefreshIndicator(
+    onRefresh: _refresh,
+    child: ListView(
+      key: const PageStorageKey('desktop-overview'),
+      controller: _overviewScroll,
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.only(top: 4, bottom: 24),
+      children: [
+        monitor ? const DesktopReadings() : const LegacyDesktopReadings(),
+        const SizedBox(height: 12),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: NX.pad),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            alignment: WrapAlignment.spaceBetween,
+            children: [
+              FilledButton.icon(
+                key: const ValueKey('open-desktop'),
+                onPressed: () => _openDesktop(false),
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size(48, 48),
+                  elevation: 0,
+                ),
+                icon: const Icon(Icons.desktop_windows_outlined, size: 20),
+                label: const Text('Open desktop'),
+              ),
+              TextButton.icon(
+                onPressed: () => _openDesktop(true),
+                style: TextButton.styleFrom(minimumSize: const Size(48, 48)),
+                icon: const Icon(Icons.visibility_outlined, size: 20),
+                label: const Text('View only'),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+        const Divider(height: 1, color: NX.line),
+        if (monitor)
+          ListTile(
+            key: const ValueKey('pc-details-entry'),
+            minTileHeight: 56,
+            contentPadding: const EdgeInsets.symmetric(horizontal: NX.pad),
+            title: const Text(
+              'PC details',
+              style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w600),
+            ),
+            subtitle: const Text(
+              'Processes, agent apps, approvals, remote access, mic',
+              style: TextStyle(color: NX.textDim, fontSize: 12.5),
+            ),
+            trailing: const Icon(Icons.chevron_right_rounded),
+            onTap: _openDetails,
+          ),
+      ],
+    ),
+  );
+
+  Widget _appsTab(
     List<AppInfo> apps,
     List<WindowInfo> windows,
     List<AppSessionInfo> sessions,
@@ -522,142 +530,165 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
         ? apps
         : apps.where((a) => a.name.toLowerCase().contains(q)).toList();
     final recent =
-        preferences?.recentlyUsed(apps).take(4).toList() ?? <AppInfo>[];
-    return NxCard(
-      padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        preferences?.recentlyUsed(apps).take(8).toList() ?? <AppInfo>[];
+    final favourites = apps
+        .where((a) => preferences?.isFavourite(a) ?? false)
+        .toList();
+    return RefreshIndicator(
+      onRefresh: _refresh,
+      child: ListView(
+        key: const PageStorageKey('desktop-apps'),
+        controller: _appsScroll,
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.fromLTRB(NX.pad, 12, NX.pad, 24),
         children: [
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Apps'),
-            subtitle: Text(_expanded ? 'Favourites' : 'Recently opened'),
-            trailing: Icon(_expanded ? Icons.expand_less : Icons.expand_more),
-            onTap: () => setState(() {
-              _expanded = !_expanded;
-              _search = '';
-            }),
+          TextField(
+            controller: _searchField,
+            onChanged: (value) => setState(() => _search = value),
+            decoration: InputDecoration(
+              prefixIcon: const Icon(Icons.search),
+              hintText: 'Search apps',
+              border: const OutlineInputBorder(),
+              suffixIcon: _search.isEmpty
+                  ? null
+                  : IconButton(
+                      tooltip: 'Clear search',
+                      icon: const Icon(Icons.close),
+                      onPressed: () => setState(() {
+                        _searchField.clear();
+                        _search = '';
+                      }),
+                    ),
+            ),
           ),
-          if (_busy) const LinearProgressIndicator(),
-          if (preferences == null) const Text('Loading app menu…'),
-          if (!_expanded) ...[
-            if (recent.isEmpty)
-              const Text(
-                'Apps you open will appear here. Expand to choose a favourite.',
-                style: TextStyle(color: NX.textDim),
-              ),
-            _appGrid(recent, windows, sessions),
-          ] else ...[
-            _appGrid(
-              apps.where((a) => preferences?.isFavourite(a) ?? false).toList(),
-              windows,
-              sessions,
+          if (_busy || appsAsync.isLoading)
+            const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: LinearProgressIndicator(),
             ),
-            for (final name in LauncherPreferences.defaultFavourites)
-              if (!apps.any((a) => LauncherPreferences.defaultName(a) == name))
-                ListTile(
-                  dense: true,
-                  leading: const Icon(Icons.star_outline),
-                  title: Text(name),
-                  subtitle: const Text('Not available on this PC'),
-                ),
-            const SizedBox(height: 12),
-            TextField(
-              onChanged: (value) => setState(() => _search = value),
-              decoration: const InputDecoration(
-                prefixIcon: Icon(Icons.search),
-                hintText: 'Search apps to add…',
-                border: OutlineInputBorder(),
-              ),
+          if (appsAsync.hasError)
+            const Padding(
+              padding: EdgeInsets.only(top: 12),
+              child: Text('Could not load apps. Pull down to retry.'),
             ),
-            if (q.isNotEmpty && filteredApps.isEmpty)
+          if (q.isNotEmpty) ...[
+            if (filteredApps.isEmpty)
               const Padding(
                 padding: EdgeInsets.all(12),
                 child: Text('No matching apps on this PC.'),
               ),
-            if (q.isNotEmpty)
-              for (final app in filteredApps)
-                ListTile(
-                  leading: AppIconTile(
-                    icon: app.icon,
-                    name: app.name,
-                    size: 36,
+            for (final app in filteredApps)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                minTileHeight: 56,
+                leading: AppIconTile(icon: app.icon, name: app.name, size: 36),
+                title: Text(app.name),
+                onTap: () {
+                  if (!_busy) {
+                    _recordUse(app.appId);
+                    _launchApp(app, sessions, windows, apps);
+                  }
+                },
+                trailing: IconButton(
+                  tooltip: preferences?.isFavourite(app) == true
+                      ? 'Remove from favourites'
+                      : 'Add to favourites',
+                  icon: Icon(
+                    preferences?.isFavourite(app) == true
+                        ? Icons.star
+                        : Icons.star_border,
                   ),
-                  title: Text(app.name),
-                  onTap: () {
-                    if (!_busy) {
-                      _recordUse(app.appId);
-                      _launchApp(app, sessions, windows, apps);
-                    }
-                  },
-                  trailing: IconButton(
-                    tooltip: preferences?.isFavourite(app) == true
-                        ? 'Remove from favourites'
-                        : 'Add to favourites',
-                    icon: Icon(
-                      preferences?.isFavourite(app) == true
-                          ? Icons.star
-                          : Icons.star_border,
-                    ),
-                    onPressed: preferences == null
-                        ? null
-                        : () => _toggleFavourite(app),
-                  ),
+                  onPressed: preferences == null
+                      ? null
+                      : () => _toggleFavourite(app),
                 ),
+              ),
+          ] else ...[
+            if (preferences == null)
+              const Padding(
+                padding: EdgeInsets.only(top: 12),
+                child: Text('Loading app menu…'),
+              ),
+            _listHeader('Favourites'),
+            if (favourites.isEmpty)
+              const Text(
+                'Search for an app and tap its star to pin it here.',
+                style: TextStyle(color: NX.textDim),
+              ),
+            _appGrid(favourites, windows, sessions),
+            for (final name in LauncherPreferences.defaultFavourites)
+              if (!apps.any((a) => LauncherPreferences.defaultName(a) == name))
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.star_outline),
+                  title: Text(name),
+                  subtitle: const Text('Not available on this PC'),
+                ),
+            _listHeader('Recently opened'),
+            if (recent.isEmpty)
+              const Text(
+                'Apps you open will appear here.',
+                style: TextStyle(color: NX.textDim),
+              ),
+            _appGrid(recent, windows, sessions),
             const Padding(
-              padding: EdgeInsets.only(top: 8),
+              padding: EdgeInsets.only(top: 16),
               child: Text(
-                'Long-press an app for Close and Restart, or use ⋮ on a running window.',
+                'Long-press an app for Close and Restart.',
                 style: TextStyle(color: NX.textFaint, fontSize: 12),
               ),
             ),
           ],
-          if (appsAsync.isLoading) const LinearProgressIndicator(),
-          if (appsAsync.hasError)
-            const Text('Could not load apps. Pull down to retry.'),
         ],
       ),
     );
   }
 
-  List<Widget> _runningWindows(
+  static Widget _listHeader(String text) => Padding(
+    padding: const EdgeInsets.only(top: 20, bottom: 10),
+    child: Text(
+      text,
+      style: const TextStyle(
+        color: NX.textDim,
+        fontSize: 13,
+        fontWeight: FontWeight.w600,
+      ),
+    ),
+  );
+
+  Widget _windowsTab(
     List<WindowInfo> windows,
     List<AppSessionInfo> sessions,
     List<AppInfo> apps,
     LauncherPreferences? preferences,
   ) {
-    final total = windows.length + sessions.length;
-    if (total == 0) return const [];
-    final shown = _allWindows ? windows : windows.take(_maxWindows).toList();
-    return [
-      KeyedSubtree(
-        key: _runningKey,
-        child: NxSectionHeader('Running windows', count: total),
-      ),
-      _pad(
-        NxCard(
-          padding: const EdgeInsets.symmetric(vertical: 4),
-          child: Column(
-            children: [
-              if (_busy) const LinearProgressIndicator(),
-              for (final s in sessions) _sessionTile(s, apps),
-              for (final w in shown)
-                _windowTile(w, windows, sessions, apps, preferences),
-              if (windows.length > _maxWindows)
-                TextButton(
-                  onPressed: () => setState(() => _allWindows = !_allWindows),
-                  style: TextButton.styleFrom(minimumSize: const Size(48, 48)),
-                  child: Text(
-                    _allWindows
-                        ? 'Show fewer'
-                        : 'Show all ${windows.length} windows',
-                  ),
+    final empty = windows.isEmpty && sessions.isEmpty;
+    return RefreshIndicator(
+      onRefresh: _refresh,
+      child: ListView(
+        key: const PageStorageKey('desktop-windows'),
+        controller: _windowsScroll,
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.only(top: 4, bottom: 24),
+        children: [
+          if (_busy) const LinearProgressIndicator(),
+          if (empty)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(NX.pad, 48, NX.pad, 0),
+              child: Center(
+                child: Text(
+                  'No running windows.',
+                  style: TextStyle(color: NX.textDim, fontSize: 15),
                 ),
-            ],
-          ),
-        ),
+              ),
+            ),
+          for (final s in sessions) _sessionTile(s, apps),
+          for (final w in windows)
+            _windowTile(w, windows, sessions, apps, preferences),
+        ],
       ),
-    ];
+    );
   }
 
   static Widget _menuRow(IconData icon, String label, {Color? color}) => Row(
@@ -804,35 +835,6 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
     );
   }
 
-  /// Connection row for hosts without the live monitor (no hero card).
-  Widget _header(BuildContext context) {
-    final host = ref.watch(connectionProvider).hostUrl ?? '';
-    final status = ref.watch(connectionStatusProvider);
-    final label = Uri.tryParse(host)?.host ?? 'PC';
-    final statusColor = switch (status) {
-      RpcStatus.connected => NX.working,
-      RpcStatus.connecting => NX.waiting,
-      RpcStatus.disconnected => NX.failed,
-    };
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 8, 4, 0),
-      child: Row(
-        children: [
-          LiveDot(color: statusColor, pulse: status == RpcStatus.connected),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              label.isEmpty ? 'PC' : label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _appGrid(
     List<AppInfo> apps,
     List<WindowInfo> windows,
@@ -904,8 +906,8 @@ class _LauncherScreenState extends ConsumerState<LauncherScreen> {
   }
 }
 
-/// Monitoring and per-PC configuration, moved off the Desktop page so that
-/// page is about opening the desktop and apps.
+/// Agent apps, processes and per-PC configuration. The live readings are on
+/// Overview; each reading opens its own detail sheet.
 class PcDetailsScreen extends ConsumerWidget {
   const PcDetailsScreen({super.key});
 
@@ -918,8 +920,6 @@ class PcDetailsScreen extends ConsumerWidget {
       child: ListView(
         padding: const EdgeInsets.only(top: 4, bottom: 32),
         children: const [
-          PcHeroSection(key: ValueKey('pc-hero')),
-          PcFlowSection(key: ValueKey('pc-flow')),
           AgentAppsSection(key: ValueKey('pc-agents')),
           TopProcessesSection(key: ValueKey('pc-top')),
           NxSectionHeader('Settings for this PC'),

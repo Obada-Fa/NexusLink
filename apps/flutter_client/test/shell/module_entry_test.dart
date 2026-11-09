@@ -58,7 +58,9 @@ void main() {
       tester.widget<WorkspaceShell>(find.byType(WorkspaceShell)).tabs,
       [WorkspaceTabs.pc],
     );
-    expect(find.byType(NavigationBar), findsNothing);
+    // No workspace tab bar; Desktop shows only its own Overview/Apps/Windows.
+    expect(find.widgetWithText(NavigationBar, 'Files'), findsNothing);
+    expect(find.byKey(const ValueKey('desktop-nav')), findsOneWidget);
 
     // Back returns to Terminal, where the jump started, on its own tab.
     await tester.binding.handlePopRoute();

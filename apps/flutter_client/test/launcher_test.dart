@@ -84,40 +84,38 @@ void main() {
     },
   );
 
-  testWidgets(
-    'PC menu expands, searches, and saves favourites without a nested dock',
-    (tester) async {
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            appsProvider.overrideWith(TestApps.new),
-            windowsProvider.overrideWith(TestWindows.new),
-            appSessionsProvider.overrideWith(TestSessions.new),
-          ],
-          child: const MaterialApp(home: LauncherScreen()),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('Recently opened'), findsOneWidget);
-      expect(find.text('PC status'), findsOneWidget);
-      expect(find.text('Agents'), findsNothing);
-      expect(find.text('Terminal'), findsNothing);
-      expect(find.byType(TextField), findsNothing);
-      await tester.tap(find.text('Apps'));
-      await tester.pumpAndSettle();
-      expect(find.text('Favourites'), findsOneWidget);
-      await tester.ensureVisible(find.byType(TextField));
-      await tester.enterText(find.byType(TextField), 'Editor');
-      await tester.pumpAndSettle();
-      await tester.ensureVisible(find.byTooltip('Add to favourites'));
-      await tester.tap(find.byTooltip('Add to favourites'));
-      await tester.pumpAndSettle();
-      expect(find.byTooltip('Remove from favourites'), findsOneWidget);
-      expect(find.text('Browser'), findsNothing);
-      expect(tester.takeException(), isNull);
-      await tester.pumpWidget(const SizedBox());
-    },
-  );
+  testWidgets('Apps tab searches and saves favourites without a nested dock', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          appsProvider.overrideWith(TestApps.new),
+          windowsProvider.overrideWith(TestWindows.new),
+          appSessionsProvider.overrideWith(TestSessions.new),
+        ],
+        child: const MaterialApp(home: LauncherScreen()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Agents'), findsNothing);
+    expect(find.text('Terminal'), findsNothing);
+    expect(find.byType(TextField), findsNothing);
+    await tester.tap(find.text('Apps'));
+    await tester.pumpAndSettle();
+    expect(find.text('Favourites'), findsOneWidget);
+    expect(find.text('Recently opened'), findsOneWidget);
+    await tester.ensureVisible(find.byType(TextField));
+    await tester.enterText(find.byType(TextField), 'Editor');
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byTooltip('Add to favourites'));
+    await tester.tap(find.byTooltip('Add to favourites'));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Remove from favourites'), findsOneWidget);
+    expect(find.text('Browser'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
 
   testWidgets(
     'running windows offer Close and Restart without a hidden long-press',
@@ -133,7 +131,9 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('View desktop'), findsOneWidget);
+      expect(find.text('Open desktop'), findsOneWidget);
+      await tester.tap(find.text('Windows'));
+      await tester.pumpAndSettle();
       final menu = find.byTooltip('Actions for Editor');
       await tester.ensureVisible(menu);
       await tester.tap(menu);

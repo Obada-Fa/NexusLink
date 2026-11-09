@@ -79,18 +79,20 @@ class FlowStrip extends StatelessWidget {
           formatRate(v.diskRead),
           NX.done,
         ),
-        _RateLine(Icons.file_upload_outlined, formatRate(v.diskWrite), NX.warm),
+        _RateLine(
+          Icons.file_upload_outlined,
+          formatRate(v.diskWrite),
+          NX.accent2,
+        ),
       ],
       chart: _spark(
         history['diskRead'],
         history['diskWrite'],
         NX.done,
-        NX.warm,
+        NX.accent2,
       ),
       caption: nvme == null ? null : 'NVMe ${fmtTemp(nvme)}',
-      captionColor: nvme == null
-          ? null
-          : NX.tempHeat(nvme, warmAt: 55, hotAt: 70),
+      captionColor: nvme == null ? null : (nvme >= 70 ? NX.waiting : null),
     );
   }
 
@@ -102,7 +104,7 @@ class FlowStrip extends StatelessWidget {
         ? NX.failed
         : v.diskLow
         ? NX.waiting
-        : NX.working;
+        : NX.accent;
     return _Tile(
       title: 'Storage',
       icon: v.diskLow
@@ -180,6 +182,7 @@ class FlowStrip extends StatelessWidget {
               color: ca,
               secondaryColor: cb,
               height: 26,
+              fill: false,
             ),
           ),
         );
@@ -333,13 +336,7 @@ class _Bar extends StatelessWidget {
           FractionallySizedBox(
             alignment: Alignment.centerLeft,
             widthFactor: (percent / 100).clamp(0.0, 1.0),
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [color.withValues(alpha: .6), color],
-                ),
-              ),
-            ),
+            child: ColoredBox(color: color),
           ),
         ],
       ),

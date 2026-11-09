@@ -16,7 +16,7 @@ class DesktopModule extends NexusModule implements DescribedModule {
   @override
   String get title => 'Desktop';
   @override
-  String get subtitle => 'Mirror · Apps · Vitals';
+  String get subtitle => 'Overview · Apps · Windows';
   @override
   Color get accent => NX.accent;
   @override

@@ -86,6 +86,7 @@ class _RemoteAccessSectionState extends ConsumerState<RemoteAccessSection>
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: NX.pad),
           child: NxCard(
+            flat: true,
             accent: worst == 'down' ? NX.failed : null,
             padding: EdgeInsets.zero,
             child: Column(

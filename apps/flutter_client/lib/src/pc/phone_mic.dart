@@ -273,6 +273,7 @@ class PhoneMicSection extends ConsumerWidget {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: NX.pad),
           child: NxCard(
+            flat: true,
             accent: mic.transmitting ? NX.working : null,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -281,7 +282,9 @@ class PhoneMicSection extends ConsumerWidget {
                   children: [
                     _MicButton(state: mic, color: color, ctl: ctl),
                     const SizedBox(width: 16),
-                    Expanded(child: _MicInfo(state: mic, color: color)),
+                    Expanded(
+                      child: _MicInfo(state: mic, color: color),
+                    ),
                   ],
                 ),
                 if (mic.live) ...[
@@ -370,14 +373,6 @@ class _MicButton extends StatelessWidget {
         shape: BoxShape.circle,
         color: color.withValues(alpha: state.transmitting ? .28 : .14),
         border: Border.all(color: color.withValues(alpha: .6), width: 2),
-        boxShadow: state.transmitting
-            ? [
-                BoxShadow(
-                  color: color.withValues(alpha: .35),
-                  blurRadius: 18 * (0.4 + state.level),
-                ),
-              ]
-            : null,
       ),
       child: starting
           ? Padding(
@@ -416,11 +411,7 @@ class _MicButton extends StatelessWidget {
     return Semantics(
       button: true,
       label: label,
-      child: SizedBox(
-        width: 84,
-        height: 84,
-        child: Center(child: button),
-      ),
+      child: SizedBox(width: 84, height: 84, child: Center(child: button)),
     );
   }
 }

@@ -12,7 +12,10 @@ class NxCard extends StatelessWidget {
     this.onLongPress,
     this.padding = const EdgeInsets.all(NX.pad),
     this.color,
+    this.flat = false,
   });
+  /// No glow even with [accent] (flat Desktop / PC detail views).
+  final bool flat;
   final Widget child;
   final Color? accent;
   final VoidCallback? onTap;
@@ -27,7 +30,7 @@ class NxCard extends StatelessWidget {
         color: color ?? NX.surface2,
         borderRadius: BorderRadius.circular(NX.radius),
         border: Border.all(color: border),
-        boxShadow: accent == null
+        boxShadow: accent == null || flat
             ? null
             : [BoxShadow(color: accent!.withValues(alpha: .12), blurRadius: 24, spreadRadius: -4)],
       ),
@@ -299,8 +302,11 @@ class _RingPainter extends CustomPainter {
 
 /// Smooth line chart with a gradient fill. [max] null → auto-scale.
 class Sparkline extends StatelessWidget {
-  const Sparkline({super.key, required this.values, required this.color, this.max, this.height = 44, this.secondary, this.secondaryColor});
+  const Sparkline({super.key, required this.values, required this.color, this.max, this.height = 44, this.secondary, this.secondaryColor, this.fill = true, this.strokeWidth = 2});
   final List<double> values;
+  /// false draws the line only (flat Desktop style).
+  final bool fill;
+  final double strokeWidth;
   final List<double>? secondary;
   final Color color;
   final Color? secondaryColor;
@@ -310,12 +316,14 @@ class Sparkline extends StatelessWidget {
   Widget build(BuildContext context) => SizedBox(
     height: height,
     width: double.infinity,
-    child: CustomPaint(painter: _SparkPainter(values, color, max, secondary, secondaryColor)),
+    child: CustomPaint(painter: _SparkPainter(values, color, max, secondary, secondaryColor, fill, strokeWidth)),
   );
 }
 
 class _SparkPainter extends CustomPainter {
-  _SparkPainter(this.values, this.color, this.max, this.secondary, this.secondaryColor);
+  _SparkPainter(this.values, this.color, this.max, this.secondary, this.secondaryColor, this.fillArea, this.strokeWidth);
+  final bool fillArea;
+  final double strokeWidth;
   final List<double> values;
   final List<double>? secondary;
   final Color color;
@@ -359,14 +367,14 @@ class _SparkPainter extends CustomPainter {
         path,
         Paint()
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 2
+          ..strokeWidth = strokeWidth
           ..strokeCap = StrokeCap.round
           ..color = c,
       );
     }
 
     if (secondary != null) draw(secondary!, secondaryColor ?? NX.accent2, false);
-    draw(values, color, true);
+    draw(values, color, fillArea);
   }
 
   @override
@@ -375,8 +383,10 @@ class _SparkPainter extends CustomPainter {
 
 /// One thin bar per CPU thread, heat-coloured.
 class CoreBars extends StatelessWidget {
-  const CoreBars({super.key, required this.values, this.height = 34});
+  const CoreBars({super.key, required this.values, this.height = 34, this.color});
   final List<double> values;
+  /// One flat colour for every bar instead of the heat scale.
+  final Color? color;
   final double height;
   @override
   Widget build(BuildContext context) => SizedBox(
@@ -403,7 +413,7 @@ class CoreBars extends StatelessWidget {
                     heightFactor: (v / 100).clamp(.04, 1),
                     child: Container(
                       decoration: BoxDecoration(
-                        color: NX.heat(v),
+                        color: color ?? NX.heat(v),
                         borderRadius: BorderRadius.circular(3),
                       ),
                     ),
@@ -419,7 +429,9 @@ class CoreBars extends StatelessWidget {
 
 /// Horizontal meter with label + value.
 class MeterBar extends StatelessWidget {
-  const MeterBar({super.key, required this.label, required this.percent, required this.value, this.color});
+  const MeterBar({super.key, required this.label, required this.percent, required this.value, this.color, this.flat = false});
+  /// Solid fill instead of the gradient.
+  final bool flat;
   final String label;
   final double percent;
   final String value;
@@ -447,7 +459,7 @@ class MeterBar extends StatelessWidget {
                 duration: const Duration(milliseconds: 600),
                 curve: Curves.easeOutCubic,
                 widthFactor: (percent / 100).clamp(0, 1),
-                child: Container(height: 6, decoration: BoxDecoration(gradient: LinearGradient(colors: [c.withValues(alpha: .6), c]))),
+                child: Container(height: 6, decoration: flat ? BoxDecoration(color: c) : BoxDecoration(gradient: LinearGradient(colors: [c.withValues(alpha: .6), c]))),
               ),
             ],
           ),

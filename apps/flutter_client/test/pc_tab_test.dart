@@ -14,7 +14,6 @@ import 'package:nexuslink/src/screens/launcher_screen.dart';
 import 'package:nexuslink/src/state/connection.dart';
 import 'package:nexuslink/src/state/launcher.dart';
 import 'package:nexuslink/src/theme/nexus_theme.dart';
-import 'package:nexuslink/src/theme/nx_widgets.dart';
 
 // --- fixture: readings sampled from the owner's PC, plus a frozen app ------
 
@@ -288,16 +287,28 @@ MonitorHistory historyFixture() => MonitorHistory({
 // --- fakes --------------------------------------------------------------------
 
 class FakeMonitor extends MonitorNotifier {
-  FakeMonitor({this.remoteReply = 'RustDesk restarted.'});
+  FakeMonitor({
+    this.remoteReply = 'RustDesk restarted.',
+    this.json,
+    this.empty = false,
+  });
   final String remoteReply;
+
+  /// Snapshot override (e.g. a PC without GPU telemetry).
+  final Map<String, dynamic>? json;
+
+  /// No snapshot at all, like an older host without monitor.v1.
+  final bool empty;
   final calls = <String>[];
   Completer<String>? pendingApp;
 
   @override
-  MonitorState build() => MonitorState(
-    snapshot: MonitorSnapshot(snapshotJson()),
-    history: historyFixture(),
-  );
+  MonitorState build() => empty
+      ? const MonitorState()
+      : MonitorState(
+          snapshot: MonitorSnapshot(json ?? snapshotJson()),
+          history: historyFixture(),
+        );
 
   @override
   Future<void> refresh() async {}
@@ -323,12 +334,12 @@ class FakeMonitor extends MonitorNotifier {
 }
 
 class FakeConnection extends ConnectionNotifier {
+  FakeConnection({this.status = RpcStatus.connected});
+  final RpcStatus status;
   bool disconnected = false;
   @override
-  ConnectionState build() => const ConnectionState(
-    status: RpcStatus.connected,
-    hostUrl: 'ws://192.168.2.30:45678',
-  );
+  ConnectionState build() =>
+      ConnectionState(status: status, hostUrl: 'ws://192.168.2.30:45678');
   @override
   void disconnect() {
     disconnected = true;
@@ -409,27 +420,29 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  testWidgets('hero gauges render live values and open the detail sheet', (
-    tester,
-  ) async {
-    await pumpPcTab(tester, FakeMonitor(), details: true);
+  testWidgets('Overview shows aligned readings under the PC name and opens '
+      'each detail view', (tester) async {
+    await pumpPcTab(tester, FakeMonitor());
 
     expect(find.text('obada-PC'), findsOneWidget);
-    Finder gauge(String value) =>
-        find.descendant(of: find.byType(RingGauge), matching: find.text(value));
-    expect(gauge('42%'), findsOneWidget); // CPU
-    expect(gauge('67%'), findsOneWidget); // GPU
-    expect(gauge('50%'), findsOneWidget); // RAM
-    expect(gauge('61°C'), findsOneWidget); // CPU temperature caption
-    expect(gauge('71°C'), findsOneWidget); // GPU hotspot caption
-    expect(
-      find.bySemanticsLabel(RegExp(r'^CPU 42 percent, 61 degrees')),
-      findsOneWidget,
-    );
-    // The frozen app wins the verdict line.
-    expect(find.textContaining('Claude may be frozen'), findsOneWidget);
+    expect(find.text('Connected · up 5h 56m'), findsOneWidget);
+    for (final text in [
+      '42%', '61 °C', '4.7 GHz', // CPU
+      '67%', '52 °C', '188 W', // GPU
+      '50%', '15.3 / 30.5 GiB', // Memory
+      '↓ 10.8 KiB/s', '↑ 45.4 KiB/s', // Network
+      'R  1.0 MiB/s', 'W  332 KiB/s', // Disk
+    ]) {
+      expect(find.text(text), findsOneWidget, reason: text);
+    }
+    // Opening the desktop needs no scrolling at the default text size.
+    final open = tester.getRect(find.text('Open desktop'));
+    final nav = tester.getRect(find.byKey(const ValueKey('desktop-nav')));
+    expect(open.bottom, lessThan(nav.top));
+    expect(find.text('View only'), findsOneWidget);
+    expect(find.text('PC details'), findsOneWidget);
 
-    await tester.tap(find.bySemanticsLabel(RegExp(r'^CPU 42 percent')));
+    await tester.tap(find.bySemanticsLabel(RegExp(r'^CPU 42 percent, 61')));
     await settle(tester);
     expect(find.text('THREADS'), findsOneWidget);
     expect(find.text('LOAD AVERAGE'), findsOneWidget);
@@ -442,17 +455,63 @@ void main() {
     await tester.tap(find.text('Memory').last);
     await settle(tester);
     expect(find.text('BREAKDOWN'), findsOneWidget);
-    expect(tester.takeException(), isNull);
-  });
+    Navigator.of(tester.element(find.byType(DraggableScrollableSheet))).pop();
+    await settle(tester);
 
-  testWidgets('flow strip warns about the nearly full disk', (tester) async {
-    await pumpPcTab(tester, FakeMonitor(), details: true);
-    await scrollTo(tester, find.text('PRO X Wireless'));
+    // Network and Disk open the flow readings, which flag the full drive.
+    expect(
+      find.text('Drive under 10 % free. Tap Disk for details.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.bySemanticsLabel(RegExp(r'^Disk, read')));
+    await settle(tester);
+    expect(find.text('Network and disk'), findsOneWidget);
     expect(find.text('18.2 GB free'), findsOneWidget);
     expect(find.text('LOW'), findsOneWidget);
     expect(find.text('Under 10 % free — clean up soon'), findsOneWidget);
     expect(find.text('NVMe 40°C'), findsOneWidget);
-    expect(find.text('36%'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a PC without GPU telemetry shows dashes and says so', (
+    tester,
+  ) async {
+    final json = snapshotJson();
+    (json['vitals'] as Map)['gpus'] = <Object>[];
+    ((json['vitals'] as Map)['cpu'] as Map).remove('tempC');
+    await pumpPcTab(tester, FakeMonitor(json: json));
+    expect(find.text('not reported'), findsOneWidget);
+    expect(find.text('—'), findsNWidgets(2)); // GPU load, CPU temperature
+    await tester.tap(find.bySemanticsLabel(RegExp(r'^GPU, not reported')));
+    await settle(tester);
+    expect(find.text('This PC doesn’t report GPU readings.'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a dropped connection keeps the readings and says when they '
+      'were last updated', (tester) async {
+    await pumpPcTab(
+      tester,
+      FakeMonitor(),
+      connection: FakeConnection(status: RpcStatus.disconnected),
+    );
+    expect(find.text('Disconnected · updated just now'), findsOneWidget);
+    expect(find.text('42%'), findsOneWidget);
+    expect(find.text('Open desktop'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an older host gets the same tabs with the readings it has', (
+    tester,
+  ) async {
+    await pumpPcTab(tester, FakeMonitor(empty: true));
+    expect(find.text('Overview'), findsOneWidget);
+    expect(find.text('Apps'), findsOneWidget);
+    expect(find.text('Windows'), findsOneWidget);
+    expect(find.text('CPU'), findsOneWidget);
+    expect(find.textContaining('Update NexusLink on the PC'), findsOneWidget);
+    expect(find.text('Open desktop'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('a stuck app shows Frozen? and Restart confirms, shows '
@@ -601,120 +660,148 @@ void main() {
     expect(copied, 'sudo bash packaging/rustdesk/install.sh');
   });
 
-  testWidgets('quick actions stay on top and reach the app list', (
+  testWidgets('bottom tabs switch views and keep search and scroll', (
     tester,
   ) async {
     await pumpPcTab(tester, FakeMonitor());
-    expect(find.text('Desktop'), findsOneWidget);
-    await tester.drag(mainList, const Offset(0, -400));
-    await settle(tester, 2);
-    expect(find.text('Desktop'), findsOneWidget);
-    expect(find.text('Favourites'), findsNothing);
-    await tester.tap(find.text('Apps').first);
-    await settle(tester, 6);
-    expect(find.text('Favourites'), findsOneWidget);
-    expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('no overflow at 320×640 with 1.3× text', (tester) async {
-    await pumpPcTab(
-      tester,
-      FakeMonitor(),
-      size: const Size(320, 640),
-      textScale: 1.3,
-    );
-    expect(tester.takeException(), isNull);
-    // Walk the whole tab so every section lays out at this size.
-    var sawDesktop = false;
-    for (var i = 0; i < 30; i++) {
-      await tester.drag(mainList, const Offset(0, -300));
-      await settle(tester, 2);
-      expect(tester.takeException(), isNull);
-      sawDesktop |= find.text('Your desktop').evaluate().isNotEmpty;
-    }
-    expect(sawDesktop, isTrue);
-    // PC details at the same size.
-    await pumpPcTab(
-      tester,
-      FakeMonitor(),
-      size: const Size(320, 640),
-      textScale: 1.3,
-      details: true,
-    );
-    for (var i = 0; i < 30; i++) {
-      await tester.drag(mainList, const Offset(0, -300));
-      await settle(tester, 2);
-      expect(tester.takeException(), isNull);
-    }
-    // And each detail page, opened from its gauge and scrolled to the end.
-    await tester.fling(mainList, const Offset(0, 6000), 3000);
-    await settle(tester, 8);
-    for (final gauge in ['CPU 42 percent', 'GPU 67 percent', 'Memory 50']) {
-      await tester.tap(find.bySemanticsLabel(RegExp('^$gauge')));
-      await settle(tester);
-      final sheet = find.byType(DraggableScrollableSheet);
-      expect(sheet, findsOneWidget);
-      await tester.fling(
-        find.descendant(of: sheet, matching: find.byType(Scrollable)).first,
-        const Offset(0, -2000),
-        2000,
+    expect(find.byType(TextField), findsNothing);
+    await tester.tap(find.text('Apps'));
+    await settle(tester, 4);
+    await tester.enterText(find.byType(TextField), 'Edi');
+    await settle(tester, 4);
+    expect(find.text('No matching apps on this PC.'), findsOneWidget);
+    await tester.tap(find.text('Windows'));
+    await settle(tester, 4);
+    expect(find.text('No running windows.'), findsOneWidget);
+    await tester.tap(find.text('Apps'));
+    await settle(tester, 4);
+    expect(find.text('Edi'), findsOneWidget);
+    await tester.tap(find.text('Overview'));
+    await settle(tester, 4);
+    expect(find.text('obada-PC'), findsOneWidget);
+    // Every destination is at least 48 dp tall.
+    for (final label in ['Overview', 'Apps', 'Windows']) {
+      final dest = find.ancestor(
+        of: find.text(label),
+        matching: find.byType(NavigationDestination),
       );
-      await settle(tester, 6);
-      expect(tester.takeException(), isNull);
-      Navigator.of(tester.element(sheet)).pop();
-      await settle(tester, 6);
+      expect(tester.getSize(dest).height, greaterThanOrEqualTo(48));
     }
+    expect(tester.takeException(), isNull);
   });
 
-  testWidgets('power button confirms, disconnects and returns to the '
-      'connect screen', (tester) async {
-    final connection = FakeConnection();
-    await pumpPcTab(
-      tester,
-      FakeMonitor(),
-      connection: connection,
-      // Like the app: connect screen → workspace route → nested tab navigator.
-      wrap: (tab) => Builder(
-        builder: (context) => Scaffold(
-          body: Center(
-            child: TextButton(
-              onPressed: () => Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (_) => Navigator(
-                    onGenerateRoute: (_) =>
-                        MaterialPageRoute(builder: (_) => tab),
+  for (final (size, scale) in const [
+    (Size(320, 640), 1.3),
+    (Size(360, 780), 2.0),
+  ]) {
+    testWidgets('no overflow at ${size.width.round()}×${size.height.round()} '
+        'with $scale× text', (tester) async {
+      await pumpPcTab(tester, FakeMonitor(), size: size, textScale: scale);
+      expect(tester.takeException(), isNull);
+      // Secondary readings wrap under their metric at this size.
+      expect(find.text('4.7 GHz'), findsOneWidget);
+      for (var i = 0; i < 6; i++) {
+        await tester.drag(mainList, const Offset(0, -300));
+        await settle(tester, 2);
+        expect(tester.takeException(), isNull);
+      }
+      expect(find.text('PC details'), findsOneWidget);
+      // Each detail page, opened from its reading and scrolled to the end.
+      await tester.fling(mainList, const Offset(0, 6000), 3000);
+      await settle(tester, 8);
+      for (final row in ['CPU 42 percent', 'GPU 67 percent', 'Memory 50']) {
+        await tester.tap(find.bySemanticsLabel(RegExp('^$row')));
+        await settle(tester);
+        final sheet = find.byType(DraggableScrollableSheet);
+        expect(sheet, findsOneWidget);
+        await tester.fling(
+          find.descendant(of: sheet, matching: find.byType(Scrollable)).first,
+          const Offset(0, -2000),
+          2000,
+        );
+        await settle(tester, 6);
+        expect(tester.takeException(), isNull);
+        Navigator.of(tester.element(sheet)).pop();
+        await settle(tester, 6);
+      }
+      for (final tab in ['Apps', 'Windows']) {
+        await tester.tap(find.text(tab));
+        await settle(tester, 4);
+        expect(tester.takeException(), isNull);
+      }
+      // PC details at the same size.
+      await pumpPcTab(
+        tester,
+        FakeMonitor(),
+        size: size,
+        textScale: scale,
+        details: true,
+      );
+      for (var i = 0; i < 30; i++) {
+        await tester.drag(mainList, const Offset(0, -300));
+        await settle(tester, 2);
+        expect(tester.takeException(), isNull);
+      }
+    });
+  }
+
+  testWidgets(
+    'Disconnect in the header menu confirms, disconnects and returns to the '
+    'connect screen',
+    (tester) async {
+      final connection = FakeConnection();
+      await pumpPcTab(
+        tester,
+        FakeMonitor(),
+        connection: connection,
+        // Like the app: connect screen → workspace route → nested tab navigator.
+        wrap: (tab) => Builder(
+          builder: (context) => Scaffold(
+            body: Center(
+              child: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => Navigator(
+                      onGenerateRoute: (_) =>
+                          MaterialPageRoute(builder: (_) => tab),
+                    ),
                   ),
                 ),
+                child: const Text('Connect screen'),
               ),
-              child: const Text('Connect screen'),
             ),
           ),
         ),
-      ),
-    );
-    await tester.tap(find.text('Connect screen'));
-    await settle(tester);
-    expect(find.byType(LauncherScreen), findsOneWidget);
+      );
+      await tester.tap(find.text('Connect screen'));
+      await settle(tester);
+      expect(find.byType(LauncherScreen), findsOneWidget);
 
-    await tester.tap(find.byTooltip('Disconnect from PC'));
-    await settle(tester, 4);
-    expect(find.text('Disconnect from this PC?'), findsOneWidget);
-    await tester.tap(find.text('Cancel'));
-    await settle(tester, 4);
-    expect(connection.disconnected, isFalse);
-    expect(find.byType(LauncherScreen), findsOneWidget);
+      Future<void> menuDisconnect() async {
+        await tester.tap(find.byTooltip('More options'));
+        await settle(tester, 4);
+        await tester.tap(find.text('Disconnect from PC'));
+        await settle(tester, 4);
+      }
 
-    await tester.tap(find.byTooltip('Disconnect from PC'));
-    await settle(tester, 4);
-    await tester.tap(
-      find.descendant(
-        of: find.byType(AlertDialog),
-        matching: find.text('Disconnect'),
-      ),
-    );
-    await settle(tester);
-    expect(connection.disconnected, isTrue);
-    expect(find.byType(LauncherScreen), findsNothing);
-    expect(find.text('Connect screen'), findsOneWidget);
-  });
+      await menuDisconnect();
+      expect(find.text('Disconnect from this PC?'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await settle(tester, 4);
+      expect(connection.disconnected, isFalse);
+      expect(find.byType(LauncherScreen), findsOneWidget);
+
+      await menuDisconnect();
+      await tester.tap(
+        find.descendant(
+          of: find.byType(AlertDialog),
+          matching: find.text('Disconnect'),
+        ),
+      );
+      await settle(tester);
+      expect(connection.disconnected, isTrue);
+      expect(find.byType(LauncherScreen), findsNothing);
+      expect(find.text('Connect screen'), findsOneWidget);
+    },
+  );
 }
