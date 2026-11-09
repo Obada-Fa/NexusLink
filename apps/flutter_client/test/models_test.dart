@@ -42,5 +42,16 @@ void main() {
       expect(end.refId, start.refId);
       expect(end.toolOutput, 'ok');
     });
+
+    test('parses text-delta events used for live Cursor CLI streaming', () {
+      final e = AgentEvent.fromJson({
+        'seq': 4,
+        'ts': 3,
+        'kind': 'text-delta',
+        'text': 'Linux',
+      });
+      expect(e.kind, 'text-delta');
+      expect(e.text, 'Linux');
+    });
   });
 }
