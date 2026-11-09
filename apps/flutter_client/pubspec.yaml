@@ -58,6 +58,10 @@ dependencies:
   flutter_highlight: ^0.7.0
   re_highlight: 0.0.3
   re_editor: 0.10.0
+  nexus_remote:
+    path: packages/nexus_remote
+  nexus_audio:
+    path: packages/nexus_audio
 dev_dependencies:
   sqflite_common_ffi: ^2.4.3
   flutter_test:

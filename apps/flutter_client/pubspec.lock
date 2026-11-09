@@ -616,6 +616,20 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.19.2"
+  nexus_audio:
+    dependency: "direct main"
+    description:
+      path: "packages/nexus_audio"
+      relative: true
+    source: path
+    version: "0.1.0"
+  nexus_remote:
+    dependency: "direct main"
+    description:
+      path: "packages/nexus_remote"
+      relative: true
+    source: path
+    version: "1.4.0+7"
   node_preamble:
     dependency: transitive
     description:

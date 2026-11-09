@@ -16,7 +16,9 @@ import '../workspace/platform_bridge.dart';
 import 'auto_connect.dart';
 import 'capabilities.dart';
 import 'module.dart';
+import 'module_extras.dart';
 import 'module_registry.dart';
+import 'module_signals.dart';
 import 'reachability.dart';
 
 /// Auto-connect runs at most once per app run (cold start).
@@ -34,6 +36,7 @@ class ShellState {
     this.probing = false,
     this.probedOnce = false,
     this.pairAgainTargetId,
+    this.pairAgainUtilities = const {},
     this.error,
   });
 
@@ -48,8 +51,11 @@ class ShellState {
   /// At least one probe of the current target finished.
   final bool probedOnce;
 
-  /// The NexusLink pairing of this target was refused: offer "Pair again".
+  /// A pairing of this target was refused: offer "Pair again".
   final String? pairAgainTargetId;
+
+  /// Which utilities of [pairAgainTargetId] were refused (UtilityIds.*).
+  final Set<String> pairAgainUtilities;
   final String? error;
 
   SavedTarget? get current =>
@@ -64,6 +70,7 @@ class ShellState {
     bool? probing,
     bool? probedOnce,
     String? pairAgainTargetId,
+    Set<String>? pairAgainUtilities,
     bool clearPairAgain = false,
     String? error,
     bool clearError = false,
@@ -77,6 +84,9 @@ class ShellState {
     pairAgainTargetId: clearPairAgain
         ? null
         : pairAgainTargetId ?? this.pairAgainTargetId,
+    pairAgainUtilities: clearPairAgain
+        ? const {}
+        : pairAgainUtilities ?? this.pairAgainUtilities,
     error: clearError ? null : error ?? this.error,
   );
 }
@@ -144,12 +154,35 @@ class ShellController extends Notifier<ShellState> {
         // Only a saved target's own URL: a failed enrollment attempt against
         // a new PC must not flag the current one.
         final target = _targetForUrl(host);
-        if (target != null) {
-          state = state.copyWith(pairAgainTargetId: target.id);
-        }
+        if (target != null) _flagPairAgain(target.id, UtilityIds.nexuslink);
       }
     });
+    final signals = ModuleSignals.pairAgain.listen(
+      (r) => _flagPairAgain(r.targetId, r.utility),
+    );
+    ref.onDispose(signals.cancel);
     return const ShellState();
+  }
+
+  /// Marks [utility] of [targetId] as refused. A different target replaces
+  /// the old flag (the banner is only ever shown for the current target).
+  void _flagPairAgain(String targetId, String utility) {
+    if (!ref.mounted) return;
+    if (!state.targets.any((t) => t.id == targetId)) return;
+    final same = state.pairAgainTargetId == targetId;
+    state = state.copyWith(
+      pairAgainTargetId: targetId,
+      pairAgainUtilities: {if (same) ...state.pairAgainUtilities, utility},
+    );
+  }
+
+  /// [utility] of [targetId] works again; clears the flag once none is left.
+  void _clearPairAgain(String targetId, String utility) {
+    if (state.pairAgainTargetId != targetId) return;
+    final left = {...state.pairAgainUtilities}..remove(utility);
+    state = left.isEmpty
+        ? state.copyWith(clearPairAgain: true)
+        : state.copyWith(pairAgainUtilities: left);
   }
 
   ReachabilityProber get _prober => ref.read(reachabilityProberProvider);
@@ -260,9 +293,8 @@ class ShellController extends Notifier<ShellState> {
     final url = nexusLinkUrlOf(state.current);
     if (url == null) return;
     await _connection.connect(url, pairingCode: pairingCode);
-    if (state.pairAgainTargetId == state.currentId) {
-      state = state.copyWith(clearPairAgain: true);
-    }
+    final id = state.currentId;
+    if (id != null) _clearPairAgain(id, UtilityIds.nexuslink);
   }
 
   void dismissPairAgain() => state = state.copyWith(clearPairAgain: true);
@@ -278,7 +310,7 @@ class ShellController extends Notifier<ShellState> {
     } catch (_) {
       ok = const {};
     }
-    if (state.currentId != target.id) return;
+    if (!ref.mounted || state.currentId != target.id) return;
     state = state.copyWith(reachable: ok, probing: false, probedOnce: true);
   }
 
@@ -325,9 +357,7 @@ class ShellController extends Notifier<ShellState> {
       );
       await reload();
     }
-    if (state.pairAgainTargetId == target.id) {
-      state = state.copyWith(clearPairAgain: true);
-    }
+    _clearPairAgain(target.id, UtilityIds.nexuslink);
     await select(target.id, connect: false);
     return target;
   }
@@ -335,12 +365,19 @@ class ShellController extends Notifier<ShellState> {
   /// After [PairingFlow] stored a target (and made it current in the store).
   Future<void> adoptPaired(SavedTarget target) async {
     await load();
+    final before = state.current;
     final targets = await TargetStore.load();
     state = state.copyWith(
       targets: targets,
       clearPairAgain: state.pairAgainTargetId == target.id,
     );
-    // select() tells modules about the switch and connects NexusLink if the
+    if (before != null && before.id == target.id) {
+      // Re-paired (or added utilities to) the current target: modules must
+      // drop old sessions and pick up new secrets and newly paired utilities.
+      _prober.forget(target.id);
+      await _notifyModules(_contextFor(before), _contextFor(state.current));
+    }
+    // select() tells modules about a switch and connects NexusLink if the
     // enroller didn't leave it connected.
     await select(target.id);
   }
@@ -362,6 +399,16 @@ class ShellController extends Notifier<ShellState> {
       _connection.disconnect();
     }
     if (wasCurrent) await _notifyModules(_contextFor(gone), null);
+    if (gone != null) {
+      for (final m in _modules) {
+        if (m is! TargetRemovalAware) continue;
+        try {
+          await (m as TargetRemovalAware).onTargetRemoved(gone);
+        } catch (error) {
+          debugPrint('Module ${m.id} target removal failed: $error');
+        }
+      }
+    }
     _prober.forget(targetId);
     final targets = [
       for (final t in state.targets)

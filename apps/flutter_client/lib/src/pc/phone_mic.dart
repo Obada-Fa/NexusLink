@@ -15,6 +15,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:record/record.dart';
 
 import '../rpc/rpc_client.dart';
+import '../session/target.dart';
+import '../shell/shell_controller.dart';
 import '../state/connection.dart';
 import '../theme/nexus_theme.dart';
 import '../theme/nx_widgets.dart';
@@ -245,6 +247,9 @@ class PhoneMicSection extends ConsumerWidget {
       return const SizedBox.shrink();
     }
     final ctl = ref.read(phoneMicProvider.notifier);
+    final hasAudio = ref.watch(
+      shellProvider.select((s) => s.current?.has(UtilityIds.audio) == true),
+    );
     final color = mic.transmitting
         ? NX.working
         : mic.live
@@ -315,6 +320,16 @@ class PhoneMicSection extends ConsumerWidget {
                     onPressed: ctl.stop,
                     icon: const Icon(Icons.stop_rounded),
                     label: const Text('Turn off phone mic'),
+                  ),
+                ],
+                if (hasAudio) ...[
+                  const SizedBox(height: 10),
+                  const PcNote(
+                    'This PC has Audio too: try “Use as PC mic” on the '
+                    'Audio tile on the home screen.',
+                    key: ValueKey('mic-audio-hint'),
+                    color: NX.accent,
+                    icon: Icons.graphic_eq_rounded,
                   ),
                 ],
               ],

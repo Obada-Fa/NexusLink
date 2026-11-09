@@ -21,6 +21,7 @@ import 'capabilities.dart';
 import 'device_picker.dart';
 import 'live_bar.dart';
 import 'module.dart';
+import 'module_extras.dart';
 import 'module_registry.dart';
 import 'shell_controller.dart';
 import 'shell_navigator.dart';
@@ -160,7 +161,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   }
 
   void _onTile(HomeTile tile, ModuleContext ctx) {
-    if (tile.status == TileStatus.offline) {
+    final blocked = moduleBlockedReason(tile.module, ctx);
+    if (blocked != null) {
+      _explainBlocked(tile.module, blocked);
+    } else if (tile.status == TileStatus.offline) {
       _explainOffline(tile.module, ctx);
     } else {
       _openModule(tile.module.id);
@@ -241,6 +245,53 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     } else if (action == 'wake') {
       await _wake(ctx.target);
     }
+  }
+
+  /// A module that can't run for a reason other than reachability (e.g. its
+  /// pairing secret is gone): say why and offer a fresh scan.
+  Future<void> _explainBlocked(NexusModule module, String reason) async {
+    final scan = await showModalBottomSheet<bool>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Icon(module.icon, color: NX.textDim),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '${module.title} can’t start',
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                reason,
+                style: const TextStyle(color: NX.textDim, height: 1.35),
+              ),
+              const SizedBox(height: 20),
+              FilledButton.icon(
+                onPressed: () => Navigator.pop(context, true),
+                icon: const Icon(Icons.qr_code_scanner_rounded),
+                label: const Text('Scan QR to pair again'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (scan == true && mounted) await startPairing(context, ref);
   }
 
   Future<void> _wake(SavedTarget target) async {
@@ -421,19 +472,32 @@ class _HomeView extends ConsumerWidget {
               if (shell.pairAgainTargetId == target.id)
                 SliverToBoxAdapter(
                   child: _Banner(
+                    key: const ValueKey('pair-again-banner'),
                     color: NX.waiting,
                     icon: Icons.link_off,
-                    text:
-                        'This phone is no longer paired with ${target.name}.',
+                    text: pairAgainText(target, shell.pairAgainUtilities),
                     actions: [
+                      if (!shell.pairAgainUtilities.contains(
+                        UtilityIds.nexuslink,
+                      ))
+                        TextButton(
+                          onPressed: () => ref
+                              .read(shellProvider.notifier)
+                              .dismissPairAgain(),
+                          child: const Text('Later'),
+                        ),
                       TextButton(
                         onPressed: onScanAgain,
                         child: const Text('Scan QR'),
                       ),
-                      TextButton(
-                        onPressed: onPairAgain,
-                        child: const Text('Type code'),
-                      ),
+                      if (shell.pairAgainUtilities.contains(
+                            UtilityIds.nexuslink,
+                          ) ||
+                          shell.pairAgainUtilities.isEmpty)
+                        TextButton(
+                          onPressed: onPairAgain,
+                          child: const Text('Type code'),
+                        ),
                     ],
                   ),
                 ),
@@ -765,8 +829,23 @@ class _HeroMenu extends StatelessWidget {
   );
 }
 
+/// The pair-again banner's text: the whole PC when NexusLink was refused,
+/// else the utilities that were.
+String pairAgainText(SavedTarget target, Set<String> utilities) {
+  if (utilities.isEmpty || utilities.contains(UtilityIds.nexuslink)) {
+    return 'This phone is no longer paired with ${target.name}.';
+  }
+  final names = [
+    for (final u in UtilityIds.all)
+      if (utilities.contains(u)) utilityName(u),
+  ].join(' and ');
+  return '${target.name} no longer accepts this phone for $names. '
+      'Scan the QR code from Nexus Utilities to pair again.';
+}
+
 class _Banner extends StatelessWidget {
   const _Banner({
+    super.key,
     required this.color,
     required this.icon,
     required this.text,

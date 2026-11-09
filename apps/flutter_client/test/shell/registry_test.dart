@@ -51,8 +51,36 @@ void main() {
     );
   });
 
-  test('registry lists desktop, agents, terminal in grid order', () {
-    expect(moduleRegistry.map((m) => m.id), ['desktop', 'agents', 'terminal']);
+  test('registry lists all five modules in grid order', () {
+    expect(moduleRegistry.map((m) => m.id), [
+      'desktop',
+      'agents',
+      'terminal',
+      'remote',
+      'audio',
+    ]);
+    // A fully paired target shows all five on Android.
+    expect(
+      modulesFor(
+        moduleRegistry,
+        capabilities: capabilitiesOf(hubTarget()),
+        platform: TargetPlatform.android,
+      ).map((m) => m.id),
+      ['desktop', 'agents', 'terminal', 'remote', 'audio'],
+    );
+    // Audio is Android-only.
+    expect(
+      modulesFor(
+        moduleRegistry,
+        capabilities: capabilitiesOf(hubTarget()),
+        platform: TargetPlatform.iOS,
+      ).map((m) => m.id),
+      isNot(contains('audio')),
+    );
+    expect(
+      moduleRegistry.firstWhere((m) => m.id == 'audio').platforms,
+      {TargetPlatform.android},
+    );
     final shown = modulesFor(
       moduleRegistry,
       capabilities: capabilitiesOf(hubTarget(utilities: {UtilityIds.nexuslink})),
@@ -69,7 +97,7 @@ void main() {
       ),
       platform: TargetPlatform.android,
     );
-    expect(shown, isEmpty);
+    expect(shown.map((m) => m.id), ['remote', 'audio']);
   });
 
   test('filters by capability and platform, sorts by order', () {
@@ -84,7 +112,7 @@ void main() {
       requiredCaps: ['screen'],
       platformSet: {TargetPlatform.iOS},
     );
-    final modules = [...moduleRegistry, audio, iosOnly, remote];
+    final modules = [...nexusLinkModules, audio, iosOnly, remote];
     final caps = capabilitiesOf(hubTarget());
     expect(
       modulesFor(

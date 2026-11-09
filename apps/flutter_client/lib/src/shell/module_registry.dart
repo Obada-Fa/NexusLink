@@ -4,7 +4,9 @@
 import 'package:flutter/foundation.dart';
 
 import '../modules/agents/agents_module.dart';
+import '../modules/audio/audio_module.dart';
 import '../modules/desktop/desktop_module.dart';
+import '../modules/remote/remote_module.dart';
 import '../modules/terminal/terminal_module.dart';
 import 'capabilities.dart';
 import 'module.dart';
@@ -13,8 +15,8 @@ const List<NexusModule> moduleRegistry = [
   DesktopModule(),
   AgentsModule(),
   TerminalModule(),
-  // Wave 2 (worker E): add RemoteModule() and AudioModule() here, from
-  // lib/src/modules/remote/ and lib/src/modules/audio/.
+  RemoteModule(),
+  AudioModule(),
 ];
 
 /// Modules available on [platform] for a target with [capabilities], in home

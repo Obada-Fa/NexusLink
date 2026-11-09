@@ -75,18 +75,40 @@ class ModuleTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final module = tile.module;
+    if (module is BlockableModule) {
+      return ListenableBuilder(
+        listenable: (module as BlockableModule).blockedChanges,
+        builder: (context, _) => _build(context, moduleBlockedReason(module, ctx)),
+      );
+    }
+    return _build(context, null);
+  }
+
+  Widget _build(BuildContext context, String? blocked) {
+    final module = tile.module;
     final accent = moduleAccent(module);
-    final offline = tile.status == TileStatus.offline;
+    final status = blocked != null ? TileStatus.offline : tile.status;
+    final offline = status == TileStatus.offline;
     final subtitle = moduleSubtitle(module);
-    final extra = module.buildTileExtra(context, ctx);
-    final statusLabel = switch (tile.status) {
+    final extra = blocked != null
+        ? Text(
+            blocked,
+            key: ValueKey('tile-blocked-${module.id}'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: NX.waiting, fontSize: 12),
+          )
+        : module.buildTileExtra(context, ctx);
+    final statusLabel = switch (status) {
       TileStatus.ready => 'Ready',
       TileStatus.checking => checkingLabel,
       TileStatus.offline => 'Offline',
     };
     return Semantics(
       button: true,
-      label: '${module.title}, $statusLabel',
+      label: blocked == null
+          ? '${module.title}, $statusLabel'
+          : '${module.title}, $statusLabel: $blocked',
       excludeSemantics: true,
       child: AnimatedOpacity(
         duration: const Duration(milliseconds: 220),
@@ -105,7 +127,7 @@ class ModuleTile extends StatelessWidget {
                 children: [
                   _IconBadge(icon: module.icon, color: accent, muted: offline),
                   const Spacer(),
-                  switch (tile.status) {
+                  switch (status) {
                     TileStatus.ready => Icon(
                       Icons.arrow_outward_rounded,
                       size: 18,

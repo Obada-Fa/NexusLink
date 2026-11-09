@@ -17,7 +17,7 @@ ModuleContext ctxFor(SavedTarget t, Set<String> reachable) => ModuleContext(
 
 void main() {
   final remote = FakeModule(id: 'remote', title: 'Remote');
-  final modules = [...moduleRegistry, remote];
+  final modules = [...nexusLinkModules, remote];
 
   test('paired and reachable → normal tile', () {
     final tiles = homeTiles(

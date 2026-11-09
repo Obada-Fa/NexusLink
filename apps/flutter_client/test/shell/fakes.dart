@@ -3,10 +3,46 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:nexus_remote/nexus_remote.dart';
+import 'package:nexuslink/src/modules/agents/agents_module.dart';
+import 'package:nexuslink/src/modules/desktop/desktop_module.dart';
+import 'package:nexuslink/src/modules/terminal/terminal_module.dart';
 import 'package:nexuslink/src/session/target.dart';
 import 'package:nexuslink/src/shell/module.dart';
 import 'package:nexuslink/src/shell/module_extras.dart';
 import 'package:nexuslink/src/theme/nexus_theme.dart';
+
+/// The NexusLink modules only (the registry without Remote and Audio).
+const nexusLinkModules = <NexusModule>[
+  DesktopModule(),
+  AgentsModule(),
+  TerminalModule(),
+];
+
+const testFingerprint =
+    'AB12CD34EF56AB12CD34EF56AB12CD34EF56AB12CD34EF56AB12CD34EF56AB12';
+
+/// A Remote session that never touches sqlite or the network.
+class FakeRemoteSession extends RemoteSession {
+  FakeRemoteSession(super.endpoint, {super.onUnauthorized, this.connectOnInit = true});
+  final bool connectOnInit;
+  int disconnects = 0;
+
+  @override
+  Future<void> initialize() async {
+    if (!connectOnInit) return;
+    connected = true;
+    status = 'Connected';
+    notifyListeners();
+  }
+
+  @override
+  Future<void> disconnect() async {
+    disconnects++;
+    connected = false;
+    notifyListeners();
+  }
+}
 
 /// A configurable module, e.g. a stand-in for wave 2's Remote.
 class FakeModule extends NexusModule implements DescribedModule {
@@ -71,6 +107,8 @@ UtilityLink link(String utility, {String? wsUrl, String? host, int? port}) =>
           },
       wsUrl: wsUrl,
       preferredHost: host,
+      fingerprint: utility == UtilityIds.nexuslink ? null : testFingerprint,
+      deviceId: utility == UtilityIds.audio ? 'phone-1' : null,
       pairedAt: DateTime.utc(2026, 11, 8),
     );
 
