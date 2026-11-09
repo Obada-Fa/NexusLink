@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import '../modules/agents/agents_module.dart';
 import '../modules/audio/audio_module.dart';
 import '../modules/desktop/desktop_module.dart';
+import '../modules/files/files_module.dart';
 import '../modules/remote/remote_module.dart';
 import '../modules/terminal/terminal_module.dart';
 import 'capabilities.dart';
@@ -13,6 +14,7 @@ import 'module.dart';
 
 const List<NexusModule> moduleRegistry = [
   DesktopModule(),
+  FilesModule(),
   AgentsModule(),
   TerminalModule(),
   RemoteModule(),

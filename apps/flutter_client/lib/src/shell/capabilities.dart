@@ -24,7 +24,7 @@ class Capability {
 }
 
 const phase1Capabilities = <String, List<String>>{
-  UtilityIds.nexuslink: ['screen', 'apps', 'terminal', 'agents'],
+  UtilityIds.nexuslink: ['screen', 'apps', 'files', 'terminal', 'agents'],
   UtilityIds.remote: ['input', 'dictation'],
   UtilityIds.audio: ['audio.source', 'audio.sink', 'mic'],
   // audio.source = PC speakers can stream to the phone

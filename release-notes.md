@@ -1,3 +1,11 @@
+## NexusLink Test 1.0.45+51 — Files on the home screen
+
+- New **Files** tile on the home screen: browse the PC's folders, preview text files and images, and download files to the phone (saved in `Downloads/NexusLink`). Before, this was only reachable through Terminal → Files.
+
+The PC host is unchanged since 1.0.43. Like 1.0.44, this is a profile build signed with a different key from 1.0.43, so if you are coming from 1.0.43, uninstall the old Nexus Test app first.
+
+This is a test build.
+
 ## NexusLink Test 1.0.44+50 — One app, one scan
 
 **Nexus app (phase 1)**

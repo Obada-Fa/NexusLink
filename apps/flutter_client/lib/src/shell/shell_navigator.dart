@@ -25,6 +25,7 @@ class ShellNavigator {
 /// Which compiled-in module shows each global workspace tab.
 String moduleForWorkspaceTab(int tab) => switch (tab) {
   WorkspaceTabs.monitor => 'agents',
-  WorkspaceTabs.files || WorkspaceTabs.terminal => 'terminal',
+  WorkspaceTabs.files => 'files',
+  WorkspaceTabs.terminal => 'terminal',
   _ => 'desktop',
 };

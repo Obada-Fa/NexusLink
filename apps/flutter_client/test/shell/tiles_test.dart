@@ -27,6 +27,7 @@ void main() {
     );
     expect(tiles.map((t) => t.module.id), [
       'desktop',
+      'files',
       'agents',
       'terminal',
       'remote',

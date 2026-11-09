@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:nexus_remote/nexus_remote.dart';
 import 'package:nexuslink/src/modules/agents/agents_module.dart';
 import 'package:nexuslink/src/modules/desktop/desktop_module.dart';
+import 'package:nexuslink/src/modules/files/files_module.dart';
 import 'package:nexuslink/src/modules/terminal/terminal_module.dart';
 import 'package:nexuslink/src/session/target.dart';
 import 'package:nexuslink/src/shell/module.dart';
@@ -15,6 +16,7 @@ import 'package:nexuslink/src/theme/nexus_theme.dart';
 /// The NexusLink modules only (the registry without Remote and Audio).
 const nexusLinkModules = <NexusModule>[
   DesktopModule(),
+  FilesModule(),
   AgentsModule(),
   TerminalModule(),
 ];

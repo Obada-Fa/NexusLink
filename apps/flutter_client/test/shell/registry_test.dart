@@ -13,6 +13,7 @@ void main() {
     expect(capabilitiesOf(nexusOnly).map((c) => c.id), [
       'screen',
       'apps',
+      'files',
       'terminal',
       'agents',
     ]);
@@ -51,22 +52,23 @@ void main() {
     );
   });
 
-  test('registry lists all five modules in grid order', () {
+  test('registry lists all six modules in grid order', () {
     expect(moduleRegistry.map((m) => m.id), [
       'desktop',
+      'files',
       'agents',
       'terminal',
       'remote',
       'audio',
     ]);
-    // A fully paired target shows all five on Android.
+    // A fully paired target shows all six on Android.
     expect(
       modulesFor(
         moduleRegistry,
         capabilities: capabilitiesOf(hubTarget()),
         platform: TargetPlatform.android,
       ).map((m) => m.id),
-      ['desktop', 'agents', 'terminal', 'remote', 'audio'],
+      ['desktop', 'files', 'agents', 'terminal', 'remote', 'audio'],
     );
     // Audio is Android-only.
     expect(
@@ -86,7 +88,7 @@ void main() {
       capabilities: capabilitiesOf(hubTarget(utilities: {UtilityIds.nexuslink})),
       platform: TargetPlatform.android,
     );
-    expect(shown.map((m) => m.id), ['desktop', 'agents', 'terminal']);
+    expect(shown.map((m) => m.id), ['desktop', 'files', 'agents', 'terminal']);
   });
 
   test('NexusLink modules hide when only Remote/Audio are paired', () {
@@ -120,7 +122,7 @@ void main() {
         capabilities: caps,
         platform: TargetPlatform.android,
       ).map((m) => m.id),
-      ['remote', 'desktop', 'agents', 'terminal', 'audio'],
+      ['remote', 'desktop', 'files', 'agents', 'terminal', 'audio'],
     );
     // On iOS the Android-only modules disappear and the iOS one shows.
     expect(

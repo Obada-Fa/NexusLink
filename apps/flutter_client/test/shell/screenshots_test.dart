@@ -218,7 +218,7 @@ void main() {
     );
     expect(find.text('Offline'), findsNothing);
     expect(find.textContaining('Connected'), findsOneWidget);
-    for (final id in ['desktop', 'agents', 'terminal', 'remote', 'audio']) {
+    for (final id in ['desktop', 'files', 'agents', 'terminal', 'remote', 'audio']) {
       await tester.scrollUntilVisible(
         find.byKey(ValueKey('tile-$id')),
         200,
