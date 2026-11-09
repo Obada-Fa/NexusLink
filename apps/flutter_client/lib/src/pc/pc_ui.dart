@@ -44,6 +44,34 @@ String fmtGBOf(double used, double total) {
   return '${fmtGB(used).replaceFirst(unit, '')}/$full';
 }
 
+// Binary units, labelled KiB/MiB/GiB like the Desktop readings.
+
+/// 11040 → "10.8 KiB", 339945 → "332 KiB", 1048576 → "1.0 MiB".
+String fmtIec(double bytes) {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  var v = bytes < 0 ? 0.0 : bytes;
+  var i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  // 1023.6 KiB would print as "1024 KiB"; roll it into the next unit.
+  if (i > 0 && v >= 999.5 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  final digits = i == 0 || v >= 100 ? 0 : 1;
+  return '${v.toStringAsFixed(digits)} ${units[i]}';
+}
+
+String fmtIecRate(double bytesPerSecond) => '${fmtIec(bytesPerSecond)}/s';
+
+/// "15.3 / 30.5 GiB".
+String fmtGiBOf(double used, double total) {
+  String g(double b) => (b / 1073741824).toStringAsFixed(1);
+  return '${g(used)} / ${g(total)} GiB';
+}
+
 String fmtWatts(double? w) => w == null ? '—' : '${w.round()} W';
 
 String fmtAgo(DateTime at, [DateTime? now]) {

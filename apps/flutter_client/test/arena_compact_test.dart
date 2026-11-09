@@ -179,6 +179,28 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
   });
 
+  testWidgets('zoomed out, a near miss still picks the person (48 dp target)', (
+    tester,
+  ) async {
+    phone(tester);
+    await tester.pumpWidget(app(fleet));
+    await tester.pump();
+    final state = arena(tester);
+    final perArt = state.camera.value.getMaxScaleOnAxis() * kArtScale;
+    // The old 16-art-px-wide box would miss a tap 20 dp beside the sprite.
+    expect(8 * perArt, lessThan(20));
+    final point = MatrixUtils.transformPoint(
+      state.camera.value,
+      (state.positionOf('h1')! - const Offset(0, 9)) * kArtScale,
+    );
+    await tester.tapAt(
+      tester.getTopLeft(find.byType(ArenaWorld)) + point + const Offset(20, 0),
+    );
+    await tester.pump();
+    expect(state.selected, 'h1');
+    await tester.pump(const Duration(milliseconds: 400));
+  });
+
   testWidgets('capture', (tester) async {
     phone(tester);
     final key = GlobalKey();

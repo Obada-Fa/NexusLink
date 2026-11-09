@@ -426,12 +426,10 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                       icon: const Icon(Icons.format_list_numbered),
                     ),
                     IconButton(
-                      tooltip: 'Wrap lines',
+                      tooltip: _wrap ? 'Wrap lines: on' : 'Wrap lines: off',
+                      isSelected: _wrap,
                       onPressed: () => setState(() => _wrap = !_wrap),
-                      icon: Icon(
-                        Icons.wrap_text,
-                        color: _wrap ? Colors.blue : null,
-                      ),
+                      icon: const Icon(Icons.wrap_text),
                     ),
                     IconButton(
                       tooltip: 'Font size',
@@ -457,6 +455,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                     if (doc.path.endsWith('.md'))
                       IconButton(
                         tooltip: 'Markdown preview',
+                        isSelected: _preview,
                         onPressed: () => setState(() => _preview = !_preview),
                         icon: const Icon(Icons.preview),
                       ),
@@ -479,10 +478,12 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                             ),
                           ),
                           IconButton(
+                            tooltip: 'Previous match',
                             onPressed: _finder!.previousMatch,
                             icon: const Icon(Icons.arrow_upward),
                           ),
                           IconButton(
+                            tooltip: 'Next match',
                             onPressed: _finder!.nextMatch,
                             icon: const Icon(Icons.arrow_downward),
                           ),
@@ -505,7 +506,7 @@ class _EditorScreenState extends ConsumerState<EditorScreen>
                             ),
                             TextButton(
                               onPressed: _finder!.replaceAllMatches,
-                              child: const Text('All'),
+                              child: const Text('Replace all'),
                             ),
                           ],
                         ),

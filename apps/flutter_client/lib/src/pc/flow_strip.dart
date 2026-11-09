@@ -8,6 +8,7 @@ import '../monitor/monitor_models.dart';
 import '../monitor/monitor_provider.dart';
 import '../theme/nexus_theme.dart';
 import '../theme/nx_widgets.dart';
+import '../widgets/history_chart.dart';
 import 'pc_ui.dart';
 
 class FlowStrip extends StatelessWidget {
@@ -54,12 +55,12 @@ class FlowStrip extends StatelessWidget {
       icon: Icons.swap_vert_rounded,
       color: NX.accent,
       semantics:
-          'Network: download ${formatRate(v.netRx)}, upload ${formatRate(v.netTx)}',
+          'Network: download ${fmtIecRate(v.netRx)}, upload ${fmtIecRate(v.netTx)}',
       lines: [
-        _RateLine(Icons.south_rounded, formatRate(v.netRx), NX.accent),
-        _RateLine(Icons.north_rounded, formatRate(v.netTx), NX.accent2),
+        _RateLine(Icons.south_rounded, fmtIecRate(v.netRx), NX.accent),
+        _RateLine(Icons.north_rounded, fmtIecRate(v.netTx), NX.textDim),
       ],
-      chart: _spark(history['netRx'], history['netTx'], NX.accent, NX.accent2),
+      chart: _spark(history['netRx'], history['netTx'], NX.accent, NX.textDim),
       caption: caption.isEmpty ? null : caption,
     );
   }
@@ -69,27 +70,27 @@ class FlowStrip extends StatelessWidget {
     return _Tile(
       title: 'Disk I/O',
       icon: Icons.sync_alt_rounded,
-      color: NX.done,
+      color: NX.accent,
       semantics:
-          'Disk: reading ${formatRate(v.diskRead)}, writing ${formatRate(v.diskWrite)}'
+          'Disk: reading ${fmtIecRate(v.diskRead)}, writing ${fmtIecRate(v.diskWrite)}'
           '${nvme == null ? '' : ', NVMe ${nvme.round()} degrees'}',
       lines: [
         _RateLine(
           Icons.file_download_outlined,
-          formatRate(v.diskRead),
-          NX.done,
+          fmtIecRate(v.diskRead),
+          NX.accent,
         ),
         _RateLine(
           Icons.file_upload_outlined,
-          formatRate(v.diskWrite),
-          NX.accent2,
+          fmtIecRate(v.diskWrite),
+          NX.textDim,
         ),
       ],
       chart: _spark(
         history['diskRead'],
         history['diskWrite'],
-        NX.done,
-        NX.accent2,
+        NX.accent,
+        NX.textDim,
       ),
       caption: nvme == null ? null : 'NVMe ${fmtTemp(nvme)}',
       captionColor: nvme == null ? null : (nvme >= 70 ? NX.waiting : null),
@@ -176,13 +177,13 @@ class FlowStrip extends StatelessWidget {
       : Padding(
           padding: const EdgeInsets.only(top: 6),
           child: RepaintBoundary(
-            child: Sparkline(
+            child: HistoryChart(
               values: a,
               secondary: b.length >= 2 ? b : null,
               color: ca,
               secondaryColor: cb,
-              height: 26,
-              fill: false,
+              height: 32,
+              axis: false,
             ),
           ),
         );

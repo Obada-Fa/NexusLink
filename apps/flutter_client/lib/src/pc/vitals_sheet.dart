@@ -8,6 +8,7 @@ import '../monitor/monitor_models.dart';
 import '../monitor/monitor_provider.dart';
 import '../theme/nexus_theme.dart';
 import '../theme/nx_widgets.dart';
+import '../widgets/history_chart.dart';
 import 'pc_ui.dart';
 import 'vitals_hero.dart';
 
@@ -101,6 +102,7 @@ class _VitalsSheetState extends ConsumerState<VitalsSheet> {
           color: NX.accent,
           values: h['cpuTemp'],
           unit: '°',
+          fromZero: false,
         ),
       if (v.perCore.isNotEmpty)
         _Block(
@@ -156,7 +158,7 @@ class _VitalsSheetState extends ConsumerState<VitalsSheet> {
       _ChartBlock(
         title: 'Load',
         value: gpu.busy == null ? '—' : fmtPct(gpu.busy!),
-        color: NX.accent2,
+        color: NX.accent,
         values: h['gpu'],
         max: 100,
         unit: '%',
@@ -186,6 +188,7 @@ class _VitalsSheetState extends ConsumerState<VitalsSheet> {
           color: NX.accent,
           values: h['gpuTemp'],
           unit: '°',
+          fromZero: false,
         ),
       if (gpu.powerW != null)
         _Block(
@@ -206,12 +209,7 @@ class _VitalsSheetState extends ConsumerState<VitalsSheet> {
               ),
               if (h['gpuPower'].length >= 2) ...[
                 const SizedBox(height: 10),
-                Sparkline(
-                  values: h['gpuPower'],
-                  color: NX.accent,
-                  height: 44,
-                  fill: false,
-                ),
+                HistoryChart(values: h['gpuPower'], unit: ' W', height: 72),
               ],
             ],
           ),
@@ -229,12 +227,11 @@ class _VitalsSheetState extends ConsumerState<VitalsSheet> {
               ),
               if (h['vram'].length >= 2) ...[
                 const SizedBox(height: 10),
-                Sparkline(
-                  fill: false,
+                HistoryChart(
                   values: h['vram'],
-                  color: NX.done,
                   max: 100,
-                  height: 36,
+                  unit: '%',
+                  height: 64,
                 ),
               ],
             ],
@@ -410,11 +407,11 @@ class _Block extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.only(bottom: NX.gap),
+    // Open sections divided by a hairline, not boxed cards.
     child: Container(
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(NX.radiusSm),
-        border: Border.all(color: NX.line),
+      padding: const EdgeInsets.only(top: 14, bottom: 4),
+      decoration: const BoxDecoration(
+        border: Border(top: BorderSide(color: NX.line)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -472,7 +469,9 @@ class _ChartBlock extends StatelessWidget {
     required this.values,
     required this.unit,
     this.max,
+    this.fromZero = true,
   });
+  final bool fromZero;
   final String title;
   final String value;
   final Color color;
@@ -497,12 +496,13 @@ class _ChartBlock extends StatelessWidget {
                 Semantics(
                   label:
                       '$title history: low ${f(lo)}, average ${f(avg)}, peak ${f(hi)}',
-                  child: Sparkline(
-                    fill: false,
+                  child: HistoryChart(
                     values: values,
                     color: color,
                     max: max,
-                    height: 64,
+                    fromZero: fromZero,
+                    unit: unit,
+                    height: 104,
                   ),
                 ),
                 const SizedBox(height: 6),
@@ -558,12 +558,8 @@ class _TempTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = (celsius ?? 0) >= hotAt ? NX.waiting : NX.text;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(NX.radiusSm),
-        border: Border.all(color: NX.line),
-      ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
       child: PcStat(
         label: label.toUpperCase(),
         value: fmtTemp(celsius),

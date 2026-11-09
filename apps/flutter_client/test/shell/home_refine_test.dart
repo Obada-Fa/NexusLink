@@ -196,6 +196,34 @@ void main() {
     );
   });
 
+  test('offline PCs say when they were last seen', () {
+    final now = DateTime(2026, 11, 9, 12);
+    expect(offlineLabel(null, now: now), 'Offline');
+    expect(
+      offlineLabel(now.subtract(const Duration(hours: 2)), now: now),
+      'Offline · seen 2 h ago',
+    );
+  });
+
+  test('LastSeen persists per target, throttles writes and forgets', () async {
+    SharedPreferences.setMockInitialValues({});
+    final c = ProviderContainer();
+    addTearDown(c.dispose);
+    final t0 = DateTime(2026, 11, 9, 12);
+    await c.read(lastSeenProvider.notifier).seen('pc', at: t0);
+    await c
+        .read(lastSeenProvider.notifier)
+        .seen('pc', at: t0.add(const Duration(seconds: 20)));
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getInt('${lastSeenKeyPrefix}pc'), t0.millisecondsSinceEpoch);
+    final fresh = ProviderContainer();
+    addTearDown(fresh.dispose);
+    await fresh.read(lastSeenProvider.notifier).load('pc');
+    expect(fresh.read(lastSeenProvider)['pc'], t0);
+    await fresh.read(lastSeenProvider.notifier).forget('pc');
+    expect(prefs.getInt('${lastSeenKeyPrefix}pc'), isNull);
+  });
+
   test('LastDestinations round-trips per target and forgets', () async {
     SharedPreferences.setMockInitialValues({});
     final c = ProviderContainer();

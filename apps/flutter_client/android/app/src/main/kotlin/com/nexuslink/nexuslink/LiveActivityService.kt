@@ -161,9 +161,11 @@ class LiveActivityService:Service() {
     }
     /** Drop this socket and reconnect with backoff (fresh authentication). */
     private fun reconnect(){val gen=generation;socket?.cancel();lost(gen)}
-    private fun openTask(id:String?=null):PendingIntent {
-        val intent=Intent(this,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP).putExtra("taskId",id).putExtra("host",host)
-        return PendingIntent.getActivity(this,id?.hashCode()?:0,intent,PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    /** [approval]: the tap is for an approval request, so the app can say if it was already answered. */
+    private fun openTask(id:String?=null,approval:Boolean=false):PendingIntent {
+        val intent=Intent(this,MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP).putExtra("taskId",id).putExtra("host",host).putExtra("approval",approval)
+        val code=(id?.hashCode()?:0)+(if(approval)1 else 0)
+        return PendingIntent.getActivity(this,code,intent,PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
     private fun builder(channel:String)=if(Build.VERSION.SDK_INT>=26)Notification.Builder(this,channel) else Notification.Builder(this)
     private fun notification():Notification {
@@ -414,7 +416,7 @@ class LiveActivityService:Service() {
             .setContentTitle(heading).setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText("$body\n${preview.take(2048)}"))
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE).setAutoCancel(true).setOnlyAlertOnce(true)
-            .setGroup("tasks:$hostId").setContentIntent(openTask(task))
+            .setGroup("tasks:$hostId").setContentIntent(openTask(task,kind=="approval-requested"))
         if(prefs.getBoolean("actions",false)){
             if(kind=="approval-requested"){
                 if(record.optBoolean("previewComplete") && record.optJSONArray("availableActions")?.toString()?.contains("approve")==true)
@@ -425,7 +427,7 @@ class LiveActivityService:Service() {
                 card.addAction(NotificationCompat.Action.Builder(0,"Reply",actionIntent(record,"reply")).addRemoteInput(remoteInput).build())
             }
         }
-        card.addAction(NotificationCompat.Action.Builder(0,"Open on phone",openTask(task)).build())
+        card.addAction(NotificationCompat.Action.Builder(0,"Open on phone",openTask(task,kind=="approval-requested")).build())
         card.extend(NotificationCompat.WearableExtender().setDismissalId(tag))
         manager.notify(tag,id,card.build())
     }
@@ -460,7 +462,7 @@ class LiveActivityService:Service() {
             .put("title",sessions[task]?.optString("title")?:title).put("preview",body).put("ts",e.optLong("ts")).toString())
         manager.notify((task+kind).hashCode(),builder("task_attention").setSmallIcon(iconRes)
             .setContentTitle(title).setContentText(body).setVisibility(Notification.VISIBILITY_PRIVATE)
-            .setAutoCancel(true).setContentIntent(openTask(task)).build())
+            .setAutoCancel(true).setContentIntent(openTask(task,kind=="permission-request")).build())
     }
     fun updateOverlay(){
         if(Looper.myLooper()!=Looper.getMainLooper()){handler.post{updateOverlay()};return}

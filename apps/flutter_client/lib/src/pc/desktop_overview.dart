@@ -12,7 +12,7 @@ import '../monitor/monitor_provider.dart';
 import '../rpc/rpc_client.dart';
 import '../state/connection.dart';
 import '../theme/nexus_theme.dart';
-import '../theme/nx_widgets.dart';
+import '../widgets/history_chart.dart';
 import '../workspace/metrics.dart';
 import 'flow_strip.dart';
 import 'pc_ui.dart';
@@ -20,33 +20,7 @@ import 'vitals_hero.dart' show VitalsFocus;
 import 'vitals_sheet.dart';
 
 // ---------------------------------------------------------------------------
-// Formatting (binary units, as the readings are labelled KiB/MiB/GiB)
-
-/// 11040 → "10.8 KiB", 339945 → "332 KiB", 1048576 → "1.0 MiB".
-String fmtIec(double bytes) {
-  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-  var v = bytes < 0 ? 0.0 : bytes;
-  var i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  // 1023.6 KiB would print as "1024 KiB"; roll it into the next unit.
-  if (i > 0 && v >= 999.5 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  final digits = i == 0 || v >= 100 ? 0 : 1;
-  return '${v.toStringAsFixed(digits)} ${units[i]}';
-}
-
-String fmtIecRate(double bytesPerSecond) => '${fmtIec(bytesPerSecond)}/s';
-
-/// "15.3 / 30.5 GiB".
-String fmtGiBOf(double used, double total) {
-  String g(double b) => (b / 1073741824).toStringAsFixed(1);
-  return '${g(used)} / ${g(total)} GiB';
-}
+// Formatting
 
 String fmtCelsius(double? c) => c == null ? '—' : '${c.round()} °C';
 
@@ -390,7 +364,7 @@ class _ReadingRow extends StatelessWidget {
   final bool live;
   final double scale;
 
-  static const _sparkWidth = 44.0;
+  static const _sparkWidth = 56.0;
 
   Text _cell(String text, Color color, {bool bold = false, TextAlign? align}) =>
       Text(
@@ -422,13 +396,12 @@ class _ReadingRow extends StatelessWidget {
             padding: const EdgeInsets.only(left: 12),
             child: SizedBox(
               width: _sparkWidth,
-              child: Sparkline(
+              child: HistoryBars(
                 values: r.history,
                 color: live ? NX.accent : NX.idle,
-                max: r.historyMax,
-                height: 18,
-                fill: false,
-                strokeWidth: 1.4,
+                max: r.historyMax ?? 100,
+                width: _sparkWidth,
+                height: 20,
               ),
             ),
           )

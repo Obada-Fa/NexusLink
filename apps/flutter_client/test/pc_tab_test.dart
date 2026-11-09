@@ -450,6 +450,16 @@ void main() {
     await settle(tester);
     expect(find.text('Radeon RX 9070'), findsOneWidget);
     expect(find.text('188/317 W'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('2.0/15.9 GB'),
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byType(DraggableScrollableSheet),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
     expect(find.text('2.0/15.9 GB'), findsOneWidget);
     expect(find.text('HOTSPOT'), findsOneWidget);
     await tester.tap(find.text('Memory').last);

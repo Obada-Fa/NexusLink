@@ -121,13 +121,13 @@ class MainActivity : FlutterActivity() {
                         stopService(Intent(this,LiveActivityService::class.java))
                         result.success(null)
                     }
-                    "live.pendingTask" -> {val target=intent.getStringExtra("host");val id=intent.getStringExtra("taskId");intent.removeExtra("taskId");intent.removeExtra("host");result.success(if(target==null)null else mapOf("taskId" to id,"host" to target))}
+                    "live.pendingTask" -> {val target=intent.getStringExtra("host");val id=intent.getStringExtra("taskId");val approval=intent.getBooleanExtra("approval",false);intent.removeExtra("taskId");intent.removeExtra("host");intent.removeExtra("approval");result.success(if(target==null)null else mapOf("taskId" to id,"host" to target,"approval" to approval))}
                     else -> result.notImplemented()
                 }
             } catch(e:Exception) { result.error("ANDROID",e.message,null) }
         }
     }
-    override fun onNewIntent(intent:Intent) {super.onNewIntent(intent);setIntent(intent);if(::channel.isInitialized)channel.invokeMethod("openTask",mapOf("taskId" to intent.getStringExtra("taskId"),"host" to intent.getStringExtra("host")))}
+    override fun onNewIntent(intent:Intent) {super.onNewIntent(intent);setIntent(intent);if(::channel.isInitialized)channel.invokeMethod("openTask",mapOf("taskId" to intent.getStringExtra("taskId"),"host" to intent.getStringExtra("host"),"approval" to intent.getBooleanExtra("approval",false)))}
     override fun onResume(){super.onResume();LiveActivityService.visible=true;LiveActivityService.instance?.updateOverlay();resumeMonitoring()}
     /** Monitoring the user left on but Android stopped (or refused to restart in the background) resumes when the app is opened. */
     private fun resumeMonitoring(){

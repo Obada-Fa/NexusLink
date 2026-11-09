@@ -52,6 +52,19 @@ void main() {
         }
         expect(find.text('Ctrl'), findsOneWidget);
         expect(find.text('More'), findsOneWidget);
+        // Esc and Tab join the row only where every key keeps 48 dp.
+        final wide = width >= TerminalPrimaryControls.minWidthForEscTab;
+        expect(find.text('Esc'), wide ? findsOneWidget : findsNothing);
+        expect(find.text('Tab'), wide ? findsOneWidget : findsNothing);
+        if (wide) {
+          expect(
+            tester.getSize(find.widgetWithText(TextButton, 'Esc')).width,
+            greaterThanOrEqualTo(48),
+          );
+          await tester.tap(find.text('Esc'));
+          await tester.pump();
+          expect(output.removeLast(), '\x1b');
+        }
         input.focusNode.requestFocus();
         await tester.pump();
         await tester.tap(find.byTooltip('Up arrow'));

@@ -78,6 +78,18 @@ class PendingTask extends Notifier<String?> {
   void select(String? id) => state = id;
 }
 
+/// A chat opened from an approval notification: once it is open, check the
+/// request is still waiting and say so if it was already answered.
+class ApprovalCheck extends Notifier<String?> {
+  @override
+  String? build() => null;
+  void select(String? id) => state = id;
+}
+
+final approvalCheckProvider = NotifierProvider<ApprovalCheck, String?>(
+  ApprovalCheck.new,
+);
+
 final pendingTaskProvider = NotifierProvider<PendingTask, String?>(
   PendingTask.new,
 );

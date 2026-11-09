@@ -417,6 +417,9 @@ class ShellController extends Notifier<ShellState> {
           .forget(targetId)
           .catchError((_) {}),
     );
+    unawaited(
+      ref.read(lastSeenProvider.notifier).forget(targetId).catchError((_) {}),
+    );
     final targets = [
       for (final t in state.targets)
         if (t.id != targetId) t,

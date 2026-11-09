@@ -109,6 +109,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     if (coldStart) resetAutoConnect();
     final host = args['host'] as String?;
     ref.read(pendingTaskProvider.notifier).select(args['taskId'] as String?);
+    ref
+        .read(approvalCheckProvider.notifier)
+        .select(args['approval'] == true ? args['taskId'] as String? : null);
     if (host != null) {
       final url = normalizeHostWsUrl(host);
       final target = shell.targetForUrl(url);
@@ -534,12 +537,22 @@ class _HomeView extends ConsumerWidget {
     final wakeHere = wake?.targetId == target.id ? wake : null;
     final waking = wakeHere?.active == true;
     final pairAgain = shell.pairAgainTargetId == target.id;
+    final seenNow = nexusConnected || ctx.reachable.isNotEmpty;
+    final seen = ref.watch(lastSeenProvider)[target.id];
+    if (seenNow) {
+      unawaited(
+        ref.read(lastSeenProvider.notifier).seen(target.id).catchError((_) {}),
+      );
+    } else {
+      unawaited(ref.read(lastSeenProvider.notifier).load(target.id));
+    }
     final status = _heroStatus(
       nexusConnected: nexusConnected,
       connecting: connecting,
       ctx: ctx,
       shell: shell,
       waking: waking ? wakeHere!.message : null,
+      lastSeen: seen,
     );
     final recovery = pairAgain
         ? null
@@ -828,6 +841,7 @@ class _HomeView extends ConsumerWidget {
     required ModuleContext ctx,
     required ShellState shell,
     String? waking,
+    DateTime? lastSeen,
   }) {
     if (waking != null) return _HeroStatus(waking, NX.waiting, live: true);
     if (nexusConnected) return const _HeroStatus('Connected', NX.working);
@@ -840,7 +854,7 @@ class _HomeView extends ConsumerWidget {
     if (!shell.probedOnce) {
       return const _HeroStatus('Checking…', NX.waiting, live: true);
     }
-    return const _HeroStatus('Offline', NX.idle);
+    return _HeroStatus(offlineLabel(lastSeen), NX.idle);
   }
 }
 
@@ -1066,6 +1080,11 @@ String? continueLabel(LastDestination last, {String? project}) {
   if (path != null && path.isNotEmpty) return folderDisplayName(path);
   return project;
 }
+
+/// "Offline · seen 2 h ago" once the PC has been reachable before.
+String offlineLabel(DateTime? lastSeen, {DateTime? now}) => lastSeen == null
+    ? 'Offline'
+    : 'Offline · seen ${shortAgo(lastSeen, now: now)}';
 
 /// "just now", "5 min ago", "3 h ago", "2 d ago".
 String shortAgo(DateTime at, {DateTime? now}) {

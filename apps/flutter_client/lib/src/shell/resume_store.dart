@@ -179,3 +179,55 @@ void noteResume(
         .catchError((_) {}),
   );
 }
+
+// ---------------------------------------------------------------------------
+// When each PC was last reachable, so an offline PC says how stale it is.
+// Stored as `nexus-last-seen:<targetId>` → epoch ms.
+
+const lastSeenKeyPrefix = 'nexus-last-seen:';
+
+class LastSeen extends Notifier<Map<String, DateTime>> {
+  final _loading = <String>{};
+
+  @override
+  Map<String, DateTime> build() => const {};
+
+  Future<void> load(String targetId) async {
+    if (state.containsKey(targetId) || !_loading.add(targetId)) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final ms = prefs.getInt('$lastSeenKeyPrefix$targetId');
+      if (ms == null || state.containsKey(targetId)) return;
+      state = {...state, targetId: DateTime.fromMillisecondsSinceEpoch(ms)};
+    } catch (_) {
+      // No entry just means no "seen … ago".
+    } finally {
+      _loading.remove(targetId);
+    }
+  }
+
+  /// Notes that [targetId] is reachable now. Writes at most once a minute.
+  Future<void> seen(String targetId, {DateTime? at}) async {
+    final now = at ?? DateTime.now();
+    final old = state[targetId];
+    if (old != null && now.difference(old) < const Duration(minutes: 1)) {
+      return;
+    }
+    state = {...state, targetId: now};
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(
+      '$lastSeenKeyPrefix$targetId',
+      now.millisecondsSinceEpoch,
+    );
+  }
+
+  Future<void> forget(String targetId) async {
+    state = {...state}..remove(targetId);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('$lastSeenKeyPrefix$targetId');
+  }
+}
+
+final lastSeenProvider = NotifierProvider<LastSeen, Map<String, DateTime>>(
+  LastSeen.new,
+);

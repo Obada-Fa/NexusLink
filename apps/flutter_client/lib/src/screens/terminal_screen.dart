@@ -83,26 +83,44 @@ class TerminalPrimaryControls extends StatelessWidget {
         ),
       );
 
+  /// Esc and Tab join the main row when every key still gets 48 dp
+  /// (8 keys plus padding); on narrower phones they stay under More.
+  static const minWidthForEscTab = 8 * 48.0 + 16;
+
   @override
   Widget build(BuildContext context) => Focus(
     canRequestFocus: false,
     descendantsAreFocusable: false,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: Row(
-        children: [
-          _arrow(TerminalKey.arrowLeft, Icons.arrow_back, 'Left'),
-          _arrow(TerminalKey.arrowUp, Icons.arrow_upward, 'Up'),
-          _arrow(TerminalKey.arrowDown, Icons.arrow_downward, 'Down'),
-          _arrow(TerminalKey.arrowRight, Icons.arrow_forward, 'Right'),
+    child: LayoutBuilder(
+      builder: (context, c) => _row(c.maxWidth >= minWidthForEscTab),
+    ),
+  );
+
+  Widget _row(bool escTab) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 8),
+    child: Row(
+      children: [
+        if (escTab) ...[
           _control(
-            'Ctrl',
-            input.available ? input.toggleCtrl : null,
-            active: input.ctrl,
+            'Esc',
+            input.available ? () => input.sendKey(TerminalKey.escape) : null,
           ),
-          _control('More', onMore, active: more),
+          _control(
+            'Tab',
+            input.available ? () => input.sendKey(TerminalKey.tab) : null,
+          ),
         ],
-      ),
+        _arrow(TerminalKey.arrowLeft, Icons.arrow_back, 'Left'),
+        _arrow(TerminalKey.arrowUp, Icons.arrow_upward, 'Up'),
+        _arrow(TerminalKey.arrowDown, Icons.arrow_downward, 'Down'),
+        _arrow(TerminalKey.arrowRight, Icons.arrow_forward, 'Right'),
+        _control(
+          'Ctrl',
+          input.available ? input.toggleCtrl : null,
+          active: input.ctrl,
+        ),
+        _control('More', onMore, active: more),
+      ],
     ),
   );
 }

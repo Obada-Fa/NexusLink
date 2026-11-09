@@ -414,6 +414,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
         if (chat is! Map) throw StateError('This chat is no longer available');
         await _open(ChatSummary(Map<String, dynamic>.from(chat)));
       } else {
+        unawaited(_sayIfAnswered(task));
         final chat = _items
             .where((row) => row['agentSessionId'] == task)
             .firstOrNull;
@@ -433,6 +434,30 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
           SnackBar(content: Text('Could not open this update: $error')),
         );
       }
+    }
+  }
+
+  /// Opened from an approval notification: if the PC has nothing left to
+  /// answer in that chat, say so instead of leaving the user hunting for it.
+  Future<void> _sayIfAnswered(String task) async {
+    if (ref.read(approvalCheckProvider) != task) return;
+    ref.read(approvalCheckProvider.notifier).select(null);
+    final client = _repo.client;
+    if (client == null || !client.supports('agent.pendingApprovals')) return;
+    try {
+      final pending = await client.requestList('agent.pendingApprovals', {
+        'agentSessionId': task,
+      });
+      if (!mounted || pending.isNotEmpty) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'This request was already answered, on the PC or another device.',
+          ),
+        ),
+      );
+    } catch (_) {
+      // Can't tell: the chat itself shows whatever is still waiting.
     }
   }
 

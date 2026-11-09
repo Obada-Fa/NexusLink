@@ -448,14 +448,19 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
     final w = _world;
     if (w == null) return;
     final art = local / kArtScale;
+    // Sprites are ~16×27 art px; keep the target at least 48 dp on screen
+    // when zoomed out, where a person is only a few pixels tall.
+    final perArt = _camera.value.getMaxScaleOnAxis() * kArtScale;
+    final half = math.max(8.0, 24 / perArt);
+    final tall = math.max(27.0, 48 / perArt);
     WorldAgent? hit;
     var best = double.infinity;
     for (final a in w.agents) {
       final pos = _movers[a.id]?.pos ?? a.spot.pos;
       final box = Rect.fromLTRB(
-        pos.dx - 8,
-        pos.dy - 24,
-        pos.dx + 8,
+        pos.dx - half,
+        pos.dy + 3 - tall,
+        pos.dx + half,
         pos.dy + 3,
       );
       if (!box.contains(art)) continue;
@@ -492,7 +497,19 @@ class ArenaWorldState extends ConsumerState<ArenaWorld>
         return;
       }
     }
-    if (_selected != null) setState(() => _selected = null);
+    if (_selected != null) {
+      setState(() => _selected = null);
+      return;
+    }
+    // Zoomed out, a room is the thing you can see: open its list of people
+    // with their full task titles.
+    if (_zoom < .6) {
+      final room = w.rooms.where((r) => r.rect.contains(art)).firstOrNull;
+      if (room != null) {
+        HapticFeedback.selectionClick();
+        _openRoom(room);
+      }
+    }
   }
 
   Future<void> _openAgent(ChatSummary chat) => showModalBottomSheet<void>(
