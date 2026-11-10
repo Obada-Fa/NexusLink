@@ -43,6 +43,11 @@ I’d keep the dark visual identity, the direct access to PC tools, and the pixe
 
 ## Progress log
 
+- 2026-11-10, laptop mouse control in the web stream:
+  - Added native mouse hover, left/middle/right button presses and releases, dragging, wheel scrolling and Ctrl+wheel zoom beside the existing touch engine. Inputs carry the virtual session ID or the captured window offset and map through the displayed image's aspect ratio; black borders do not accept clicks.
+  - Pointer capture preserves drags outside the viewer. Cancellation, lost capture, tab hiding, focus loss and cleanup release held buttons. Virtual-session touch mapping now also matches the viewer's `object-fit: contain`.
+  - Verified: 46 web tests passed, including four new mouse-input regressions; production static export and its type checking passed. A live laptop-to-PC stream walkthrough remains outstanding.
+
 - 2026-11-10, web client refresh:
   - App/window/session launches use an opaque `/mirror?view=…` address. Names, app IDs and window classes stay in tab-scoped storage. Reload restores the target; an unavailable target shows recovery instead of opening the desktop. Existing named links are rewritten on entry.
   - Agents opens with Live activity, pending approvals, search and a visible New chat action. Projects groups active and older PC conversations by their full project path. The slower PC-history scan runs only when Projects is opened. Pending approvals are restored from the host and resolved requests leave the transcript; direct page reload reconnects.

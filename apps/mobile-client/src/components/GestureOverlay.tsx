@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { GestureEngine, type GestureEvent } from '@nexuslink/gesture-engine';
 import { useConnectionStore } from '@/store/connection';
+import { attachDesktopInput } from '@/lib/desktop-input';
 
 type PrecisionMode = 'normal' | 'precision';
 
@@ -125,8 +126,13 @@ export default function GestureOverlay({
     // Native touch: tap/drag at the finger. Trackpad is the Precision toggle.
     const engine = new GestureEngine(el, callbacks, { mode: 'direct' });
     engine.attach();
-    if (sessionId) engine.setFit('fill');
     engineRef.current = engine;
+    let hostRegion = region ?? { x: 0, y: 0, width: 1920, height: 1080 };
+    const detachDesktop = client && status === 'connected' ? attachDesktopInput(el, {
+      region: () => hostRegion,
+      sessionId,
+      send: (method, params) => { client.request(method, params).catch(() => {}); },
+    }) : undefined;
 
     // Adopted-window mode: touch space IS the captured region. Otherwise fall
     // back to full-screen metadata.
@@ -139,6 +145,7 @@ export default function GestureOverlay({
           const meta = data as { width: number; height: number };
           if (meta.width && meta.height) {
             engine.setHostDimensions(meta.width, meta.height);
+            hostRegion = { x: 0, y: 0, width: meta.width, height: meta.height };
           }
         })
         .catch(() => {
@@ -147,6 +154,7 @@ export default function GestureOverlay({
     }
 
     return () => {
+      detachDesktop?.();
       engine.detach();
       engineRef.current = null;
     };
