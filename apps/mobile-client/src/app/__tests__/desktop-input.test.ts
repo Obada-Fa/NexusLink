@@ -1,7 +1,7 @@
 import { expect, it } from 'bun:test';
 import { attachDesktopInput } from '@/lib/desktop-input';
 
-function fixture(sessionId?: string) {
+function fixture(sessionId?: string, region = { x: 100, y: 200, width: 1600, height: 800 }) {
   const owner = new EventTarget();
   const doc = Object.assign(new EventTarget(), { defaultView: owner, hidden: false });
   const element = Object.assign(new EventTarget(), {
@@ -11,7 +11,7 @@ function fixture(sessionId?: string) {
   });
   const calls: { method: string; params: Record<string, unknown> }[] = [];
   const detach = attachDesktopInput(element as unknown as HTMLElement, {
-    region: () => ({ x: 100, y: 200, width: 1600, height: 800 }), sessionId,
+    region: () => region, sessionId,
     send: (method, params) => calls.push({ method, params }),
   });
   function fire(type: string, props: Record<string, unknown> = {}) {
@@ -23,6 +23,34 @@ function fixture(sessionId?: string) {
   }
   return { owner, doc, calls, fire, detach };
 }
+
+it('controls the full desktop without a virtual app session', () => {
+  const f = fixture(undefined, { x: 0, y: 0, width: 1920, height: 1080 });
+  f.fire('pointermove');
+  f.fire('pointerdown');
+  f.fire('pointermove', { clientX: 760 });
+  f.fire('pointerup', { clientX: 760 });
+  f.fire('pointerdown', { button: 2 });
+  f.fire('pointerup', { button: 2 });
+  f.fire('wheel', { deltaX: 0, deltaY: 120, deltaMode: 0 });
+  expect(f.calls).toEqual([
+    { method: 'input.mouseMoveAbs', params: { x: 960, y: 540 } },
+    { method: 'input.buttonDown', params: { button: 'left', x: 960, y: 540 } },
+    { method: 'input.mouseMoveAbs', params: { x: 1440, y: 540 } },
+    { method: 'input.buttonUp', params: { button: 'left', x: 1440, y: 540 } },
+    { method: 'input.buttonDown', params: { button: 'right', x: 960, y: 540 } },
+    { method: 'input.buttonUp', params: { button: 'right', x: 960, y: 540 } },
+    { method: 'input.mouseScroll', params: { x: 960, y: 540, deltaX: 0, deltaY: 120 } },
+  ]);
+  f.detach();
+});
+
+it('maps a desktop monitor to its physical position instead of a session display', () => {
+  const f = fixture(undefined, { x: 1920, y: 0, width: 1920, height: 1080 });
+  f.fire('pointermove');
+  expect(f.calls).toEqual([{ method: 'input.mouseMoveAbs', params: { x: 2880, y: 540 } }]);
+  f.detach();
+});
 
 it('maps hover into the captured window and ignores letterboxing and touch', () => {
   const f = fixture();

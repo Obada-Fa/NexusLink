@@ -43,6 +43,10 @@ I’d keep the dark visual identity, the direct access to PC tools, and the pixe
 
 ## Progress log
 
+- 2026-11-10, full-desktop mouse verification:
+  - Home's Desktop action opens `/mirror` with no app target; it shares the deployed native mouse handler with app streams. Capture supplies the physical monitor region, and inputs omit the virtual session ID.
+  - Added regressions for full-desktop hover, dragging, right-click and scrolling, plus a monitor offset. All 48 web tests passed. HTTP verification confirmed the live Desktop route serves the deployed mouse bundle. No runtime change or additional restart was needed; a live laptop walkthrough remains unverified.
+
 - 2026-11-10, laptop mouse control in the web stream:
   - Added native mouse hover, left/middle/right button presses and releases, dragging, wheel scrolling and Ctrl+wheel zoom beside the existing touch engine. Inputs carry the virtual session ID or the captured window offset and map through the displayed image's aspect ratio; black borders do not accept clicks.
   - Pointer capture preserves drags outside the viewer. Cancellation, lost capture, tab hiding, focus loss and cleanup release held buttons. Virtual-session touch mapping now also matches the viewer's `object-fit: contain`.
