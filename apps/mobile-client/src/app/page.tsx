@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useConnectionStore } from '@/store/connection';
 import ConnectionProvider, { STORAGE_KEY } from '@/components/ConnectionProvider';
 import { deriveHostWsUrl, describeHost } from '@/lib/host-url';
+import { mirrorUrl } from '@/lib/mirror-target';
 
 interface WindowInfo {
   windowId: string;
@@ -222,11 +223,11 @@ function HomeScreen() {
   if (status !== 'connected') return <ConnectForm />;
 
   const openApp = (w: WindowInfo) => {
-    router.push(`/mirror?w=${encodeURIComponent(w.windowId)}&title=${encodeURIComponent(bestName(w, apps))}`);
+    router.push(mirrorUrl({ windowId: w.windowId, title: bestName(w, apps) }));
   };
 
   const attachSession = (s: AppSessionInfo) => {
-    router.push(`/mirror?s=${encodeURIComponent(s.sessionId)}&title=${encodeURIComponent(s.name)}`);
+    router.push(mirrorUrl({ sessionId: s.sessionId, title: s.name }));
   };
 
   const closePhoneSession = (s: AppSessionInfo, e: React.MouseEvent) => {
@@ -247,10 +248,9 @@ function HomeScreen() {
       return;
     }
     if (a.appId.startsWith('nexus.')) {
-      router.push(`/mirror?vapp=${encodeURIComponent(a.appId)}&title=${encodeURIComponent(a.name)}`);
+      router.push(mirrorUrl({ virtualAppId: a.appId, title: a.name }));
     } else {
-      const clsParam = a.wmClass ? `&cls=${encodeURIComponent(a.wmClass)}` : '';
-      router.push(`/mirror?app=${encodeURIComponent(a.appId)}&title=${encodeURIComponent(a.name)}${clsParam}`);
+      router.push(mirrorUrl({ appId: a.appId, title: a.name, wmClass: a.wmClass }));
     }
   };
 

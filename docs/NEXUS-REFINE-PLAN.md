@@ -43,6 +43,13 @@ I’d keep the dark visual identity, the direct access to PC tools, and the pixe
 
 ## Progress log
 
+- 2026-11-10, web client refresh:
+  - App/window/session launches use an opaque `/mirror?view=…` address. Names, app IDs and window classes stay in tab-scoped storage. Reload restores the target; an unavailable target shows recovery instead of opening the desktop. Existing named links are rewritten on entry.
+  - Agents opens with Live activity, pending approvals, search and a visible New chat action. Projects groups active and older PC conversations by their full project path. The slower PC-history scan runs only when Projects is opened. Pending approvals are restored from the host and resolved requests leave the transcript; direct page reload reconnects.
+  - Chat renders Markdown, code blocks and tables, collapses completed tools and preserves reading position while browsing earlier output. Failed sends restore the draft and attachments.
+  - Mirror defaults to native resolution with Native / High / Balanced / Low data controls. Sequential decoding retains only the latest queued frame, and virtual sessions preserve aspect ratio. This removes the previous 960-pixel medium-quality desktop default; source resolution and connection speed still bound the result.
+  - Verification: production export passed; 42 web tests passed. Browser walkthrough used isolated fixture sessions at desktop and 412 × 915: search, project grouping, pending approval, formatted transcript, opaque Claude URL, reload recovery, 1280 × 720 canvas and quality selection. Actual paired-PC mirroring quality and agent execution were not exercised. Standalone TypeScript checking still reports pre-existing typing errors in terminal test mocks; production build type checking passed.
+
 - 2026-11-09: plan adopted. Pass 1 (Home, pairing, device recovery) started on branch `nexus-app-phase1`.
 - 2026-11-09, pass 1:
   - First launch: "Connect your computer" + PC instruction + **Scan QR code**; Wi-Fi discovery and the typed address sit under **Other ways to connect** (`device_picker.dart`). The pairing progress screen now says what is ready and what failed (`pairingSummary`).

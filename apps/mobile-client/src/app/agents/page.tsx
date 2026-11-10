@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useConnectionStore } from '@/store/connection';
 import type { RpcClient } from '@/lib/rpc-client';
+import AgentMarkdown from '@/components/AgentMarkdown';
+import ConnectionProvider from '@/components/ConnectionProvider';
 import {
   comparePathNames,
   folderDisplayName,
@@ -13,6 +15,7 @@ import {
 import { isThisPcPath, parentHostPath } from '@/lib/host-path';
 import { chatListSubtitle } from '@/lib/agent-labels';
 import { mergeAgentHistory } from '@/lib/agent-history';
+import { conversationState, groupConversations, matchesConversation } from '@/lib/agent-overview';
 import {
   applyComposerPrefs,
   loadComposerPrefs,
@@ -44,6 +47,9 @@ interface AgentSessionInfo {
   status: string;
   hostChatId?: string;
   icon?: string;
+  taskState?: string;
+  updatedAt?: number;
+  preview?: string;
 }
 
 interface AgentHostChat {
@@ -71,6 +77,7 @@ interface AgentEvent {
   toolInput?: string;
   toolOutput?: string;
   refId?: string;
+  approvalOutcome?: string;
 }
 
 interface ProjectInfo {
@@ -282,7 +289,7 @@ function mergeToolEvents(events: AgentEvent[]): AgentEvent[] {
   return out;
 }
 
-export default function AgentsPage() {
+function AgentsView() {
   const client = useConnectionStore((s) => s.client);
   const status = useConnectionStore((s) => s.status);
   const connect = useConnectionStore((s) => s.connect);
@@ -301,6 +308,11 @@ export default function AgentsPage() {
   const [error, setError] = useState('');
   const [picking, setPicking] = useState<Picking | null>(null);
   const [menuTab, setMenuTab] = useState<'recent' | 'pc'>('recent');
+  const [newChatOpen, setNewChatOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryError, setLibraryError] = useState('');
+  const [refreshedAt, setRefreshedAt] = useState<number | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
   const [composerView, setComposerView] = useState<'root' | 'model' | 'thinking' | 'mode' | 'agent'>('root');
@@ -314,6 +326,8 @@ export default function AgentsPage() {
   const photoRef = useRef<HTMLInputElement | null>(null);
   const unsubRef = useRef<(() => void) | null>(null);
   const activeIdRef = useRef<string | null>(null);
+  const openRequestRef = useRef(0);
+  const followOutputRef = useRef(true);
   const refreshLockRef = useRef(false);
   activeIdRef.current = active?.agentSessionId ?? null;
 
@@ -338,15 +352,16 @@ export default function AgentsPage() {
         client.request('agent.list') as Promise<AgentInfo[]>,
         client.request('agent.listSessions') as Promise<AgentSessionInfo[]>,
       ]);
-      let host: AgentHostChat[] = [];
-      try {
-        host = (await client.request('agent.listHostChats')) as AgentHostChat[];
-      } catch {
-        host = [];
-      }
       setAgents(a);
       setSessions(s);
-      setHostChats(host);
+      setError('');
+      setRefreshedAt(Date.now());
+      try {
+        const snapshot = await client.request('activity.snapshotV2', { cursor: 0 }) as {
+          pendingApprovals: Array<{ agentSessionId: string; event: AgentEvent }>;
+        };
+        setPendingApprovals(Object.fromEntries(snapshot.pendingApprovals.map(p => [p.agentSessionId, p.event])));
+      } catch { /* Older hosts still deliver live permission requests. */ }
       const activeId = activeIdRef.current;
       if (!activeId) return;
       const match = s.find((x) => x.agentSessionId === activeId);
@@ -354,13 +369,26 @@ export default function AgentsPage() {
       const history = (await client.request('agent.history', {
         agentSessionId: activeId,
       })) as AgentEvent[];
-      setEvents((prev) => mergeAgentHistory(history, prev));
+      if (activeIdRef.current === activeId) setEvents((prev) => mergeAgentHistory(history, prev));
     } catch (e) {
       if (!quiet) setError(e instanceof Error ? e.message : 'Could not list agents.');
     } finally {
       refreshLockRef.current = false;
     }
   }, [status, client]);
+
+  useEffect(() => {
+    if (menuTab !== 'pc' || status !== 'connected' || !client) return;
+    let cancelled = false;
+    setLibraryLoading(true);
+    setLibraryError('');
+    void client.request('agent.listHostChats', {}, 30000).then(chats => {
+      if (!cancelled) setHostChats(chats as AgentHostChat[]);
+    }).catch(() => {
+      if (!cancelled) setLibraryError('Could not load PC conversations. Switch back to Live or try Projects again.');
+    }).finally(() => { if (!cancelled) setLibraryLoading(false); });
+    return () => { cancelled = true; };
+  }, [menuTab, status, client]);
 
   useEffect(() => {
     if (status !== 'connected' || !client) return;
@@ -370,6 +398,14 @@ export default function AgentsPage() {
       client.subscribe('agent-event', (msg: unknown) => {
         const m = msg as { agentSessionId?: string; event?: AgentEvent };
         if (!m.event) return;
+        if (m.event.approvalOutcome && m.agentSessionId) {
+          const id = m.agentSessionId;
+          setPendingApprovals(current => {
+            const next = { ...current };
+            if (next[id]?.refId === m.event?.refId) delete next[id];
+            return next;
+          });
+        }
         if (m.agentSessionId !== activeIdRef.current) {
           // Park a request aimed at a background chat instead of discarding it.
           if (m.event.kind === 'permission-request' && m.event.refId && m.agentSessionId) {
@@ -378,10 +414,7 @@ export default function AgentsPage() {
           }
           return;
         }
-        setEvents((prev) => [...prev, m.event!]);
-        if (m.event.kind === 'permission-request' && m.event.refId) {
-          void answerPermission(m.agentSessionId!, m.event.refId, { ev: m.event });
-        }
+        setEvents((prev) => [...prev.filter(event => !(m.event?.approvalOutcome && event.kind === 'permission-request' && event.refId === m.event.refId)), m.event!]);
       }),
     );
     unsubs.push(
@@ -428,7 +461,15 @@ export default function AgentsPage() {
   }, [refreshFromHost]);
 
   useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
+    if (status !== 'connected' || active) return;
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') void refreshFromHost(true);
+    }, 8000);
+    return () => clearInterval(timer);
+  }, [status, active, refreshFromHost]);
+
+  useEffect(() => {
+    if (followOutputRef.current) listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
   }, [events.length]);
 
   const caps = resolveAgentCaps(
@@ -561,23 +602,24 @@ export default function AgentsPage() {
   const openSession = useCallback(
     async (s: AgentSessionInfo) => {
       if (!client) return;
+      const request = ++openRequestRef.current;
       const history = (await client.request('agent.history', {
         agentSessionId: s.agentSessionId,
       })) as AgentEvent[];
+      if (request !== openRequestRef.current) return;
+      followOutputRef.current = true;
       setActive(s);
       setEvents(history);
+      setNewChatOpen(false);
       setSessions((prev) => [s, ...prev.filter((x) => x.agentSessionId !== s.agentSessionId)]);
-      // Surface a request that landed while this chat was in the background.
-      setPendingApprovals((prev) => {
-        const parked = prev[s.agentSessionId];
-        if (!parked?.refId) return prev;
-        void answerPermission(s.agentSessionId, parked.refId, { ev: parked });
-        const next = { ...prev };
-        delete next[s.agentSessionId];
-        return next;
-      });
+      // Verify current requests before offering actions from an old transcript.
+      try {
+        const pending = await client.request('agent.pendingApprovals', { agentSessionId: s.agentSessionId }) as AgentEvent[];
+        if (request === openRequestRef.current) setEvents(current => mergeAgentHistory(history, current)
+          .filter(event => event.kind !== 'permission-request').concat(pending));
+      } catch { /* Older hosts keep the transcript's permission cards. */ }
     },
-    [client, answerPermission],
+    [client],
   );
 
   const openHostChatWithCwd = useCallback(
@@ -688,15 +730,26 @@ export default function AgentsPage() {
         );
       }
     }
-    await client.request('agent.prompt', {
+    try { await client.request('agent.prompt', {
       agentSessionId: active.agentSessionId,
       text,
       ...(model && model !== 'auto' && model !== 'default' ? { model } : {}),
       ...(mode !== 'agent' ? { mode } : {}),
       ...(thinking ? { thinking } : {}),
       ...(attached.length ? { images: attached } : {}),
-    });
+    }); } catch (error) {
+      setDraft(current => current || text);
+      setPhotos(current => [...attached, ...current]);
+      setError(error instanceof Error ? error.message : 'Could not send your message. Your draft has been restored.');
+    }
   }, [draft, photos, client, active, agents, model, mode, thinking]);
+
+  const visibleSessions = sessions.filter(s => matchesConversation(s, search)).sort((a, b) => {
+    const rank = (s: AgentSessionInfo) => conversationState(s, !!pendingApprovals[s.agentSessionId]) === 'Needs you' ? 2 : s.busy || s.taskState === 'running' ? 1 : 0;
+    return rank(b) - rank(a) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
+  });
+  const needsYou = sessions.filter(s => conversationState(s, !!pendingApprovals[s.agentSessionId]) === 'Needs you').length;
+  const working = sessions.filter(s => s.busy || s.taskState === 'running').length;
 
   return (
     <div style={styles.wrapper}>
@@ -730,9 +783,10 @@ export default function AgentsPage() {
             ☰
           </button>
         ) : (
-          <span style={{ width: 34 }} />
+          <button type="button" style={styles.newChatButton} onClick={() => setNewChatOpen(open => !open)} aria-expanded={newChatOpen}>New chat</button>
         )}
       </header>
+      {error && <div role="alert" style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 16px', background: '#34251b', color: '#ffd7a0' }}><span style={{ flex: 1 }}>{error}</span><button type="button" style={styles.barBtn} onClick={() => setError('')} aria-label="Dismiss error">✕</button></div>}
 
       {status !== 'connected' ? (
         <div style={styles.disconnected}>
@@ -746,11 +800,16 @@ export default function AgentsPage() {
             {reconnecting ? 'Reconnecting…' : 'Reconnect'}
           </button>
         </div>
-      ) : error ? (
-        <p style={styles.center}>{error}</p>
       ) : !active ? (
         <div style={styles.list}>
-          <h2 style={styles.section}>New chat</h2>
+          <div style={styles.overview}>
+            <p style={styles.eyebrow}>YOUR WORKSPACE</p>
+            <h1 style={styles.overviewTitle}>{needsYou ? `${needsYou} ${needsYou === 1 ? 'chat needs' : 'chats need'} you` : working ? `${working} ${working === 1 ? 'agent is' : 'agents are'} working` : 'Pick up where you left off'}</h1>
+            <p style={styles.overviewSubtitle}>{needsYou ? 'Review pending requests, then continue your work.' : 'Live activity and conversations from your computer.'}</p>
+            <span style={styles.muted}>{refreshedAt ? `Updated ${new Date(refreshedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Loading activity…'}</span>
+          </div>
+          {newChatOpen && <section aria-label="Choose an agent">
+          <h2 style={styles.section}>Start a conversation</h2>
           {agents.map((a) => (
             <div key={a.id} style={styles.agentRowWrap}>
               <button
@@ -764,7 +823,7 @@ export default function AgentsPage() {
                   <span style={styles.muted}>
                     {a.available ? 'Runs on the PC — chat here' : 'CLI not installed on the PC'}
                   </span>
-                  {a.available && <span style={styles.selectBtn}>Select</span>}
+                  {a.available && <span style={styles.selectBtn}>Choose project →</span>}
                 </div>
               </button>
               {a.available && a.capabilities?.approvalMode && (
@@ -789,6 +848,8 @@ export default function AgentsPage() {
               )}
             </div>
           ))}
+          </section>}
+          <input type="search" aria-label="Search conversations" placeholder="Search chats, projects or agents" value={search} onChange={event => setSearch(event.target.value)} style={styles.searchField} />
           <div style={styles.tabContainer}>
             <button
               type="button"
@@ -798,7 +859,7 @@ export default function AgentsPage() {
                 ...(menuTab === 'recent' ? styles.tabButtonActive : {}),
               }}
             >
-              Recent {sessions.length > 0 ? `(${sessions.length})` : ''}
+              Live {sessions.length > 0 ? `(${sessions.length})` : ''}
             </button>
             <button
               type="button"
@@ -808,14 +869,14 @@ export default function AgentsPage() {
                 ...(menuTab === 'pc' ? styles.tabButtonActive : {}),
               }}
             >
-              PC {hostChats.length > 0 ? `(${hostChats.length})` : ''}
+              Projects
             </button>
           </div>
           {menuTab === 'recent' ? (
-            sessions.length === 0 ? (
-              <p style={styles.emptyTabMessage}>No recent chats yet. Start a new chat above.</p>
+            visibleSessions.length === 0 ? (
+              <p style={styles.emptyTabMessage}>{search ? 'No matching conversations.' : 'No conversations yet. Choose New chat to get started.'}</p>
             ) : (
-              sessions.map((s) => {
+              visibleSessions.map((s) => {
                 const needsApproval = Boolean(pendingApprovals[s.agentSessionId]);
                 return (
                 <div
@@ -838,28 +899,14 @@ export default function AgentsPage() {
                     }}
                   >
                     <AgentIcon agentId={s.agent} name={s.title} icon={s.icon} />
-                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                    <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
                       <strong>{s.title}</strong>
+                      <span style={{ ...styles.stateLabel, color: needsApproval || s.taskState === 'waiting' ? '#f5c779' : s.busy ? '#78d9ca' : '#aeb8c1' }}>{conversationState(s, needsApproval)}</span>
                       <span style={needsApproval ? { ...styles.muted, color: '#f0c040' } : styles.muted}>
                         {needsApproval ? 'Waiting for your approval' : chatListSubtitle({ agent: s.agent, cwd: s.cwd })}
                       </span>
+                      {s.preview && <span style={styles.preview}>{s.preview}</span>}
                     </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPicking({ kind: 'folder', session: s })}
-                    title="Change folder"
-                    style={styles.barBtn}
-                  >
-                    📁
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void renameSession(s)}
-                    title="Rename chat"
-                    style={styles.barBtn}
-                  >
-                    ✎
                   </button>
                 </div>
                 );
@@ -867,34 +914,43 @@ export default function AgentsPage() {
             )
           ) : (
             (() => {
-              const visible = hostChats.filter(
-                (c) => !sessions.some((s) => s.hostChatId && s.hostChatId === c.hostChatId),
-              );
-              if (visible.length === 0) {
-                return <p style={styles.emptyTabMessage}>No PC conversations found.</p>;
-              }
-              return visible.map((c) => (
-                <button key={`${c.agent}-${c.hostChatId}`} onClick={() => openHostChat(c)} style={styles.row}>
+              const rows = [
+                ...sessions.map(session => ({ ...session, key: session.agentSessionId, open: () => openSession(session) })),
+                ...hostChats.filter(c => !sessions.some(s => s.agent === c.agent && s.hostChatId === c.hostChatId))
+                  .map(chat => ({ ...chat, key: `${chat.agent}-${chat.hostChatId}`, open: () => openHostChat(chat) })),
+              ].filter(chat => matchesConversation(chat, search));
+              return <>
+              {libraryLoading && <p role="status" style={styles.muted}>Loading PC conversations…</p>}
+              {libraryError && <p role="alert" style={styles.err}>{libraryError}</p>}
+              {!rows.length && !libraryLoading && <p style={styles.emptyTabMessage}>{search ? 'No matching conversations.' : 'No project conversations found.'}</p>}
+              {groupConversations(rows).map(group => <details key={group.path} open style={styles.projectGroup}>
+                <summary style={styles.projectHeading}>{group.path ? folderDisplayName(group.path) : 'Other conversations'} <span style={styles.muted}>· {group.chats.length}</span><span style={styles.projectPath}>{group.path}</span></summary>
+                {group.chats.map(c => <button key={c.key} onClick={() => void c.open()} style={styles.row}>
                   <AgentIcon agentId={c.agent} name={c.title} icon={c.icon} />
                   <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                     <strong>{c.title}</strong>
                     <span style={styles.muted}>
                       {chatListSubtitle({
                         agent: c.agent,
-                        source: c.source,
+                        source: 'source' in c ? c.source as string : undefined,
                         cwd: c.cwd,
-                        resumable: c.resumable,
+                        resumable: 'resumable' in c ? c.resumable as boolean : undefined,
                       })}
                     </span>
                   </div>
-                </button>
-              ));
+                </button>)}
+              </details>)}
+              </>;
             })()
           )}
         </div>
       ) : (
         <>
-          <div ref={listRef} style={styles.chat}>
+          <div style={{ padding: '10px 20px', borderBottom: '1px solid #30383e', color: '#aebec6', fontSize: 12, overflowWrap: 'anywhere' }}>{folderDisplayName(active.cwd) || 'Conversation'} · {conversationState(active)}<span style={{ display: 'block', marginTop: 4 }}>{active.cwd}</span></div>
+          <div ref={listRef} style={styles.chat} onScroll={() => {
+            const list = listRef.current;
+            if (list) followOutputRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 100;
+          }}>
             {mergeToolEvents(events).map((e, i) => (
               <Bubble
                 key={`${e.seq}-${i}`}
@@ -1039,6 +1095,10 @@ export default function AgentsPage() {
       )}
     </div>
   );
+}
+
+export default function AgentsPage() {
+  return <ConnectionProvider><AgentsView /></ConnectionProvider>;
 }
 
 function ComposerMenu({
@@ -1562,9 +1622,7 @@ function Bubble({
   if (e.kind === 'text' || (e.kind === 'result' && e.text)) {
     return (
       <div style={{ ...styles.bubble, ...styles.assistant, background: getAgentThemeBackground(agentId), userSelect: 'text', WebkitUserSelect: 'text' }}>
-        <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'inherit', userSelect: 'text', WebkitUserSelect: 'text' }}>
-          {e.text}
-        </pre>
+        <AgentMarkdown text={e.text ?? ''} />
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
           <button
             type="button"
@@ -1686,13 +1744,13 @@ function Bubble({
       ? 'Command'
       : (e.toolName || 'tool');
     return (
-      <div style={styles.tool}>
-        <strong>
+      <details style={styles.tool} open={running}>
+        <summary style={{ cursor: 'pointer', minHeight: 44, display: 'flex', alignItems: 'center', gap: 8 }}>
           {running ? '▶' : '✓'} {toolLabel}
-        </strong>
+        </summary>
         {displayDetail && displayDetail !== toolLabel && <span style={styles.muted}>{displayDetail}</span>}
         {!running && output && <pre style={styles.out}>{output}</pre>}
-      </div>
+      </details>
     );
   }
   if (e.kind === 'error') return <div style={styles.err}>{e.text}</div>;
@@ -1700,11 +1758,22 @@ function Bubble({
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  newChatButton: { minHeight: 48, padding: '0 16px', borderRadius: 10, background: '#b9eee5', color: '#102923', border: 'none', fontWeight: 700, cursor: 'pointer' },
+  overview: { padding: '14px 0 22px' },
+  eyebrow: { fontSize: 11, letterSpacing: '0.14em', color: '#9eb2b6', margin: '0 0 12px', fontWeight: 600 },
+  overviewTitle: { fontSize: 'clamp(24px, 5vw, 34px)', fontWeight: 600, letterSpacing: '-0.035em', margin: '0 0 10px', lineHeight: 1.2 },
+  overviewSubtitle: { fontSize: 14, color: '#aeb8c1', margin: '0 0 12px', lineHeight: 1.6 },
+  searchField: { boxSizing: 'border-box', width: '100%', minHeight: 48, padding: '12px 14px', border: '1px solid #343b42', borderRadius: 10, background: '#171b1f', color: '#edf1f2', fontSize: 16 },
+  stateLabel: { fontSize: 11, fontWeight: 600, margin: '6px 0' },
+  preview: { fontSize: 13, lineHeight: 1.5, color: '#abb6be', overflow: 'hidden', textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', marginTop: 8, overflowWrap: 'anywhere' },
+  projectGroup: { marginBottom: 18 },
+  projectHeading: { padding: '14px 0', minHeight: 48, boxSizing: 'border-box', color: '#e1e8eb', cursor: 'pointer', overflowWrap: 'anywhere' },
+  projectPath: { display: 'block', color: '#a1adb6', fontSize: 12, margin: '6px 0' },
   wrapper: {
     display: 'flex',
     flexDirection: 'column',
     height: '100dvh',
-    background: '#0a0a0f',
+    background: '#101316',
     color: '#e0e0e0',
     fontFamily: 'system-ui, sans-serif',
   },
@@ -1716,12 +1785,12 @@ const styles: Record<string, React.CSSProperties> = {
     borderBottom: '1px solid #16162a',
   },
   barBtn: {
-    width: 34,
-    height: 30,
+    minWidth: 48,
+    height: 48,
     borderRadius: 8,
     border: '1px solid #22223a',
     background: 'transparent',
-    color: '#888',
+    color: '#b8c4cc',
     cursor: 'pointer',
   },
   title: { flex: 1, textAlign: 'center', fontWeight: 600, fontSize: 14 },
@@ -1745,18 +1814,19 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     cursor: 'pointer',
   },
-  list: { padding: 16, overflowY: 'auto' },
+  list: { padding: '16px 20px', overflowY: 'auto', flex: 1, minHeight: 0, width: '100%', maxWidth: 960, margin: '0 auto', boxSizing: 'border-box' },
   tabContainer: {
     display: 'flex',
     gap: 4,
-    background: '#151522',
-    border: '1px solid #22223a',
+    background: '#171b1f',
+    border: '1px solid #30383e',
     borderRadius: 10,
     padding: 3,
     margin: '16px 0 12px',
   },
   tabButton: {
     flex: 1,
+    minHeight: 48,
     padding: '8px 12px',
     background: 'transparent',
     border: 'none',
@@ -1768,8 +1838,8 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: 'center',
   },
   tabButtonActive: {
-    background: '#2a6aff',
-    color: '#ffffff',
+    background: '#293d3b',
+    color: '#c3f1e8',
     fontWeight: 600,
   },
   emptyTabMessage: {
@@ -1782,7 +1852,7 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
     textTransform: 'uppercase',
     letterSpacing: '0.08em',
-    color: '#556',
+    color: '#a4b1bb',
     margin: '16px 0 8px',
   },
   row: {
@@ -1793,14 +1863,14 @@ const styles: Record<string, React.CSSProperties> = {
     width: '100%',
     padding: '12px 14px',
     marginBottom: 8,
-    background: '#151522',
-    border: '1px solid #22223a',
+    background: '#1a1f23',
+    border: '1px solid #30383e',
     borderRadius: 12,
     color: '#eee',
     cursor: 'pointer',
     textAlign: 'left',
   },
-  muted: { fontSize: 12, color: '#778' },
+  muted: { fontSize: 12, color: '#a6b3bd', overflowWrap: 'anywhere', lineHeight: 1.5 },
   agentRowWrap: { marginBottom: 4 },
   approvalRow: {
     display: 'flex',
@@ -1811,6 +1881,7 @@ const styles: Record<string, React.CSSProperties> = {
     marginBottom: 8,
   },
   approvalChip: {
+    minHeight: 44,
     padding: '4px 10px',
     borderRadius: 999,
     border: '1px solid #33334a',
@@ -1835,10 +1906,10 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     alignSelf: 'flex-start',
   },
-  chat: { flex: 1, overflowY: 'auto', padding: 12 },
+  chat: { flex: 1, overflowY: 'auto', padding: '20px 16px', width: '100%', maxWidth: 960, margin: '0 auto', boxSizing: 'border-box', minHeight: 0 },
   bubble: {
-    maxWidth: '85%',
-    padding: '8px 12px',
+    maxWidth: '100%',
+    padding: '14px 16px',
     borderRadius: 14,
     margin: '6px 0',
     whiteSpace: 'pre-wrap',
@@ -1846,7 +1917,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   user: { marginLeft: 'auto', background: '#9333ea', color: '#fff' },
   assistant: {
-    background: '#151522',
+    background: '#1a1f23',
     fontFamily: 'system-ui, sans-serif',
     margin: '6px 0',
   },
