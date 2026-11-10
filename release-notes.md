@@ -1,3 +1,14 @@
+## NexusLink Test 1.0.49+55
+
+Home is redesigned into a pocket PC launcher with media controls and a persistent dock for your connected computer.
+
+- **Pocket launcher**: A clean matte landscape with direct illustrated shortcuts for Desktop, Remote, Audio, Agents, Terminal, and Files.
+- **PC Dock**: Pinned favourite apps sit in the bottom dock with one-tap access to open windows and sessions via **Running**. Favourites and dock state are shared with Desktop.
+- **Media widget**: When audio or media plays or pauses on your PC, control playback directly from Home, jump straight to the Media tab, or tap **Stop stream** when listening on your phone.
+- **Check and resume**: Fast access to pending approvals and the Continue action for your current PC tasks.
+
+[See preview captures](https://github.com/Obada-Fa/NexusLink/blob/test-v1.0.49%2B55/docs/home-launcher/idle.webp).
+
 ## NexusLink Test 1.0.48+54
 
 Open **Home → Desktop** for a live chart of your PC’s logical CPUs. Each thread has a color. The white trace shows total CPU load.
