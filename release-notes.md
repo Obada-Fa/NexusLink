@@ -1,3 +1,14 @@
+## NexusLink Test 1.0.50+56
+
+Start a coding session on your PC from the phone and follow it in the Claude app, with no desktop stream.
+
+- **Start on PC**: Open **Agents → New chat**, pick or create a folder, then choose **Start for Claude app**. It runs Remote Control in a shell on your PC in that folder. Answer its prompts on the phone, then tap **Open Claude**. The session ends if the PC host restarts.
+- **See and stop**: Sessions started this way are listed under **Agents → Live**. Tap one to return to it, or stop it there.
+- **Home**: Favourite PC apps sit below the shortcuts and the bottom dock shows what is open on your PC. Long-press an app for its actions.
+- **Remote and Settings**: An unpaired Remote reads **Set up** and opens installation help. A Settings gear on Home and on the connection screen reaches phone preferences without a PC.
+
+Opening the Claude app from Nexus and following a session there have not yet been checked on a phone.
+
 ## NexusLink Test 1.0.49+55
 
 Home is redesigned into a pocket PC launcher with media controls and a persistent dock for your connected computer.
