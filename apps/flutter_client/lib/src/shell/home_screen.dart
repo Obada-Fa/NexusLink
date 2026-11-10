@@ -28,6 +28,7 @@ import 'module.dart';
 import 'module_extras.dart';
 import '../state/last_cwd.dart';
 import 'resume_store.dart';
+import 'remote_setup.dart';
 import 'shell_controller.dart';
 import 'shell_navigator.dart';
 import 'target_actions.dart';
@@ -216,6 +217,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   }
 
   void _onTile(HomeTile tile, ModuleContext ctx) {
+    if (tile.status == TileStatus.setup) {
+      unawaited(showRemoteSetup(context, ref, ctx.target));
+      return;
+    }
     final blocked = moduleBlockedReason(tile.module, ctx);
     if (blocked != null) {
       _explainBlocked(tile.module, blocked);
@@ -415,8 +420,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                   contentPadding: EdgeInsets.zero,
                   leading: const Icon(Icons.add_circle_outline),
                   title: const Text('Add Remote'),
-                  subtitle: const Text('Scan the QR code from Nexus Utilities'),
-                  onTap: () => Navigator.pop(context, 'pair'),
+                  subtitle: const Text(
+                    'Trackpad, keyboard and media · Install or pair',
+                  ),
+                  onTap: () => Navigator.pop(context, 'remoteSetup'),
                 ),
               ListTile(
                 contentPadding: EdgeInsets.zero,
@@ -458,6 +465,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     );
     if (!mounted) return;
     switch (action) {
+      case 'remoteSetup':
+        await showRemoteSetup(context, ref, target);
       case 'pair':
         await startPairing(context, ref);
       case 'connect':

@@ -278,6 +278,24 @@ void main() {
     addTearDown(tester.view.reset);
   }
 
+  testWidgets('unpaired Remote setup preview', (tester) async {
+    phone(tester);
+    await TargetStore.save([
+      hubTarget(utilities: {UtilityIds.nexuslink}),
+    ]);
+    await TargetStore.setCurrent('hub-office');
+    await _pumpApp(tester, modules: moduleRegistry, openPorts: {45678});
+    await tester.tap(find.byKey(const ValueKey('tile-remote')));
+    await _settle(tester);
+    expect(find.text('Set up Remote'), findsOneWidget);
+    await _shot(tester, 'remote-setup');
+    await tester.tap(find.text('Install on PC'));
+    await _settle(tester);
+    await _shot(tester, 'remote-install');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('device picker', (tester) async {
     phone(tester);
     await TargetStore.save([

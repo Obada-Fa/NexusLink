@@ -4,6 +4,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nexuslink/main.dart';
@@ -16,6 +17,7 @@ import 'package:nexuslink/src/shell/home_screen.dart';
 import 'package:nexuslink/src/shell/module_registry.dart';
 import 'package:nexuslink/src/shell/reachability.dart';
 import 'package:nexuslink/src/shell/resume_store.dart';
+import 'package:nexuslink/src/shell/remote_setup.dart';
 import 'package:nexuslink/src/shell/shell_controller.dart';
 import 'package:nexuslink/src/shell/target_actions.dart';
 import 'package:nexuslink/src/shell/tiles.dart';
@@ -92,6 +94,43 @@ void main() {
     expect(find.text('Add Remote'), findsOneWidget);
     expect(find.text('Pair a utility'), findsOneWidget);
   });
+
+  testWidgets(
+    'unpaired Remote explains installation and copies PC setup instructions',
+    (tester) async {
+      String? copied;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copied = (call.arguments as Map)['text'] as String;
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+      SharedPreferences.setMockInitialValues({});
+      await _saveOffice();
+      await _pumpHome(tester);
+      expect(find.text('Set up'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('tile-remote')));
+      await tester.pumpAndSettle();
+      expect(find.text('Set up Remote'), findsOneWidget);
+      expect(find.textContaining('cannot tell whether'), findsOneWidget);
+      await tester.tap(find.text('Install on PC'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Windows and Wayland'), findsOneWidget);
+      await tester.ensureVisible(find.text('Copy PC installation link'));
+      await tester.tap(find.text('Copy PC installation link'));
+      await tester.pumpAndSettle();
+      expect(copied, remoteSetupUrl);
+    },
+  );
 
   group('groupTiles', () {
     test('PC tools before Workspace', () {

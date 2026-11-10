@@ -46,7 +46,7 @@ void main() {
     expect(byId['desktop'], TileStatus.ready);
   });
 
-  test('not paired → no tile', () {
+  test('unpaired Remote remains discoverable as setup', () {
     final tiles = homeTiles(
       modules,
       ctxFor(hubTarget(utilities: {UtilityIds.nexuslink}), {
@@ -54,15 +54,15 @@ void main() {
       }),
       platform: TargetPlatform.android,
     );
-    expect(tiles.map((t) => t.module.id), isNot(contains('remote')));
+    expect(
+      tiles.singleWhere((t) => t.module.id == 'remote').status,
+      TileStatus.setup,
+    );
   });
 
   test('before the first probe, or while NexusLink dials → checking', () {
     final ctx = ctxFor(hubTarget(), const {});
-    expect(
-      tileStatus(remote, ctx, probedOnce: false),
-      TileStatus.checking,
-    );
+    expect(tileStatus(remote, ctx, probedOnce: false), TileStatus.checking);
     expect(
       tileStatus(moduleRegistry.first, ctx, nexusLinkConnecting: true),
       TileStatus.checking,

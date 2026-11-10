@@ -158,10 +158,13 @@ void main() {
     await TargetStore.setCurrent('hub-office');
     await pumpApp(tester);
     expect(find.text('Add Remote'), findsNothing);
-    expect(find.byKey(const ValueKey('tile-remote')), findsNothing);
+    expect(find.byKey(const ValueKey('tile-remote')), findsOneWidget);
     await tester.tap(find.byTooltip('Device settings'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Add Remote'));
+    await tester.pumpAndSettle();
+    expect(find.text('Install on PC'), findsOneWidget);
+    await tester.tap(find.text('Scan QR to pair Remote'));
     for (var i = 0; i < 5; i++) {
       await tester.pump(const Duration(milliseconds: 100));
     }

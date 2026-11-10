@@ -1,7 +1,8 @@
 // Home grid tiles: which modules show for the current target and in what
 // state (spec §1): paired + reachable → normal; paired + unreachable →
-// dimmed "Offline"; not paired (or wrong platform) → no tile.
+// dimmed "Offline"; unpaired Remote → setup; other unavailable tools → no tile.
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../session/target.dart';
@@ -11,7 +12,7 @@ import 'module.dart';
 import 'module_extras.dart';
 import 'module_registry.dart';
 
-enum TileStatus { ready, checking, offline }
+enum TileStatus { ready, checking, offline, setup }
 
 class HomeTile {
   const HomeTile(this.module, this.status);
@@ -42,22 +43,36 @@ List<HomeTile> homeTiles(
   TargetPlatform? platform,
   bool nexusLinkConnecting = false,
   bool probedOnce = true,
-}) => [
-  for (final m in modulesFor(
+}) {
+  final available = modulesFor(
     modules,
     capabilities: ctx.capabilities,
     platform: platform,
-  ))
-    HomeTile(
-      m,
-      tileStatus(
-        m,
-        ctx,
-        nexusLinkConnecting: nexusLinkConnecting,
-        probedOnce: probedOnce,
+  );
+  // Remote remains discoverable before pairing without advertising it as ready.
+  final phonePlatform = platform ?? defaultTargetPlatform;
+  for (final module in modules) {
+    if (module.id == 'remote' &&
+        module.platforms.contains(phonePlatform) &&
+        !available.any((m) => m.id == module.id)) {
+      available.add(module);
+    }
+  }
+  return [
+    for (final module in available)
+      HomeTile(
+        module,
+        module.id == 'remote' && !module.requires.isMetBy(ctx.capabilities)
+            ? TileStatus.setup
+            : tileStatus(
+                module,
+                ctx,
+                nexusLinkConnecting: nexusLinkConnecting,
+                probedOnce: probedOnce,
+              ),
       ),
-    ),
-];
+  ];
+}
 
 /// Home groups tools by what they're for (refine plan §1).
 enum ToolGroup { pcTools, workspace }
@@ -149,15 +164,22 @@ class ModuleTile extends StatelessWidget {
 
   Widget _build(BuildContext context, String? blocked) {
     final module = tile.module;
-    final status = blocked == null ? tile.status : TileStatus.offline;
+    final status = tile.status == TileStatus.setup || blocked == null
+        ? tile.status
+        : TileStatus.offline;
     final statusLabel = switch (status) {
       TileStatus.ready => 'Ready',
       TileStatus.checking => checkingLabel,
       TileStatus.offline => 'Offline',
+      TileStatus.setup => 'Set up',
     };
     return Semantics(
       button: true,
-      label: [module.title, statusLabel, ?blocked].join(', '),
+      label: [
+        module.title,
+        statusLabel,
+        if (status != TileStatus.setup && blocked != null) blocked,
+      ].join(', '),
       excludeSemantics: true,
       child: InkWell(
         key: ValueKey('tile-${module.id}'),
