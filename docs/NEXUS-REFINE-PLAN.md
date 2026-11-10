@@ -43,6 +43,11 @@ I’d keep the dark visual identity, the direct access to PC tools, and the pixe
 
 ## Progress log
 
+- 2026-11-10, Start on PC:
+  - Agents → New chat now asks, after the folder picker, **Chat here in Nexus** or **Start for Claude app**. The second runs `claude remote-control --name=<name>` in an ordinary Nexus shell in that folder (`lib/src/claude_app/`), shown under a banner with **Open Claude** and **Stop**. Running sessions are listed under Agents → Live and reconciled against the host's shell list. No host change; names are single-quoted and stripped of control characters.
+  - Verified: analysis clean; 534 passed, 4 skipped. Hostile names checked against real bash and the host's PTY path. A real Remote Control session started through the host's terminal handlers reached Connected and stopped cleanly.
+  - Not verified: the Kotlin `app.launch` case is not compiled (no APK built); Open Claude on a phone; sending a message to the session from the Claude app; the full WebSocket path for `terminal.create` / `terminal.input`; non-POSIX login shells such as fish.
+
 - 2026-11-10, web stream information bar:
   - The top bar's background and informational text now pass pointer input through to the streamed app or desktop. Home, quality, keyboard and Close app controls retain their own clickable areas.
   - Verified: 48 web tests and production build passed. Deployed release `20261110-120534`; host restarted and reported listening. HTTP checks confirmed the live mirror bundle includes pass-through styling on the bar, clickable styling on buttons and quality selection, and the service worker references the updated bundle. User-side pointer interaction remains unverified.

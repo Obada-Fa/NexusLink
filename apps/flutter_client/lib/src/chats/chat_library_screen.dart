@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../rpc/rpc_client.dart';
+import '../claude_app/claude_app_live_section.dart';
+import '../claude_app/new_chat_choice.dart';
 import '../screens/agent_screen.dart';
 import '../state/connection.dart';
 import '../shell/resume_store.dart';
@@ -484,10 +486,16 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
       ? 'Connecting to your agents…'
       : 'Live · ${ref.read(activeClientProvider)?.hostId == null ? 'PC' : 'synced ${TimeOfDay.fromDateTime(_receivedAt!).format(context)}'}';
 
-  void _newChat() => Navigator.of(context).push(
-    MaterialPageRoute<void>(
-      builder: (_) =>
-          AgentScreen(startNew: true, initialFolder: widget.folder?.path),
+  void _newChat({String? folder}) => unawaited(
+    startNewChatFlow(
+      context: context,
+      ref: ref,
+      folder: folder ?? widget.folder?.path,
+      openNexusChat: (cwd) => Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => AgentScreen(startNew: true, initialFolder: cwd),
+        ),
+      ),
     ),
   );
 
@@ -915,12 +923,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
             offline: offline || _saved,
             onOpen: _open,
             onActions: _chatActions,
-            onNewChat: (path) => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) =>
-                    AgentScreen(startNew: true, initialFolder: path),
-              ),
-            ),
+            onNewChat: (path) => _newChat(folder: path),
             loadProjects: _arenaProjects,
             onLoadMore: _cursor == null ? null : () => _load(more: true),
             loadingMore: _moreLoading,
@@ -977,6 +980,9 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
             ],
           ),
         ],
+        // Shells this phone started on the PC for the Claude app.
+        if (top && !offline && !_saved && showRunning)
+          const ClaudeAppLiveSection(),
         if (showRunning && running.isNotEmpty) ...[
           SliverToBoxAdapter(
             child: NxSectionHeader(
@@ -1113,7 +1119,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
           ? null
           : FloatingActionButton.extended(
               key: const ValueKey('new-chat'),
-              onPressed: _newChat,
+              onPressed: () => _newChat(),
               icon: const Icon(Icons.add_comment_outlined),
               label: const Text('New chat'),
             ),

@@ -44,6 +44,8 @@ class MainActivity : FlutterActivity() {
                     "credential.get" -> result.success(Credentials.get(this,text("host")))
                     "credential.set" -> { Credentials.put(this,text("host"),text("value"));result.success(null) }
                     "credential.remove" -> { Credentials.remove(this,text("host"));result.success(null) }
+                    // Opens another installed app by package id; false when it is not installed.
+                    "app.launch" -> { val launch=packageManager.getLaunchIntentForPackage(text("package")); if(launch==null) result.success(false) else { startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));result.success(true) } }
                     "download.start" -> {
                         if(Build.VERSION.SDK_INT<29 && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)!=PackageManager.PERMISSION_GRANTED) {
                             permissionResult=result;permissionArgs=args;requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),45)

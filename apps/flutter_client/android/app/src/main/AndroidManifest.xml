@@ -77,6 +77,8 @@
 
          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <queries>
+        <!-- Start on PC → Open Claude: launch the Claude app if installed. -->
+        <package android:name="com.anthropic.claude" />
         <!-- Speech to text: service + recognize intent for Android 11+ -->
         <intent>
             <action android:name="android.speech.RecognitionService" />
