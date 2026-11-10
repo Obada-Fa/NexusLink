@@ -22,9 +22,12 @@ The user service should not run straight out of a development checkout: an unfin
 
 ```bash
 bash scripts/deploy-host.sh              # deploy the current working tree
+bash scripts/deploy-host.sh --with-web   # build and deploy the browser client too
 bash scripts/deploy-host.sh stable       # deploy a git ref, e.g. the saved stable version
 bash scripts/deploy-host.sh --rollback   # return to the previous release
 ```
+
+For browser access at `http://<pc-ip>:45678`, deploy once with `--with-web` (after installing workspace dependencies). The export is stored inside the frozen release; later host-only deployments preserve that web client. Run `--with-web` again to rebuild it after web changes. This option builds the current checkout and cannot be combined with a git ref or rollback. Rolling back restores the web assets, if any, in that release. A page showing only `NexusLink RPC` means the running release has no web export; it is the backend's fallback response. The browser client is the existing PWA and does not have all the newer Flutter app screens.
 
 The host binds only to the PC's Tailscale address (`NEXUSLINK_TAILSCALE_ONLY=1`). At boot it waits up to two minutes for Tailscale to obtain an address, then exits with an error so systemd retries; it never stays alive without a listener.
 

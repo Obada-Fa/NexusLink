@@ -6,6 +6,7 @@
 #   scripts/deploy-host.sh                 # deploy the current working tree
 #   scripts/deploy-host.sh stable          # deploy any git ref (branch, tag, commit) — e.g. roll back
 #   scripts/deploy-host.sh --no-restart    # stage + verify only
+#   scripts/deploy-host.sh --with-web      # build and include the browser client
 #   scripts/deploy-host.sh --rollback      # switch back to the previous release
 #
 # Releases live in ~/.local/share/nexuslink-host/releases/<stamp>; `current` points at the live one.
@@ -18,14 +19,28 @@ BUN="${BUN:-$(command -v bun || echo "$HOME/.nvm/versions/node/v24.15.0/bin/bun"
 REF=""
 RESTART=1
 ROLLBACK=0
+WITH_WEB=0
 for arg in "$@"; do
   case "$arg" in
     --no-restart) RESTART=0 ;;
     --rollback) ROLLBACK=1 ;;
+    --with-web) WITH_WEB=1 ;;
     -*) echo "Unknown option: $arg" >&2; exit 2 ;;
     *) REF="$arg" ;;
   esac
 done
+
+if [[ $WITH_WEB -eq 1 && ( -n "$REF" || $ROLLBACK -eq 1 ) ]]; then
+  echo "--with-web builds the current checkout; use it without a git ref or --rollback." >&2
+  exit 2
+fi
+
+# Build before staging or switching the release. A failed web build leaves the
+# running host untouched and cannot silently deploy an older export.
+if [[ $WITH_WEB -eq 1 ]]; then
+  "$BUN" run --cwd "$REPO/apps/mobile-client" build
+  [[ -s "$REPO/apps/mobile-client/out/index.html" ]] || { echo "Web build produced no index.html; not deployed." >&2; exit 1; }
+fi
 
 mkdir -p "$BASE/releases"
 
@@ -72,6 +87,16 @@ fi
 mkdir -p "$DEST/apps/desktop/node_modules"
 cp -aL "$REPO/apps/desktop/node_modules/qrcode-terminal" "$DEST/apps/desktop/node_modules/"
 echo "$LABEL" > "$DEST/DEPLOYED_FROM"
+
+# Freeze web assets with the backend. Keep an enabled web client on subsequent
+# host-only updates; --with-web explicitly rebuilds it from the checkout.
+WEB_SOURCE="$(readlink -f "$BASE/current" 2>/dev/null || true)/apps/mobile-client/out"
+if [[ $WITH_WEB -eq 1 ]]; then WEB_SOURCE="$REPO/apps/mobile-client/out"; fi
+if [[ -s "$WEB_SOURCE/index.html" ]]; then
+  mkdir -p "$DEST/apps/mobile-client"
+  cp -a "$WEB_SOURCE" "$DEST/apps/mobile-client/out"
+  echo "Browser client included from $WEB_SOURCE"
+fi
 
 # Verify every import resolves and parses before switching.
 if ! "$BUN" build "$DEST/apps/desktop/src/server/index.ts" --target=bun --outdir "$DEST/.verify" >/dev/null 2>"$DEST/verify.log"; then
