@@ -512,7 +512,7 @@ export default function MirrorPage() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  qualitySelect: { minHeight: 44, maxWidth: 108, borderRadius: 8, border: '1px solid #343a40', background: '#17191c', color: '#e5e8eb', padding: '0 6px', fontSize: 12 },
+  qualitySelect: { pointerEvents: 'auto', minHeight: 44, maxWidth: 108, borderRadius: 8, border: '1px solid #343a40', background: '#17191c', color: '#e5e8eb', padding: '0 6px', fontSize: 12 },
   wrapper: {
     position: 'relative',
     height: '100dvh',
@@ -522,6 +522,9 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
   },
   topBar: {
+    // Stream information stays visible while input reaches the viewport below.
+    // Only actual controls opt back into hit testing.
+    pointerEvents: 'none',
     position: 'absolute',
     top: 0,
     left: 0,
@@ -534,6 +537,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'rgba(10,10,15,0.55)',
   },
   barBtn: {
+    pointerEvents: 'auto',
     width: 34,
     height: 30,
     borderRadius: 8,

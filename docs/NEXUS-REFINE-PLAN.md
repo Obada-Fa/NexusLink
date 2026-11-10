@@ -43,6 +43,10 @@ I’d keep the dark visual identity, the direct access to PC tools, and the pixe
 
 ## Progress log
 
+- 2026-11-10, web stream information bar:
+  - The top bar's background and informational text now pass pointer input through to the streamed app or desktop. Home, quality, keyboard and Close app controls retain their own clickable areas.
+  - Verified: 48 web tests and production build passed. Deployed release `20261110-120534`; host restarted and reported listening. HTTP checks confirmed the live mirror bundle includes pass-through styling on the bar, clickable styling on buttons and quality selection, and the service worker references the updated bundle. User-side pointer interaction remains unverified.
+
 - 2026-11-10, full-desktop mouse verification:
   - Home's Desktop action opens `/mirror` with no app target; it shares the deployed native mouse handler with app streams. Capture supplies the physical monitor region, and inputs omit the virtual session ID.
   - Added regressions for full-desktop hover, dragging, right-click and scrolling, plus a monitor offset. All 48 web tests passed. HTTP verification confirmed the live Desktop route serves the deployed mouse bundle. No runtime change or additional restart was needed; a live laptop walkthrough remains unverified.
