@@ -101,7 +101,10 @@ class _WorkspaceShellState extends ConsumerState<WorkspaceShell>
     if (hostSupportsMonitor(client)) {
       // Rich vitals for the strip; the PC tab drives its own faster demand.
       client?.demand('shell', 0);
-      client?.demand('monitor:strip', _foreground && show && tab != 3 ? 5000 : 0);
+      client?.demand(
+        'monitor:strip',
+        _foreground && show && tab != 3 ? 5000 : 0,
+      );
     } else {
       client?.demand(
         'shell',
@@ -224,10 +227,23 @@ class PcStatsStrip extends ConsumerWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Container(width: 6, height: 6, decoration: BoxDecoration(shape: BoxShape.circle, color: NX.heat(pct ?? 0))),
+            Container(
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: NX.heat(pct ?? 0),
+              ),
+            ),
             const SizedBox(width: 4),
-            Text('$label ${pct == null ? '—' : '${pct.round()}%'}${extra ?? ''}',
-                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFeatures: NX.tabular)),
+            Text(
+              '$label ${pct == null ? '—' : '${pct.round()}%'}${extra ?? ''}',
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                fontFeatures: NX.tabular,
+              ),
+            ),
           ],
         ),
       );
@@ -244,8 +260,21 @@ class PcStatsStrip extends ConsumerWidget {
               children: [
                 const LiveDot(color: NX.working, size: 6, pulse: false),
                 const SizedBox(width: 4),
-                Expanded(child: Text(vitals.hostname, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, color: NX.textDim))),
-                stat('CPU', vitals.cpu, extra: vitals.cpuTempC == null ? null : ' ${vitals.cpuTempC!.round()}°'),
+                Expanded(
+                  child: Text(
+                    vitals.hostname,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12, color: NX.textDim),
+                  ),
+                ),
+                stat(
+                  'CPU',
+                  vitals.cpu,
+                  extra: vitals.cpuTempC == null
+                      ? null
+                      : ' ${vitals.cpuTempC!.round()}°',
+                ),
                 stat('GPU', vitals.mainGpu?.busy),
                 stat('RAM', vitals.ramPercent),
               ],
@@ -304,7 +333,10 @@ class PcStatsStrip extends ConsumerWidget {
 }
 
 class PcScreen extends ConsumerStatefulWidget {
-  const PcScreen({super.key});
+  const PcScreen({super.key, this.phoneFirst = false});
+
+  /// Home opens phone controls first; the Desktop menu keeps PC controls first.
+  final bool phoneFirst;
   @override
   ConsumerState<PcScreen> createState() => _PcScreenState();
 }
@@ -428,6 +460,212 @@ class _PcScreenState extends ConsumerState<PcScreen>
   Widget build(BuildContext context) {
     final data = ref.watch(metricsProvider);
     final settings = ref.watch(workspaceSettingsProvider);
+    final pcSettings = <Widget>[
+      const _SettingsGroup('This PC'),
+      Text(
+        _info?['hostname'] ?? 'PC',
+        style: Theme.of(context).textTheme.headlineSmall,
+      ),
+      Text(ref.watch(connectionProvider).hostUrl ?? ''),
+      const SizedBox(height: 16),
+      if (data != null) ...[
+        ListTile(
+          title: const Text('CPU'),
+          subtitle: LinearProgressIndicator(
+            value: ((data['cpuPercent'] as num? ?? 0) / 100).clamp(0, 1),
+          ),
+          trailing: Text(
+            '${(data['cpuPercent'] as num?)?.toStringAsFixed(0)}%',
+          ),
+        ),
+        ListTile(
+          title: const Text('Memory'),
+          subtitle: LinearProgressIndicator(
+            value: ((data['ramPercent'] as num? ?? 0) / 100).clamp(0, 1),
+          ),
+          trailing: Text('${data['ramUsedGb']} GB'),
+        ),
+        if (data['diskFreeBytes'] != null)
+          ListTile(
+            title: const Text('Disk available'),
+            trailing: Text(
+              '${((data['diskFreeBytes'] as num) / 1073741824).toStringAsFixed(1)} GB',
+            ),
+          ),
+      ],
+      if (_info != null) ...[
+        ListTile(
+          title: const Text('CPU model'),
+          subtitle: Text('${_info!['cpuModel']}'),
+        ),
+        ListTile(
+          title: const Text('Operating system'),
+          subtitle: Text('${_info!['os']}'),
+        ),
+      ],
+      // Access and repair for this PC (moved here from PC details).
+      const MonitorDemand(
+        owner: 'pc-settings',
+        intervalMs: 5000,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            PhoneApprovalsSection(key: ValueKey('pc-approvals')),
+            RemoteAccessSection(key: ValueKey('pc-remote')),
+            SizedBox(height: 12),
+          ],
+        ),
+      ),
+      ListTile(
+        leading: const Icon(Icons.link_off),
+        title: const Text('Disconnect PC'),
+        subtitle: const Text('PC agents and shells keep running'),
+        onTap: () async {
+          if (Platform.isAndroid) await PlatformBridge.call('live.stop');
+          ref.read(connectionProvider.notifier).disconnect();
+          if (context.mounted) {
+            Navigator.of(
+              context,
+              rootNavigator: true,
+            ).popUntil((route) => route.isFirst);
+          }
+        },
+      ),
+    ];
+    final phoneSettings = <Widget>[
+      const _SettingsGroup('This phone'),
+      SwitchListTile(
+        title: const Text('PC status strip'),
+        subtitle: const Text('CPU and memory above navigation'),
+        value: settings['stats'] == true,
+        onChanged: (value) async {
+          ref.read(workspaceSettingsProvider.notifier).set('stats', value);
+          (await SharedPreferences.getInstance()).setBool(
+            'workspace.stats',
+            value,
+          );
+        },
+      ),
+      if (Platform.isAndroid) ...[
+        SwitchListTile(
+          title: const Text('Live notifications'),
+          subtitle: Text(
+            'Monitoring: ${_liveStatus['connectionState'] ?? 'stopped'} · Notifications: ${_liveStatus['notificationPermission'] == true && _liveStatus['notificationChannelAvailable'] == true ? 'available' : 'unavailable'}',
+          ),
+          value: _live,
+          onChanged: (v) => _setLive(v),
+        ),
+        SwitchListTile(
+          title: const Text('Floating pet monitor'),
+          subtitle: Text(
+            _liveStatus['bubbleVisible'] == true
+                ? 'Visible · Running and recent conversations, updated live'
+                : (_liveStatus['overlay'] != true
+                      ? 'Display over other apps permission needed'
+                      : _bubble
+                      ? 'Ready in the background · Hidden while this app is open or the phone is locked'
+                      : 'Off · Follow important PC updates with your pet'),
+          ),
+          value: _bubble,
+          onChanged: (value) async {
+            if (value) {
+              final status = await PlatformBridge.call('live.status');
+              if (status['overlay'] != true) {
+                if (!context.mounted) return;
+                final proceed = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: const Text('Allow floating pet'),
+                    content: const Text(
+                      'In Android Settings, choose Nexus (or Nexus Test) and enable Display over other apps. This is separate from notification bubbles. Return here, then go to your home screen to see the bubble.',
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, false),
+                        child: const Text('Later'),
+                      ),
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, true),
+                        child: const Text('Open settings'),
+                      ),
+                    ],
+                  ),
+                );
+                if (proceed != true) return;
+                _awaitingOverlayPermission = true;
+                await _openLiveSettings('live.permission');
+                return;
+              }
+            }
+            _awaitingOverlayPermission = false;
+            await _setLive(value || _live, bubble: value);
+          },
+        ),
+        SwitchListTile(
+          title: const Text('Notification actions'),
+          subtitle: Text(
+            ref.read(activeClientProvider)?.supports('activity.actions.v1') ==
+                    true
+                ? 'Allow approve, deny, and text reply from notifications'
+                : 'Update the PC host to enable watch actions',
+          ),
+          value: _liveStatus['notificationActionsEnabled'] == true,
+          onChanged:
+              ref.read(activeClientProvider)?.supports('activity.actions.v1') ==
+                  true
+              ? (value) async {
+                  await PlatformBridge.call('live.configureActions', {
+                    'enabled': value,
+                    'locked':
+                        value && _liveStatus['actionsAllowedLocked'] == true,
+                  });
+                  await _load();
+                }
+              : null,
+        ),
+        SwitchListTile(
+          title: const Text('Allow actions while phone is locked'),
+          subtitle: const Text(
+            'Permits notification actions without unlocking the phone. This does not verify who is wearing the watch.',
+          ),
+          value: _liveStatus['actionsAllowedLocked'] == true,
+          onChanged:
+              ref.read(activeClientProvider)?.supports('activity.actions.v1') ==
+                  true
+              ? (value) async {
+                  await PlatformBridge.call('live.configureActions', {
+                    'enabled':
+                        value ||
+                        _liveStatus['notificationActionsEnabled'] == true,
+                    'locked': value,
+                  });
+                  await _load();
+                }
+              : null,
+        ),
+        ListTile(
+          leading: const Icon(Icons.watch_outlined),
+          title: const Text('Send test notification'),
+          subtitle: const Text(
+            'In Mobvoi Health, enable notifications for this installed Nexus app. Check the watch itself for delivery.',
+          ),
+          onTap: () async {
+            final status = await PlatformBridge.call('live.testNotification');
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    status['posted'] == true
+                        ? 'Posted on the phone. Confirm delivery on the TicWatch.'
+                        : 'Phone notifications are unavailable. Check notification permission and channel settings.',
+                  ),
+                ),
+              );
+            }
+          },
+        ),
+      ],
+    ];
     return Scaffold(
       appBar: AppBar(
         title: const Text('Settings'),
@@ -444,216 +682,12 @@ class _PcScreenState extends ConsumerState<PcScreen>
         children: [
           if (_error != null)
             Text(_error!, style: const TextStyle(color: Colors.amber)),
-          const _SettingsGroup('This PC'),
-          Text(
-            _info?['hostname'] ?? 'PC',
-            style: Theme.of(context).textTheme.headlineSmall,
-          ),
-          Text(ref.watch(connectionProvider).hostUrl ?? ''),
-          const SizedBox(height: 16),
-          if (data != null) ...[
-            ListTile(
-              title: const Text('CPU'),
-              subtitle: LinearProgressIndicator(
-                value: ((data['cpuPercent'] as num? ?? 0) / 100).clamp(0, 1),
-              ),
-              trailing: Text(
-                '${(data['cpuPercent'] as num?)?.toStringAsFixed(0)}%',
-              ),
-            ),
-            ListTile(
-              title: const Text('Memory'),
-              subtitle: LinearProgressIndicator(
-                value: ((data['ramPercent'] as num? ?? 0) / 100).clamp(0, 1),
-              ),
-              trailing: Text('${data['ramUsedGb']} GB'),
-            ),
-            if (data['diskFreeBytes'] != null)
-              ListTile(
-                title: const Text('Disk available'),
-                trailing: Text(
-                  '${((data['diskFreeBytes'] as num) / 1073741824).toStringAsFixed(1)} GB',
-                ),
-              ),
-          ],
-          if (_info != null) ...[
-            ListTile(
-              title: const Text('CPU model'),
-              subtitle: Text('${_info!['cpuModel']}'),
-            ),
-            ListTile(
-              title: const Text('Operating system'),
-              subtitle: Text('${_info!['os']}'),
-            ),
-          ],
-          // Access and repair for this PC (moved here from PC details).
-          const MonitorDemand(
-            owner: 'pc-settings',
-            intervalMs: 5000,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                PhoneApprovalsSection(key: ValueKey('pc-approvals')),
-                RemoteAccessSection(key: ValueKey('pc-remote')),
-                SizedBox(height: 12),
-              ],
-            ),
-          ),
-          ListTile(
-            leading: const Icon(Icons.link_off),
-            title: const Text('Disconnect PC'),
-            subtitle: const Text('PC agents and shells keep running'),
-            onTap: () async {
-              if (Platform.isAndroid) await PlatformBridge.call('live.stop');
-              ref.read(connectionProvider.notifier).disconnect();
-              if (context.mounted) {
-                Navigator.of(
-                  context,
-                  rootNavigator: true,
-                ).popUntil((route) => route.isFirst);
-              }
-            },
-          ),
-          const _SettingsGroup('This phone'),
-          SwitchListTile(
-            title: const Text('PC status strip'),
-            subtitle: const Text('CPU and memory above navigation'),
-            value: settings['stats'] == true,
-            onChanged: (value) async {
-              ref.read(workspaceSettingsProvider.notifier).set('stats', value);
-              (await SharedPreferences.getInstance()).setBool(
-                'workspace.stats',
-                value,
-              );
-            },
-          ),
-          if (Platform.isAndroid) ...[
-            SwitchListTile(
-              title: const Text('Live activity'),
-              subtitle: Text(
-                'Monitoring: ${_liveStatus['connectionState'] ?? 'stopped'} · Notifications: ${_liveStatus['notificationPermission'] == true && _liveStatus['notificationChannelAvailable'] == true ? 'available' : 'unavailable'}',
-              ),
-              value: _live,
-              onChanged: (v) => _setLive(v),
-            ),
-            SwitchListTile(
-              title: const Text('Floating pet monitor'),
-              subtitle: Text(
-                _liveStatus['bubbleVisible'] == true
-                    ? 'Visible · Running and recent conversations, updated live'
-                    : (_liveStatus['overlay'] != true
-                          ? 'Display over other apps permission needed'
-                          : _bubble
-                          ? 'Ready in the background · Hidden while this app is open or the phone is locked'
-                          : 'Off · Follow important PC updates with your pet'),
-              ),
-              value: _bubble,
-              onChanged: (value) async {
-                if (value) {
-                  final status = await PlatformBridge.call('live.status');
-                  if (status['overlay'] != true) {
-                    if (!context.mounted) return;
-                    final proceed = await showDialog<bool>(
-                      context: context,
-                      builder: (ctx) => AlertDialog(
-                        title: const Text('Allow floating pet'),
-                        content: const Text(
-                          'In Android Settings, choose Nexus (or Nexus Test) and enable Display over other apps. This is separate from notification bubbles. Return here, then go to your home screen to see the bubble.',
-                        ),
-                        actions: [
-                          TextButton(
-                            onPressed: () => Navigator.pop(ctx, false),
-                            child: const Text('Later'),
-                          ),
-                          TextButton(
-                            onPressed: () => Navigator.pop(ctx, true),
-                            child: const Text('Open settings'),
-                          ),
-                        ],
-                      ),
-                    );
-                    if (proceed != true) return;
-                    _awaitingOverlayPermission = true;
-                    await _openLiveSettings('live.permission');
-                    return;
-                  }
-                }
-                _awaitingOverlayPermission = false;
-                await _setLive(value || _live, bubble: value);
-              },
-            ),
-            SwitchListTile(
-              title: const Text('Notification actions'),
-              subtitle: Text(
-                ref
-                            .read(activeClientProvider)
-                            ?.supports('activity.actions.v1') ==
-                        true
-                    ? 'Allow approve, deny, and text reply from notifications'
-                    : 'Update the PC host to enable watch actions',
-              ),
-              value: _liveStatus['notificationActionsEnabled'] == true,
-              onChanged:
-                  ref
-                          .read(activeClientProvider)
-                          ?.supports('activity.actions.v1') ==
-                      true
-                  ? (value) async {
-                      await PlatformBridge.call('live.configureActions', {
-                        'enabled': value,
-                        'locked':
-                            value &&
-                            _liveStatus['actionsAllowedLocked'] == true,
-                      });
-                      await _load();
-                    }
-                  : null,
-            ),
-            SwitchListTile(
-              title: const Text('Allow actions while phone is locked'),
-              subtitle: const Text(
-                'Permits notification actions without unlocking the phone. This does not verify who is wearing the watch.',
-              ),
-              value: _liveStatus['actionsAllowedLocked'] == true,
-              onChanged:
-                  ref
-                          .read(activeClientProvider)
-                          ?.supports('activity.actions.v1') ==
-                      true
-                  ? (value) async {
-                      await PlatformBridge.call('live.configureActions', {
-                        'enabled':
-                            value ||
-                            _liveStatus['notificationActionsEnabled'] == true,
-                        'locked': value,
-                      });
-                      await _load();
-                    }
-                  : null,
-            ),
-            ListTile(
-              leading: const Icon(Icons.watch_outlined),
-              title: const Text('Send test notification'),
-              subtitle: const Text(
-                'In Mobvoi Health, enable notifications for this installed Nexus app. Check the watch itself for delivery.',
-              ),
-              onTap: () async {
-                final status = await PlatformBridge.call(
-                  'live.testNotification',
-                );
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        status['posted'] == true
-                            ? 'Posted on the phone. Confirm delivery on the TicWatch.'
-                            : 'Phone notifications are unavailable. Check notification permission and channel settings.',
-                      ),
-                    ),
-                  );
-                }
-              },
-            ),
+          if (widget.phoneFirst) ...[
+            ...phoneSettings,
+            ...pcSettings,
+          ] else ...[
+            ...pcSettings,
+            ...phoneSettings,
           ],
         ],
       ),

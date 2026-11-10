@@ -14,6 +14,7 @@ import '../state/last_host.dart';
 import '../theme/nexus_theme.dart';
 import '../theme/nx_widgets.dart';
 import 'auto_connect.dart';
+import 'app_settings_button.dart';
 import 'shell_controller.dart';
 import 'target_actions.dart';
 
@@ -190,7 +191,13 @@ class _DevicePickerScreenState extends ConsumerState<DevicePickerScreen> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 12, 20, 32),
           children: [
-            if (widget.isRoot) const _BrandHeader(),
+            if (widget.isRoot)
+              const Stack(
+                children: [
+                  _BrandHeader(),
+                  Positioned(top: 0, right: 0, child: AppSettingsButton()),
+                ],
+              ),
             if (_connecting &&
                 targets.any((t) => nexusLinkUrlOf(t) == _connectingUrl))
               _ConnectingCard(

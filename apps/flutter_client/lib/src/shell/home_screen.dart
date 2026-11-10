@@ -18,6 +18,7 @@ import '../theme/nx_widgets.dart';
 import '../workspace/platform_bridge.dart';
 import '../workspace/project.dart';
 import 'auto_connect.dart';
+import 'app_settings_button.dart';
 import 'device_picker.dart';
 import '../modules/remote/remote_module.dart';
 import 'home_art.dart';
@@ -644,6 +645,7 @@ class _HomeView extends ConsumerWidget {
                     onPressed: onDeviceSettings,
                     icon: const Icon(Icons.tune_rounded, color: NX.textDim),
                   ),
+                  const AppSettingsButton(),
                 ],
               ),
             ),

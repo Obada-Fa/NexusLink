@@ -24,6 +24,7 @@ import 'package:nexuslink/src/shell/tiles.dart';
 import 'package:nexuslink/src/state/connection.dart';
 import 'package:nexuslink/src/state/wake_config.dart';
 import 'package:nexuslink/src/workspace/platform_bridge.dart';
+import 'package:nexuslink/src/workspace/workspace_shell.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'fake_connection.dart';
@@ -76,6 +77,51 @@ void main() {
     FakeConnection.connects.clear();
     FakeConnection.failWith = null;
     resetAutoConnect();
+  });
+
+  testWidgets(
+    'Home settings opens phone controls while the PC is offline and Back returns Home',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await _saveOffice();
+      await _pumpHome(tester);
+      expect(
+        tester
+            .getSize(find.byKey(const ValueKey('home-settings')))
+            .shortestSide,
+        greaterThanOrEqualTo(48),
+      );
+      await tester.tap(find.byTooltip('Settings'));
+      await tester.pumpAndSettle();
+      expect(tester.widget<PcScreen>(find.byType(PcScreen)).phoneFirst, isTrue);
+      expect(find.text('THIS PHONE'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('THIS PHONE')).dy,
+        lessThan(tester.getTopLeft(find.text('THIS PC')).dy),
+      );
+      expect(find.text('PC status strip'), findsOneWidget);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('pc-selector')), findsOneWidget);
+    },
+  );
+
+  testWidgets('Settings remains available before pairing a PC at large text', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(tester.view.reset);
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await _pumpHome(tester);
+    expect(find.byTooltip('Settings'), findsOneWidget);
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PcScreen), findsOneWidget);
+    expect(find.text('THIS PHONE'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('Add Remote is in Device settings, away from the Home grid', (
