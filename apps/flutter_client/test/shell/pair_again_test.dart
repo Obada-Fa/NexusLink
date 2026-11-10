@@ -148,7 +148,7 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('a NexusLink-only target offers "Add Remote and Audio"', (
+  testWidgets('a NexusLink-only target pairs Remote from Device settings', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(412 * 2, 915 * 2);
@@ -157,17 +157,11 @@ void main() {
     await TargetStore.save([hubTarget(utilities: {UtilityIds.nexuslink})]);
     await TargetStore.setCurrent('hub-office');
     await pumpApp(tester);
-    final card = find.text(
-      'Add Remote and Audio: scan the QR code from Nexus Utilities.',
-    );
-    await tester.scrollUntilVisible(
-      card,
-      200,
-      scrollable: find.byType(Scrollable).first,
-    );
-    expect(card, findsOneWidget);
+    expect(find.text('Add Remote'), findsNothing);
     expect(find.byKey(const ValueKey('tile-remote')), findsNothing);
-    await tester.tap(card);
+    await tester.tap(find.byTooltip('Device settings'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add Remote'));
     for (var i = 0; i < 5; i++) {
       await tester.pump(const Duration(milliseconds: 100));
     }

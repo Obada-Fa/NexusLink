@@ -13,139 +13,174 @@ import '../state/launcher_preferences.dart';
 import '../theme/nexus_theme.dart';
 import '../widgets/app_icon.dart';
 import 'auto_connect.dart';
+import 'tiles.dart';
 
-/// Pinned PC apps and running work, scoped to the selected, connected PC.
+/// Favourites on Home and running apps in its bottom bar.
 class HomeDock extends ConsumerWidget {
-  const HomeDock({super.key, required this.target, required this.visible});
+  const HomeDock({
+    super.key,
+    required this.target,
+    required this.visible,
+    this.favourites = false,
+  });
   final SavedTarget target;
   final bool visible;
-
+  final bool favourites;
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (!visible) return const SizedBox.shrink();
-    final connection = ref.watch(connectionProvider);
+    final c = ref.watch(connectionProvider);
     final host = nexusLinkUrlOf(target);
-    if (host == null ||
-        connection.hostUrl != host ||
-        connection.status != RpcStatus.connected ||
-        connection.client == null) {
+    if (!visible ||
+        host == null ||
+        c.hostUrl != host ||
+        c.status != RpcStatus.connected ||
+        c.client == null) {
       return const SizedBox.shrink();
     }
-    final client = connection.client!;
-    final capabilities = client.capabilities['capabilities'];
-    if (client.capabilities.isNotEmpty &&
-        !client.supports('apps.list') &&
+    final capabilities = c.client!.capabilities['capabilities'];
+    if (c.client!.capabilities.isNotEmpty &&
+        !c.client!.supports('apps.list') &&
         !(capabilities is List && capabilities.contains('apps'))) {
       return const SizedBox.shrink();
     }
-    return _DockContent(
-      key: ValueKey(host),
-      host: host,
-      actionContext: context,
-      actionRef: ref,
+    return MonitorDemand(
+      owner: favourites ? 'home-favourites' : 'home-running-apps',
+      active: !favourites && hostSupportsMonitor(c.client),
+      child: _HomeApps(
+        key: ValueKey(host),
+        host: host,
+        favourites: favourites,
+        actionContext: context,
+        actionRef: ref,
+      ),
     );
   }
 }
 
-class _DockContent extends ConsumerWidget {
-  const _DockContent({
+class _HomeApps extends ConsumerWidget {
+  const _HomeApps({
     super.key,
     required this.host,
+    required this.favourites,
     required this.actionContext,
     required this.actionRef,
   });
   final String host;
-  // HomeDock stays mounted when a route covers Home and releases this data consumer.
+  final bool favourites;
   final BuildContext actionContext;
   final WidgetRef actionRef;
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final apps = ref.watch(appsProvider).value ?? const <AppInfo>[];
-    ref.watch(windowsProvider);
-    ref.watch(appSessionsProvider);
+    final running = groupRunning(
+      apps: apps,
+      windows: ref.watch(windowsProvider).value ?? const [],
+      sessions: ref.watch(appSessionsProvider).value ?? const [],
+      agents: ref.watch(monitorProvider).snapshot?.apps ?? const [],
+    );
     final prefs = ref.watch(launcherPreferencesProvider(host)).value;
     if (prefs == null) return const SizedBox.shrink();
     return ListenableBuilder(
       listenable: prefs,
       builder: (context, _) {
-        final pinned = apps.where(prefs.isFavourite).toList();
-        final height = 62 + MediaQuery.textScalerOf(context).scale(12) * 2;
-        Widget action(String label, IconData icon, String key, bool pin) =>
-            SizedBox(
-              width: 64,
-              child: InkWell(
-                key: ValueKey(key),
-                borderRadius: BorderRadius.circular(12),
-                onTap: () => _showSheet(actionContext, host, pin: pin),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(minHeight: 48),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 8),
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(icon, size: 24),
-                        const SizedBox(height: 5),
-                        Text(
-                          label,
-                          textAlign: TextAlign.center,
-                          maxLines: 2,
-                          style: const TextStyle(fontSize: 12),
-                        ),
-                      ],
-                    ),
+        final entries = favourites
+            ? [
+                for (final app in apps.where(prefs.isFavourite))
+                  running.forApp(app) ??
+                      AppEntry(
+                        key: app.appId,
+                        name: app.name,
+                        app: app,
+                        icon: app.icon,
+                      ),
+              ]
+            : [
+                ...running.apps,
+                for (final agent in running.terminals)
+                  AppEntry(
+                    key: 'terminal:${agent.id}',
+                    name: agent.name,
+                    agent: agent,
                   ),
+                ...running.unidentified,
+              ];
+        Widget tile(AppEntry e) => InkWell(
+          key: ValueKey(
+            '${favourites ? 'home-favourite' : 'dock-app'}-${e.key}',
+          ),
+          borderRadius: BorderRadius.circular(16),
+          onTap: () async {
+            if (!_stillConnected(actionRef, host)) return;
+            if (e.app != null) {
+              await _openPinned(actionContext, actionRef, e.app!, host);
+            } else if (e.agent?.isDesktop == false) {
+              showAppMenu(actionContext, actionRef, e);
+            } else {
+              await openEntry(actionContext, actionRef, e, apps);
+            }
+          },
+          onLongPress: () {
+            if (_stillConnected(actionRef, host)) {
+              showAppMenu(actionContext, actionRef, e);
+            }
+          },
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 8),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                AppIconTile(
+                  icon: e.icon,
+                  name: e.name,
+                  size: favourites ? 54 : 44,
                 ),
-              ),
-            );
-        final actions = Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            action('Pin', Icons.push_pin_outlined, 'home-pin-apps', true),
-            action('Running', Icons.layers_outlined, 'home-running', false),
-          ],
+                const SizedBox(height: 6),
+                Text(
+                  e.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: favourites ? 14 : 12),
+                ),
+              ],
+            ),
+          ),
         );
-        final pins = pinned.isEmpty
-            ? const Center(
-                child: Text(
-                  'Pin your PC apps',
-                  style: TextStyle(color: NX.textDim, fontSize: 12),
-                ),
-              )
-            : ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: pinned.length,
-                separatorBuilder: (_, _) => const SizedBox(width: 4),
-                itemBuilder: (context, i) {
-                  final app = pinned[i];
-                  return SizedBox(
-                    width: 72,
-                    child: InkWell(
-                      key: ValueKey('dock-app-${app.appId}'),
-                      borderRadius: BorderRadius.circular(12),
-                      onTap: () =>
-                          _openPinned(actionContext, actionRef, app, host),
-                      onLongPress: () =>
-                          _showPinnedMenu(actionContext, actionRef, app, host),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          AppIconTile(icon: app.icon, name: app.name, size: 44),
-                          const SizedBox(height: 5),
-                          Text(
-                            app.name,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(fontSize: 12),
-                          ),
-                        ],
+        if (favourites) {
+          return Padding(
+            key: const ValueKey('home-favourites'),
+            padding: const EdgeInsets.fromLTRB(NX.pad, 12, NX.pad, 0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'Favourite apps',
+                        style: TextStyle(color: NX.textDim),
                       ),
                     ),
-                  );
-                },
-              );
+                    IconButton(
+                      tooltip: 'Choose favourite apps',
+                      onPressed: () =>
+                          _showSheet(actionContext, host, pin: true),
+                      icon: const Icon(Icons.edit_outlined),
+                    ),
+                  ],
+                ),
+                if (entries.isEmpty)
+                  TextButton(
+                    onPressed: () => _showSheet(actionContext, host, pin: true),
+                    child: const Text('Add favourite apps'),
+                  )
+                else
+                  ToolGrid(children: [for (final e in entries) tile(e)]),
+              ],
+            ),
+          );
+        }
         return SafeArea(
           top: false,
           child: Padding(
@@ -158,36 +193,26 @@ class _DockContent extends ConsumerWidget {
                 borderRadius: BorderRadius.circular(24),
                 border: Border.all(color: NX.line),
               ),
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final largeText =
-                      MediaQuery.textScalerOf(context).scale(12) > 18;
-                  if (constraints.maxWidth < 280 || largeText) {
-                    return Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (pinned.isNotEmpty)
-                          SizedBox(height: height, child: pins),
-                        actions,
-                      ],
-                    );
-                  }
-                  return SizedBox(
-                    height: height,
-                    child: Row(
-                      children: [
-                        Expanded(child: pins),
-                        const VerticalDivider(
-                          width: 12,
-                          indent: 16,
-                          endIndent: 16,
-                        ),
-                        actions,
-                      ],
+              height: 68 + MediaQuery.textScalerOf(context).scale(12) * 2,
+              child: entries.isEmpty
+                  ? const Center(
+                      child: Text(
+                        'No apps running',
+                        style: TextStyle(color: NX.textDim),
+                      ),
+                    )
+                  : ListView.separated(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: entries.length,
+                      separatorBuilder: (_, _) => const SizedBox(width: 4),
+                      itemBuilder: (_, i) => SizedBox(
+                        width:
+                            80 *
+                            MediaQuery.textScalerOf(context).scale(12) /
+                            12,
+                        child: tile(entries[i]),
+                      ),
                     ),
-                  );
-                },
-              ),
             ),
           ),
         );
@@ -231,15 +256,6 @@ Future<void> _openPinned(
     _entry(ref, app),
     ref.read(appsProvider).value ?? const [],
   );
-}
-
-void _showPinnedMenu(
-  BuildContext context,
-  WidgetRef ref,
-  AppInfo app,
-  String host,
-) {
-  if (_stillConnected(ref, host)) showAppMenu(context, ref, _entry(ref, app));
 }
 
 Future<void> _showSheet(
@@ -316,7 +332,7 @@ class _AppsSheetState extends ConsumerState<_AppsSheet> {
             children: [
               Expanded(
                 child: Text(
-                  widget.pin ? 'Pin apps' : 'Running',
+                  widget.pin ? 'Favourite apps' : 'Running',
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
               ),

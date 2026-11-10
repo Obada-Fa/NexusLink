@@ -41,8 +41,10 @@ class Connected extends conn.ConnectionNotifier {
 
 class Apps extends AppsNotifier {
   @override
-  AsyncValue<List<AppInfo>> build() =>
-      AsyncData([AppInfo(appId: 'editor', name: 'Editor')]);
+  AsyncValue<List<AppInfo>> build() => AsyncData([
+    AppInfo(appId: 'editor', name: 'Editor'),
+    AppInfo(appId: 'closed', name: 'Closed app'),
+  ]);
 }
 
 class Windows extends WindowsNotifier {
@@ -101,6 +103,7 @@ void main() {
     bool visible = true,
     String? selected,
     double scale = 1,
+    bool favourites = false,
   }) async {
     final host = Host();
     await tester.pumpWidget(
@@ -118,6 +121,7 @@ void main() {
               bottomNavigationBar: HomeDock(
                 target: target(selected ?? host.wsUrl),
                 visible: visible,
+                favourites: favourites,
               ),
             ),
           ),
@@ -135,13 +139,13 @@ void main() {
     await mount(tester, selected: 'ws://other:45678/rpc');
     expect(find.byKey(const ValueKey('home-dock')), findsNothing);
   });
-  testWidgets('pin picker saves pins and Running includes grouped windows', (
+  testWidgets('favourites picker saves Home apps separately from running bar', (
     tester,
   ) async {
-    await mount(tester);
-    await tester.tap(find.byKey(const ValueKey('home-pin-apps')));
+    await mount(tester, favourites: true);
+    await tester.tap(find.byTooltip('Choose favourite apps'));
     await tester.pumpAndSettle();
-    expect(find.text('Pin apps'), findsOneWidget);
+    expect(find.text('Favourite apps'), findsWidgets);
     await tester.tap(find.text('Editor'));
     await tester.pumpAndSettle();
     final store = await SharedPreferences.getInstance();
@@ -151,10 +155,26 @@ void main() {
     );
     await tester.tap(find.byTooltip('Close'));
     await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('home-favourite-editor')), findsOneWidget);
+    expect(find.byKey(const ValueKey('home-dock')), findsNothing);
+    await mount(tester);
     expect(find.byKey(const ValueKey('dock-app-editor')), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('home-running')));
-    await tester.pumpAndSettle();
-    expect(find.text('My document'), findsOneWidget);
+    expect(find.text('Pin'), findsNothing);
+    expect(find.text('Running'), findsNothing);
+  });
+  testWidgets('closed favourites stay on Home and out of the running bar', (
+    tester,
+  ) async {
+    final store = await SharedPreferences.getInstance();
+    await LauncherPreferences(
+      store,
+      'ws://pc:45678/rpc',
+    ).toggleFavourite(AppInfo(appId: 'closed', name: 'Closed app'));
+    await mount(tester, favourites: true);
+    expect(find.byKey(const ValueKey('home-favourite-closed')), findsOneWidget);
+    await mount(tester);
+    expect(find.byKey(const ValueKey('dock-app-closed')), findsNothing);
+    expect(find.byKey(const ValueKey('dock-app-editor')), findsOneWidget);
   });
   testWidgets('dock handles narrow screens at large text', (tester) async {
     tester.view.physicalSize = const Size(320, 640);
@@ -162,7 +182,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     await mount(tester, scale: 2);
-    expect(find.byKey(const ValueKey('home-running')), findsOneWidget);
+    expect(find.byKey(const ValueKey('dock-app-editor')), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
   testWidgets('route visibility keeps chooser and long-press actions alive', (
@@ -212,7 +232,7 @@ void main() {
     expect(find.byKey(const ValueKey('home-dock')), findsNothing);
     await tester.tap(find.text('Remove from favourites'));
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('dock-app-editor')), findsNothing);
+    expect(find.byKey(const ValueKey('dock-app-editor')), findsOneWidget);
     expect(LauncherPreferences(store, host.wsUrl).favourites, isEmpty);
   });
 }

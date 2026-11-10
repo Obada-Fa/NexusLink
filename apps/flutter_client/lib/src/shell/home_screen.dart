@@ -18,7 +18,6 @@ import '../theme/nx_widgets.dart';
 import '../workspace/platform_bridge.dart';
 import '../workspace/project.dart';
 import 'auto_connect.dart';
-import 'capabilities.dart';
 import 'device_picker.dart';
 import '../modules/remote/remote_module.dart';
 import 'home_art.dart';
@@ -27,7 +26,6 @@ import 'home_media.dart';
 import 'live_bar.dart';
 import 'module.dart';
 import 'module_extras.dart';
-import 'module_registry.dart';
 import '../state/last_cwd.dart';
 import 'resume_store.dart';
 import 'shell_controller.dart';
@@ -412,6 +410,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
               const SizedBox(height: 12),
               UtilityPills(target: target, reachable: reachable),
               const SizedBox(height: 12),
+              if (!target.has(UtilityIds.remote))
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.add_circle_outline),
+                  title: const Text('Add Remote'),
+                  subtitle: const Text('Scan the QR code from Nexus Utilities'),
+                  onTap: () => Navigator.pop(context, 'pair'),
+                ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.qr_code_scanner),
+                title: const Text('Pair a utility'),
+                onTap: () => Navigator.pop(context, 'pair'),
+              ),
+
               if (target.has(UtilityIds.nexuslink))
                 ListTile(
                   contentPadding: EdgeInsets.zero,
@@ -445,6 +458,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     );
     if (!mounted) return;
     switch (action) {
+      case 'pair':
+        await startPairing(context, ref);
       case 'connect':
         await ref
             .read(shellProvider.notifier)
@@ -555,7 +570,6 @@ class _HomeView extends ConsumerWidget {
         url != null &&
         conn.hostUrl == url &&
         conn.status == RpcStatus.connected;
-    final missing = _missingUtilities(modules, target);
     final wakeHere = wake?.targetId == target.id ? wake : null;
     final waking = wakeHere?.active == true;
     final pairAgain = shell.pairAgainTargetId == target.id;
@@ -789,28 +803,9 @@ class _HomeView extends ConsumerWidget {
           SliverToBoxAdapter(
             child: LiveBar(modules: availableModules, ctx: ctx),
           ),
-          if (missing.isNotEmpty)
-            SliverToBoxAdapter(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(NX.pad, NX.gap, NX.pad, 0),
-                child: NxCard(
-                  onTap: onScanAgain,
-                  child: Row(
-                    children: [
-                      const Icon(Icons.add_circle_outline, color: NX.accent),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          'Add ${missing.map(utilityName).join(' and ')}: '
-                          'scan the QR code from Nexus Utilities.',
-                          style: const TextStyle(color: NX.textDim),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
+          SliverToBoxAdapter(
+            child: HomeDock(target: target, visible: visible, favourites: true),
+          ),
           SliverToBoxAdapter(
             child: SizedBox(height: 24 + MediaQuery.paddingOf(context).bottom),
           ),
@@ -838,23 +833,6 @@ class _HomeView extends ConsumerWidget {
 
   static bool _usesProject(String moduleId) =>
       const {'agents', 'terminal', 'files'}.contains(moduleId);
-
-  /// Utilities the target hasn't paired that a compiled-in module could use.
-  static List<String> _missingUtilities(
-    List<NexusModule> modules,
-    SavedTarget target,
-  ) => [
-    for (final u in UtilityIds.all)
-      if (!target.has(u) &&
-          modulesFor(
-            modules,
-            capabilities: [
-              for (final id in phase1Capabilities[u] ?? const <String>[])
-                Capability(id, utility: u),
-            ],
-          ).isNotEmpty)
-        u,
-  ];
 
   static _HeroStatus _heroStatus({
     required bool nexusConnected,

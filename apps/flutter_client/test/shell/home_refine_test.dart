@@ -76,6 +76,23 @@ void main() {
     resetAutoConnect();
   });
 
+  testWidgets('Add Remote is in Device settings, away from the Home grid', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    await _saveOffice();
+    await _pumpHome(tester);
+    expect(find.text('Add Remote'), findsNothing);
+    expect(
+      find.textContaining('scan the QR code from Nexus Utilities.'),
+      findsNothing,
+    );
+    await tester.tap(find.byTooltip('Device settings'));
+    await tester.pumpAndSettle();
+    expect(find.text('Add Remote'), findsOneWidget);
+    expect(find.text('Pair a utility'), findsOneWidget);
+  });
+
   group('groupTiles', () {
     test('PC tools before Workspace', () {
       final tiles = [

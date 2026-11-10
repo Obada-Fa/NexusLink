@@ -349,7 +349,10 @@ void main() {
           await tester.pump();
         }
         expect(find.byKey(const ValueKey('dock-app-firefox')), findsOneWidget);
-        expect(find.byKey(const ValueKey('dock-app-code')), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('home-favourite-code')),
+          findsOneWidget,
+        );
         final images = tester.widgetList<Image>(find.byType(Image)).toList();
         final context = tester.element(find.byType(Scaffold).first);
         await tester.runAsync(
@@ -392,9 +395,7 @@ void main() {
           expect(audioCalls, contains('stop'));
           expect(find.text('Stop stream'), findsNothing);
 
-          await tester.tap(find.byKey(const ValueKey('home-running')));
-          await _settle(tester);
-          await tester.tap(find.text('Firefox').last);
+          await tester.tap(find.byKey(const ValueKey('dock-app-firefox')));
           await _settle(tester);
           expect(find.text('Viewer stub'), findsOneWidget);
           expect(viewed.last.windowId, 'firefox-window');
