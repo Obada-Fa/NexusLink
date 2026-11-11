@@ -1,3 +1,11 @@
+## NexusLink Test 1.0.51+57
+
+- **Lower-bandwidth mirroring.** Virtual sessions, window mirrors and Desktop open with MJPEG, then switch to hardware H.264 after the first decoded picture when the Linux host supports it. MJPEG returns if H.264 fails. Use **Show stream stats** in the mirror toolbar to see codec, bitrate, frame rate, and estimated tap-to-next-frame time.
+- **Agent conversations.** Code Agent chats show sub-agents and their progress in the Agents strip. **Ultra Code** is available in the effort picker. Headless runs observed so far use extra reasoning effort. A busy turn keeps its running state when you reopen the chat, and ten minutes of silence adds a status line while the turn continues.
+- **Mirror keyboard.** The stream keyboard stays connected when the Android IME opens.
+
+Pair this APK with the Linux host from this tag to test the host-dependent features. On the RX 9070 XT test PC, H.264 needs the missing GStreamer plugins installed or provided to the host. See [the host requirements and benchmark](docs/H264-BENCH.md).
+
 ## NexusLink Test 1.0.50+56
 
 Start a coding session on your PC from the phone and follow it in the Claude app, with no desktop stream.
