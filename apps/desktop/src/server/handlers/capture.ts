@@ -22,7 +22,7 @@ interface CaptureSession {
   id: string;
   /** 32-bit key stamped into every binary frame header for client-side matching. */
   key: number;
-  proc: ReturnType<typeof Bun.spawn>;
+  proc?: ReturnType<typeof Bun.spawn>;
   ws: WebSocket;
   /** Region currently being grabbed (undefined = pre-region legacy path). */
   region?: Region;
@@ -45,6 +45,8 @@ interface CaptureSession {
   droppedFrames: number;
   /** Virtual sessions already match the phone: never rescale them. */
   nativeScale: boolean;
+  paused: boolean;
+  listeners: Set<(change: 'region' | 'closed') => void>;
 }
 
 /** Binary frame header: u32 magic 'NLF1' | u32 streamKey | f64 timestampMs (LE). */
@@ -320,12 +322,11 @@ export interface Region {
 }
 
 /** Clamp a wanted rect into the virtual screen and even-align for x11grab. */
-function clampRegion(want: Region): Region {
-  const screen = getScreenMetadata();
-  const x = Math.max(0, Math.min(screen.width - 32, Math.round(want.x)));
-  const y = Math.max(0, Math.min(screen.height - 32, Math.round(want.y)));
-  const width = Math.min(screen.width - x, Math.round(want.width)) & ~1;
-  const height = Math.min(screen.height - y, Math.round(want.height)) & ~1;
+export function clampRegion(want: Region, screen: { width: number; height: number }): Region {
+  const x = Math.max(0, Math.min(screen.width, Math.round(want.x)));
+  const y = Math.max(0, Math.min(screen.height, Math.round(want.y)));
+  const width = Math.max(0, Math.min(screen.width, Math.round(want.x + want.width)) - x) & ~1;
+  const height = Math.max(0, Math.min(screen.height, Math.round(want.y + want.height)) - y) & ~1;
   return { x, y, width, height };
 }
 
@@ -366,12 +367,7 @@ function spawnGrabber(
 }
 
 function regionsDiffer(a: Region, b: Region): boolean {
-  return (
-    Math.abs(a.x - b.x) > 4 ||
-    Math.abs(a.y - b.y) > 4 ||
-    Math.abs(a.width - b.width) > 4 ||
-    Math.abs(a.height - b.height) > 4
-  );
+  return a.x !== b.x || a.y !== b.y || a.width !== b.width || a.height !== b.height;
 }
 
 export interface CaptureOptions {
@@ -436,8 +432,9 @@ export function startCapture(
       monitorName = primary.name;
       want = primary;
     }
-    grab = clampRegion(want);
+    grab = clampRegion(want, getScreenMetadata());
   }
+  if (grab.width < 16 || grab.height < 16) throw new Error('Capture region is outside the screen');
 
   const proc = spawnGrabber(grab, ffArgs, display);
   const session: CaptureSession = {
@@ -451,20 +448,27 @@ export function startCapture(
     monitorName: fullDesktop && options.monitor ? monitorName : undefined,
     droppedFrames: 0,
     nativeScale: !!display,
+    paused: false,
+    listeners: new Set(),
   };
   sessions.set(id, session);
 
   void pumpFrames(session, session.gen).catch(() => {});
 
   const regrab = (current: Region | null) => {
-    if (!sessions.has(id) || !current) return;
-    const next = clampRegion(current);
-    if (next.width < 32 || next.height < 32) return;
+    if (!sessions.has(id)) return;
+    const next = current && clampRegion(current, display ? current : getScreenMetadata());
+    if (!next || next.width < 16 || next.height < 16) {
+      stopCapture(id);
+      return;
+    }
     if (!session.region || !regionsDiffer(session.region, next)) return;
-    restartGrabber(session, next);
+    session.region = next;
+    if (!session.paused) restartGrabber(session, next);
     if (sendFn && ws.readyState === 1) {
       sendFn(ws, { type: 'stream-region', streamId: id, region: next });
     }
+    for (const listener of session.listeners) listener('region');
   };
 
   // Window-tracked captures follow the window: if the WM (or the user at the
@@ -542,7 +546,7 @@ function restartGrabber(session: CaptureSession, grab: Region): void {
   session.proc = spawnGrabber(grab, session.ffArgs, session.display);
   const gen = ++session.gen;
   const killOld = () => {
-    try { oldProc.kill(); } catch { /* already gone */ }
+    try { oldProc?.kill(); } catch { /* already gone */ }
   };
   const failSafe = setTimeout(killOld, 1500);
   void pumpFrames(session, gen, () => {
@@ -557,7 +561,7 @@ function restartGrabber(session: CaptureSession, grab: Region): void {
 /** Client displayed-FPS / decode-age feedback. Step JPEG quality, never capture fps. */
 export function reportStreamStats(streamId: string, decodeFps: number, frameAgeMs: number): void {
   const session = sessions.get(streamId);
-  if (!session) return;
+  if (!session || session.paused) return;
   const now = Date.now();
   if (now - session.lastQosAt < 2000) return;
   session.lastQosAt = now;
@@ -583,7 +587,7 @@ function applyQuality(session: CaptureSession, quality: CaptureQuality): void {
     q,
   };
   const grab = session.region;
-  if (grab) restartGrabber(session, grab);
+  if (grab && !session.paused) restartGrabber(session, grab);
 }
 
 /**
@@ -605,6 +609,7 @@ async function pumpFrames(
   onFirstFrame?: () => void,
 ): Promise<void> {
   const proc = session.proc;
+  if (!proc) return;
   const ring = new MjpegRing();
   let first = true;
 
@@ -668,17 +673,44 @@ export function getCaptureInfo(streamId: string): { region?: Region; monitor?: s
   return s ? { region: s.region, monitor: s.monitorName, droppedFrames: s.droppedFrames, quality: s.quality } : null;
 }
 
-export function stopCapture(streamId: string): void {
+export function getCaptureTarget(streamId: string, ws: WebSocket) {
   const session = sessions.get(streamId);
-  if (!session) return;
+  if (session?.ws !== ws || !session.region) return null;
+  return { display: session.display, region: session.region, fps: session.ffArgs.fps };
+}
+
+export function watchCapture(streamId: string, ws: WebSocket, listener: (change: 'region' | 'closed') => void) {
+  const session = sessions.get(streamId);
+  if (session?.ws !== ws) return null;
+  session.listeners.add(listener);
+  return () => session.listeners.delete(listener);
+}
+
+export function pauseCapture(streamId: string, ws: WebSocket, paused: boolean): void {
+  const session = sessions.get(streamId);
+  if (session?.ws !== ws || !session.region || session.paused === paused) return;
+  session.paused = paused;
+  if (paused) {
+    session.gen++;
+    try { session.proc?.kill(); } catch { /* already gone */ }
+    session.proc = undefined;
+  } else {
+    restartGrabber(session, session.region);
+  }
+}
+
+export function stopCapture(streamId: string, ws?: WebSocket): void {
+  const session = sessions.get(streamId);
+  if (!session || (ws && session.ws !== ws)) return;
   sessions.delete(streamId);
   session.gen++;
   if (session.watchdog) clearInterval(session.watchdog);
   try {
-    session.proc.kill();
+    session.proc?.kill();
   } catch {
     // already gone
   }
+  for (const listener of session.listeners) listener('closed');
 }
 
 /** Tear down any capture sessions bound to a disconnected socket. */
@@ -687,5 +719,5 @@ export function stopCapturesForSocket(ws: WebSocket): void {
   sessions.forEach((session, id) => {
     if (session.ws === ws) toStop.push(id);
   });
-  toStop.forEach(stopCapture);
+  for (const id of toStop) stopCapture(id, ws);
 }

@@ -35,7 +35,7 @@ import {
   createAppSession, listAppSessions, resizeAppSession, closeAppSession,
   getAppSession, getSessionDisplay, setSessionBroadcast,
 } from './handlers/app-sessions';
-import { setSend as setWebrtcSend, startWebrtc, signalWebrtc, stopWebrtc, stopWebrtcForSocket } from './handlers/webrtc';
+import { setSend as setWebrtcSend, setWebrtcAuthorizer, startWebrtc, signalWebrtc, stopWebrtc, stopWebrtcForSocket } from './handlers/webrtc';
 import { readClipboard, setClipboard } from './handlers/clipboard';
 import { micStatus, startMic, stopMic, stopMicForSocket, handleMicFrame, setMicAuthorizer, unloadMicDevice } from './handlers/mic';
 import {
@@ -44,7 +44,7 @@ import {
   listAgentModels, AGENT_ICON_NAMES, resolveAgentIcon, setAgentApprovalMode,
 } from './handlers/agents';
 import { startIde, stopIde, ideStatus } from './handlers/ide';
-import type { WebRtcSignal, AgentImageAttachment } from '@nexuslink/rpc-types';
+import type { WebRtcClientSignal, AgentImageAttachment } from '@nexuslink/rpc-types';
 import { serveStatic, staticAvailable } from './static-server';
 import { printLaunchBanner, tailscaleIpv4FromCli } from './launch-banner';
 import { startSidecarReader } from './sidecar-reader';
@@ -187,6 +187,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
   setCaptureAuthorizer(controlAuthorized);
   setMicAuthorizer(controlAuthorized);
   setWebrtcSend(send);
+  setWebrtcAuthorizer(controlAuthorized);
   setActivityBroadcast(record=>{
     for(const s of sessions.values())if(s.topics?.has('activity'))send(s.ws,{type:'activity-update',record});
   });
@@ -459,18 +460,18 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         result = closeAppSession(params.sessionId as string);
         break;
       case 'webrtc.start':
-        result = startWebrtc(
-          typeof params.sessionId === 'string' ? params.sessionId : undefined,
-          (params.fps as number) ?? 24,
-          ws,
-        );
+        result = await startWebrtc({
+          streamId: typeof params.streamId === 'string' ? params.streamId : undefined,
+          sessionId: typeof params.sessionId === 'string' ? params.sessionId : undefined,
+          fps: typeof params.fps === 'number' ? params.fps : undefined,
+        }, ws);
         break;
       case 'webrtc.signal':
-        signalWebrtc(params.webrtcId as string, params.data as WebRtcSignal);
+        signalWebrtc(params.webrtcId as string, params.data as WebRtcClientSignal, ws);
         result = undefined;
         break;
       case 'webrtc.stop':
-        stopWebrtc(params.webrtcId as string);
+        stopWebrtc(params.webrtcId as string, ws);
         result = undefined;
         break;
       case 'clipboard.get':
@@ -626,7 +627,10 @@ export async function startRpcServer(port = 45678, hostname?: string) {
             (params.fps as number) ?? 24,
             ws,
             { x: 0, y: 0, width: session.width, height: session.height },
-            undefined,
+            () => {
+              const current = getAppSession(sessionId);
+              return current && { x: 0, y: 0, width: current.width, height: current.height };
+            },
             session.display,
           );
           break;
@@ -661,7 +665,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
         break;
       }
       case 'screen.stopCapture':
-        stopCapture(params.streamId as string);
+        stopCapture(params.streamId as string, ws);
         result = undefined;
         break;
       case 'screen.getMetadata':

@@ -26,7 +26,7 @@ export const SUPPORTED_METHODS = ['activity.monitor', 'activity.snapshot', 'acti
 export function capabilities() {
   return { protocolVersion: 2, hostId:hostId(), hostVersion:'2.0.0', platform:process.platform,
     methods:[...SUPPORTED_METHODS,...(chatLibraryReady ? CHAT_METHODS : [])],
-    features:['monitor.v1','fs.delete','fs.move','process.kill','screen.monitors','input.cursor.v1','screen.quality.v1','terminal.attach','fs.readText','fs.writeText','fs.listPage','fs.rename','fs.gitChanges','fs.gitDiff','transfer.authorize','session.subscribe','agent.historyPage','agent.archive','agent.pendingApprovals','activity.snapshot','activity.v2','activity.monitor.v1','activity.actions.v1','window.close','window.activate','mic.v1','approvals.v1',...(chatLibraryReady ? ['chat.library.v1','chat.state.v1'] : [])],
+    features:['monitor.v1','fs.delete','fs.move','process.kill','screen.monitors','input.cursor.v1','screen.quality.v1','screen.h264.v1','terminal.attach','fs.readText','fs.writeText','fs.listPage','fs.rename','fs.gitChanges','fs.gitDiff','transfer.authorize','session.subscribe','agent.historyPage','agent.archive','agent.pendingApprovals','activity.snapshot','activity.v2','activity.monitor.v1','activity.actions.v1','window.close','window.activate','mic.v1','approvals.v1',...(chatLibraryReady ? ['chat.library.v1','chat.state.v1'] : [])],
     terminal:{ available:hasPty(), backend:'python-pty', maxSessions:12 }, files:{maxEditBytes:EDIT_BYTES,maxEditLines:20000},
     streaming:{experimental:true,available:!!process.env.DISPLAY,reason:process.env.DISPLAY?null:'Requires an X11 display'} };
 }

@@ -124,7 +124,7 @@ export type Params<M extends RpcMethod> =
     : M extends 'terminal.kill'
     ? { terminalId: string }
     : M extends 'screen.startCapture'
-    ? { quality: 'low' | 'medium' | 'high' | 'full'; fps: number; windowId?: string; sessionId?: string }
+    ? { quality: 'low' | 'medium' | 'high' | 'full'; fps: number; windowId?: string; sessionId?: string; monitor?: string }
     : M extends 'screen.stopCapture'
     ? { streamId: string }
     : M extends 'screen.getMetadata'
@@ -172,9 +172,9 @@ export type Params<M extends RpcMethod> =
     : M extends 'appSession.close'
     ? { sessionId: string }
     : M extends 'webrtc.start'
-    ? { sessionId?: string; fps?: number }
+    ? { streamId?: string; sessionId?: string; fps?: number }
     : M extends 'webrtc.signal'
-    ? { webrtcId: string; data: WebRtcSignal }
+    ? { webrtcId: string; data: WebRtcClientSignal }
     : M extends 'webrtc.stop'
     ? { webrtcId: string }
     : M extends 'clipboard.get'
@@ -324,7 +324,7 @@ export type Result<M extends RpcMethod> =
     : M extends 'appSession.close'
     ? { ok: boolean }
     : M extends 'webrtc.start'
-    ? { webrtcId?: string; available: boolean; reason?: string }
+    ? { webrtcId?: string; available: boolean; reason?: string; codec?: 'H264' }
     : M extends 'webrtc.signal'
     ? void
     : M extends 'webrtc.stop'
@@ -507,10 +507,18 @@ export interface AppSessionInfo {
   status: 'starting' | 'running' | 'exited'
 }
 
-/** SDP / ICE payload relayed verbatim between the host encoder and the phone. */
+/** Signaling from the encoder to the receiver. */
 export type WebRtcSignal =
-  | { kind: 'offer' | 'answer'; sdp: string }
+  | { kind: 'offer'; sdp: string }
   | { kind: 'ice'; candidate: string; sdpMLineIndex: number }
+  | { kind: 'error'; reason: string; code: 'failed' | 'region-changed' | 'capture-ended' }
+
+export type WebRtcClientSignal =
+  | { kind: 'answer'; sdp: string }
+  | { kind: 'ice'; candidate: string; sdpMLineIndex: number }
+  | { kind: 'playing' | 'keyframe' }
+  | { kind: 'zoom'; zoomed: boolean }
+  | { kind: 'stats'; fps: number; loss: number; jitterMs: number; rttMs?: number }
 
 /** Composer mode — same idea as Cursor Agent / Plan / Ask. */
 export type AgentMode = 'agent' | 'plan' | 'ask'
