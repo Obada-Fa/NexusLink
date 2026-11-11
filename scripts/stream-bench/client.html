@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>NexusLink stream benchmark</title>
+<canvas></canvas>
+<script type="module">
+const canvas = document.querySelector('canvas');
+const context = canvas.getContext('2d', { willReadFrequently: true });
+const socket = new WebSocket(`ws://${location.host}/stream`);
+socket.binaryType = 'arraybuffer';
+
+const durationMs = 10000;
+const taps = 10;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const now = () => performance.now();
+let bytes = 0;
+let frames = 0;
+let marker;
+let pendingTap;
+let latestFrame;
+let decoding = false;
+let pictureReady;
+const firstPicture = new Promise((resolve) => { pictureReady = resolve; });
+
+async function drawFrames() {
+  if (decoding) return;
+  decoding = true;
+  try {
+    while (latestFrame) {
+      const data = latestFrame;
+      latestFrame = undefined;
+      const image = await createImageBitmap(new Blob([data], { type: 'image/jpeg' }));
+      if (canvas.width !== image.width || canvas.height !== image.height) {
+        canvas.width = image.width;
+        canvas.height = image.height;
+      }
+      context.drawImage(image, 0, 0);
+      image.close();
+      const [red, green] = context.getImageData(
+        Math.floor(canvas.width * 0.12), Math.floor(canvas.height * 0.12), 1, 1,
+      ).data;
+      if (Math.abs(red - green) < 80) throw new Error('Unexpected tap marker colour');
+      marker = red > green;
+      frames++;
+      pictureReady();
+      if (pendingTap && marker !== pendingTap.previous) {
+        pendingTap.finish(now() - pendingTap.started);
+        pendingTap = undefined;
+      }
+    }
+  } finally {
+    decoding = false;
+  }
+}
+
+function fail(error) {
+  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ error: String(error) }));
+}
+
+socket.onmessage = ({ data }) => {
+  if (!(data instanceof ArrayBuffer) || new DataView(data).getUint32(0, true) !== 0x4e4c4631) {
+    fail('Expected an NLF1 frame');
+    return;
+  }
+  bytes += data.byteLength;
+  latestFrame = data.slice(16);
+  drawFrames().catch(fail);
+};
+
+async function measure() {
+  await Promise.race([
+    firstPicture,
+    sleep(12000).then(() => { throw new Error('No decoded picture after 12 seconds'); }),
+  ]);
+  await sleep(1000);
+  const initialBytes = bytes;
+  const initialFrames = frames;
+  const started = now();
+  const throughput = sleep(durationMs).then(() => {
+    const seconds = (now() - started) / 1000;
+    return {
+      seconds,
+      kbitPerSecond: (bytes - initialBytes) * 8 / seconds / 1000,
+      fps: (frames - initialFrames) / seconds,
+    };
+  });
+  const tapMs = [];
+  for (let i = 0; i < taps; i++) {
+    // Vary the tap spacing to sample different phases of the capture clock.
+    await sleep(430 + i * 37);
+    const delay = await new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        pendingTap = undefined;
+        resolve(null);
+      }, 2000);
+      pendingTap = {
+        previous: marker,
+        started: now(),
+        finish: (delay) => {
+          clearTimeout(timeout);
+          resolve(delay);
+        },
+      };
+      socket.send('tap');
+    });
+    if (delay === null) throw new Error(`Tap ${i + 1} did not change the picture within 2 seconds`);
+    tapMs.push(delay);
+  }
+  const result = { ...(await throughput), width: canvas.width, height: canvas.height, tapMs };
+  socket.send(JSON.stringify({ result }));
+}
+
+measure().catch(fail);
+</script>
+</html>

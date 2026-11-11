@@ -41,6 +41,8 @@ def pick_h264_encoder(bitrate_kbps, keyint):
         if Gst.ElementFactory.find(name):
             if name == "nvh264enc":
                 return f"{name} preset=low-latency-hq bitrate={bitrate_kbps} gop-size={keyint}"
+            if name == "vaapih264enc":
+                return f"{name} bitrate={bitrate_kbps} keyframe-period={keyint}"
             return f"{name} bitrate={bitrate_kbps} key-int-max={keyint}"
     return (
         f"x264enc tune=zerolatency speed-preset=ultrafast bitrate={bitrate_kbps} "
