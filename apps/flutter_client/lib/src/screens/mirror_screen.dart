@@ -21,6 +21,7 @@ import '../util/mjpeg_sink.dart';
 import '../widgets/mirror_frame_painter.dart';
 import '../widgets/not_connected_view.dart';
 import 'mirror_fit.dart';
+import 'mirror_webrtc.dart';
 import 'cursor_keyboard_policy.dart';
 import 'stream_keyboard.dart';
 
@@ -95,6 +96,14 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   String? _windowId;
   int _frameCount = 0;
   int _fps = 0;
+  int _jpegBytes = 0;
+  double _jpegKbitPerSecond = 0;
+  MirrorRtcRates? _rtcRates;
+  bool _showStats = false;
+  String? _fallbackReason;
+  double? _tapStartedMs;
+  double? _tapFrameMs;
+  int _tapSequence = 0;
   double _lastDecodeMs = 0;
   bool _keyboardOpen = false;
   bool _mouseMode = false;
@@ -130,12 +139,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   AppSessionInfo? _session;
   final List<void Function()> _unsubs = [];
 
-  // WebRTC upgrade path: H.264/Opus from the host's GStreamer agent. MJPEG
-  // keeps streaming until the RTC track renders, then it is stopped.
-  String? _webrtcId;
-  RTCPeerConnection? _pc;
-  RTCVideoRenderer? _renderer;
-  bool _rtcLive = false;
+  MirrorWebrtc? _rtc;
+  bool get _rtcLive => _rtc?.live ?? false;
 
   final _kbController = TextEditingController.fromValue(_kbEmpty);
   static const _kbEmpty = TextEditingValue(
@@ -268,7 +273,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   }
 
   Future<void> _start() async {
-    if (_started) return;
+    if (!mounted || _started) return;
     _started = true;
     final client = _client;
     _captureClient = client;
@@ -339,40 +344,10 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         params['windowId'] = windowId;
       }
 
-      final cap = await client.requestMap('screen.startCapture', params);
-      _streamId = cap['streamId'] as String?;
-      _streamKey = (cap['streamKey'] as num?)?.toInt() ?? -1;
-      if (cap['region'] != null) {
-        _setRegion(
-          CaptureRegion.fromJson(cap['region'] as Map<String, dynamic>),
-        );
-      }
-
-      _attachMjpeg(client);
-      _unsubs.add(
-        client.subscribe('stream-region', (msg) {
-          if (msg['streamId'] != _streamId) return;
-          final r = msg['region'];
-          if (r is Map<String, dynamic> && mounted) {
-            _setRegion(CaptureRegion.fromJson(r));
-          }
-        }),
-      );
-      _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (mounted) setState(() => _fps = _frameCount);
-        final sid = _streamId;
-        if (sid != null && !_rtcLive) {
-          _client?.notify('screen.reportStats', {
-            'streamId': sid,
-            'fps': _frameCount,
-            'frameAgeMs': _lastDecodeMs.round(),
-          });
-        }
-        _frameCount = 0;
-      });
-
-      if (mounted) setState(() => _phase = MirrorPhase.streaming);
+      if (!await _beginCapture(client, params)) return;
+      setState(() => _phase = MirrorPhase.streaming);
       _scheduleHideChrome();
+      _tryWebrtc(client);
     } catch (e) {
       if (mounted) {
         setState(() {
@@ -436,11 +411,13 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     // and don't leave the engine on its 1920×1080 default.
     _setRegion(CaptureRegion(0, 0, session.width, session.height));
 
-    await _beginCapture(client, {
+    if (!await _beginCapture(client, {
       'quality': 'medium',
       'fps': 24,
       'sessionId': session.sessionId,
-    });
+    })) {
+      return;
+    }
     _unsubs.add(
       client.subscribe('app-session-update', (msg) {
         final s = msg['session'];
@@ -456,9 +433,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     );
     if (mounted) setState(() => _phase = MirrorPhase.streaming);
     _scheduleHideChrome();
-    if (shouldUpgradeWebrtc(isVirtual: true, sessionId: session.sessionId)) {
-      unawaited(_tryWebrtc(client, session.sessionId));
-    }
+    _tryWebrtc(client);
   }
 
   Future<void> _waitForSessionReady(
@@ -474,12 +449,17 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     }
   }
 
-  Future<void> _beginCapture(
+  Future<bool> _beginCapture(
     RpcClient client,
     Map<String, dynamic> params,
   ) async {
     final cap = await client.requestMap('screen.startCapture', params);
-    _streamId = cap['streamId'] as String?;
+    final id = cap['streamId'] as String?;
+    if (!mounted) {
+      if (id != null) client.notify('screen.stopCapture', {'streamId': id});
+      return false;
+    }
+    _streamId = id;
     _streamKey = (cap['streamKey'] as num?)?.toInt() ?? -1;
     if (cap['region'] != null) {
       _setRegion(CaptureRegion.fromJson(cap['region'] as Map<String, dynamic>));
@@ -494,25 +474,46 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         }
       }),
     );
+    var sampledAt = _nowMs;
     _fpsTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() => _fps = _frameCount);
-      final sid = _streamId;
-      if (sid != null && !_rtcLive) {
-        _client?.notify('screen.reportStats', {
-          'streamId': sid,
-          'fps': _frameCount,
-          'frameAgeMs': _lastDecodeMs.round(),
+      final now = _nowMs;
+      final elapsed = now - sampledAt;
+      sampledAt = now;
+      if (mounted && !_rtcLive) {
+        setState(() {
+          _fps = _frameCount;
+          _jpegKbitPerSecond = elapsed > 0 ? _jpegBytes * 8 / elapsed : 0;
         });
+        if (id != null) {
+          client.notify('screen.reportStats', {
+            'streamId': id,
+            'fps': _frameCount,
+            'frameAgeMs': _lastDecodeMs.round(),
+          });
+        }
       }
       _frameCount = 0;
+      _jpegBytes = 0;
     });
+    return true;
   }
 
   void _attachMjpeg(RpcClient client) {
     _sink?.dispose();
     _sink = MirrorFrameSink(
       onDecodeAge: (ms) => _lastDecodeMs = ms.toDouble(),
-      onDisplayed: () => _frameCount++,
+      onDisplayed: () {
+        if (!mounted || _rtcLive) return;
+        _frameCount++;
+        final started = _tapStartedMs;
+        if (started != null) {
+          _tapStartedMs = null;
+          final elapsed = _nowMs - started;
+          if (_showStats && elapsed <= 2000) {
+            setState(() => _tapFrameMs = elapsed);
+          }
+        }
+      },
       onImage: (img) {
         if (!mounted || _rtcLive) {
           img.dispose();
@@ -527,6 +528,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     _frameSub?.cancel();
     _frameSub = client.frames.listen((f) {
       if (_rtcLive || f.streamKey != _streamKey) return;
+      _jpegBytes += f.jpeg.length + frameHeaderBytes;
       _sink?.pushJpeg(f.jpeg);
     });
   }
@@ -544,113 +546,70 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     if (w >= 32) _sink?.targetWidth = w.round();
   }
 
-  void _stopMjpeg() {
-    _frameSub?.cancel();
-    _frameSub = null;
-    _sink?.dispose();
-    _sink = null;
-    final old = _decoded.value;
-    _decoded.value = null;
-    old?.dispose();
-    final id = _streamId;
-    _streamId = null;
-    if (id != null) _client?.notify('screen.stopCapture', {'streamId': id});
+  void _tryWebrtc(RpcClient client) {
+    final streamId = _streamId;
+    if (streamId == null || !client.supports('screen.h264.v1')) return;
+    final attempt = MirrorWebrtc(
+      client: client,
+      streamId: streamId,
+      sessionId: _session?.sessionId,
+      onChanged: () {
+        if (!mounted) return;
+        setState(() {
+          if (_rtcLive) {
+            _tapFrameMs = null;
+            _tapStartedMs = null;
+          }
+        });
+      },
+      onRates: (rates) {
+        if (mounted && _showStats) {
+          setState(() => _rtcRates = rates);
+        } else {
+          _rtcRates = rates;
+        }
+      },
+      onFallback: (reason, code) {
+        if (!mounted) return;
+        setState(() {
+          _rtc = null;
+          _rtcRates = null;
+          _tapFrameMs = null;
+          _fallbackReason = reason;
+          if (code == 'capture-ended') {
+            _phase = MirrorPhase.error;
+            _errorMsg = reason;
+          }
+        });
+        _sharpRequested = false;
+        _maybeRequestSharp();
+        if (code == 'region-changed') _tryWebrtc(client);
+      },
+    );
+    _rtc = attempt;
+    _fallbackReason = null;
+    attempt.zoom(_zoom.scale > 1.3);
+    unawaited(attempt.start());
   }
 
-  /// Best-effort WebRTC upgrade for virtual sessions only. Failures leave MJPEG.
-  Future<void> _tryWebrtc(RpcClient client, String? sessionId) async {
-    if (!shouldUpgradeWebrtc(
-      isVirtual: widget.target.isVirtual,
-      sessionId: sessionId,
-    )) {
+  void _sampleTap() {
+    if (!_showStats) return;
+    final rtc = _rtc;
+    final sequence = ++_tapSequence;
+    if (rtc == null || !rtc.live) {
+      _tapStartedMs = _nowMs;
       return;
     }
-    try {
-      final res = await client.requestMap('webrtc.start', {
-        'sessionId': ?sessionId,
-        'fps': 24,
-      });
-      if (res['available'] != true || res['webrtcId'] is! String) return;
-      _webrtcId = res['webrtcId'] as String;
-
-      final renderer = RTCVideoRenderer();
-      await renderer.initialize();
-      if (!mounted) {
-        renderer.dispose();
-        return;
-      }
-      _renderer = renderer;
-
-      final pc = await createPeerConnection({
-        'sdpSemantics': 'unified-plan',
-        'iceServers': [
-          {
-            'urls': ['stun:stun.l.google.com:19302'],
-          },
-        ],
-      });
-      _pc = pc;
-      pc.onTrack = (event) {
-        if (event.streams.isEmpty) return;
-        renderer.srcObject = event.streams[0];
-        if (!mounted) return;
-        setState(() => _rtcLive = true);
-        _stopMjpeg();
-      };
-      pc.onIceCandidate = (c) {
-        if (c.candidate == null || _webrtcId == null) return;
-        client.notify('webrtc.signal', {
-          'webrtcId': _webrtcId,
-          'data': {
-            'kind': 'ice',
-            'candidate': c.candidate,
-            'sdpMLineIndex': c.sdpMLineIndex ?? 0,
-          },
-        });
-      };
-
-      _unsubs.add(
-        client.subscribe('webrtc-signal', (msg) {
-          if (msg['webrtcId'] != _webrtcId) return;
-          final data = msg['data'];
-          if (data is! Map) return;
-          unawaited(_onWebrtcSignal(Map<String, dynamic>.from(data)));
-        }),
-      );
-    } catch (_) {
-      // Native WebRTC isn't available on this platform; MJPEG stays up.
-    }
-  }
-
-  Future<void> _onWebrtcSignal(Map<String, dynamic> data) async {
-    final pc = _pc;
-    final client = _client;
-    final webrtcId = _webrtcId;
-    if (pc == null || client == null || webrtcId == null) return;
-    try {
-      final kind = data['kind'];
-      if (kind == 'offer' && data['sdp'] is String) {
-        await pc.setRemoteDescription(
-          RTCSessionDescription(data['sdp'] as String, 'offer'),
-        );
-        final answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        client.notify('webrtc.signal', {
-          'webrtcId': webrtcId,
-          'data': {'kind': 'answer', 'sdp': answer.sdp},
-        });
-      } else if (kind == 'ice' && data['candidate'] is String) {
-        await pc.addCandidate(
-          RTCIceCandidate(
-            data['candidate'] as String,
-            '',
-            (data['sdpMLineIndex'] as num?)?.toInt() ?? 0,
-          ),
-        );
-      }
-    } catch (_) {
-      // Drop a bad candidate; the next one may still connect.
-    }
+    unawaited(
+      rtc.estimateTapToFrame().then((delay) {
+        if (mounted &&
+            _showStats &&
+            identical(_rtc, rtc) &&
+            sequence == _tapSequence) {
+          setState(() => _tapFrameMs = delay);
+        }
+      }),
+    );
   }
 
   Map<String, dynamic> _sid([Map<String, dynamic>? extra]) {
@@ -694,17 +653,12 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     final client = _captureClient;
     final id = _streamId;
     final win = _windowId;
-    final webrtcId = _webrtcId;
     if (client != null) {
       if (id != null) client.notify('screen.stopCapture', {'streamId': id});
       if (win != null) client.notify('window.release', {'windowId': win});
-      if (webrtcId != null) {
-        client.notify('webrtc.stop', {'webrtcId': webrtcId});
-      }
     }
+    _rtc?.dispose();
     // Home keeps the virtual session alive (like backgrounding a phone app).
-    unawaited(_pc?.close() ?? Future.value());
-    _renderer?.dispose();
     super.dispose();
   }
 
@@ -754,6 +708,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         _cursorTapped();
         _cursorHost = Offset(e.x, e.y);
         _syncPointerFromHost();
+        _sampleTap();
         client.notify(
           'input.mouseClick',
           _sid({'button': 'left', 'x': hx(e.x), 'y': hy(e.y)}),
@@ -764,6 +719,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         _cursorTapped();
         _cursorHost = Offset(e.x, e.y);
         _syncPointerFromHost();
+        _sampleTap();
         client.notify(
           'input.mouseClick',
           _sid({'button': 'left', 'x': hx(e.x), 'y': hy(e.y)}),
@@ -826,6 +782,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     });
     void click(String button) {
       _flushQueuedDrag();
+      if (button == 'left') _sampleTap();
       client.notify('input.mouseClick', {...at, 'button': button});
     }
 
@@ -971,13 +928,15 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   /// Zoomed in: ask the PC for native-resolution frames so text stays sharp.
   /// The PC's own QoS may still step down again on a congested link.
   void _maybeRequestSharp() {
+    _rtc?.zoom(_zoom.scale > 1.3);
     if (_zoom.scale <= 1.3) {
       _sharpRequested = false;
       return;
     }
     final client = _captureClient;
     final id = _streamId;
-    if (_sharpRequested ||
+    if (_rtcLive ||
+        _sharpRequested ||
         client == null ||
         id == null ||
         !client.supports('screen.quality.v1')) {
@@ -1264,6 +1223,13 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                 ),
               ),
             ),
+          if (_showStats && _phase == MirrorPhase.streaming)
+            Positioned(
+              top: _chromeVisible ? 50 : 30,
+              left: 8,
+              right: 8,
+              child: SafeArea(bottom: false, child: _statsOverlay()),
+            ),
           if (_zoomBadgeShown && _phase == MirrorPhase.streaming)
             Positioned(
               left: 12,
@@ -1338,6 +1304,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                 ),
                 onPressed: _toggleMouseMode,
               ),
+              _statsButton(),
               if (_session != null)
                 IconButton(
                   tooltip: 'Quit this app',
@@ -1570,6 +1537,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                   ),
                   onPressed: _toggleMouseMode,
                 ),
+              _statsButton(),
               if (_session != null)
                 IconButton(
                   tooltip: 'Quit this app',
@@ -1580,6 +1548,105 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           ),
         ),
       ),
+    );
+  }
+
+  Widget _statsButton() => IconButton(
+    tooltip: _showStats ? 'Hide stream stats' : 'Show stream stats',
+    icon: Icon(
+      Icons.monitor_heart_outlined,
+      color: _showStats ? const Color(0xFF7AA2FF) : Colors.white,
+    ),
+    onPressed: () {
+      setState(() {
+        _showStats = !_showStats;
+        _tapStartedMs = null;
+        _tapFrameMs = null;
+        _tapSequence++;
+      });
+      _scheduleHideChrome();
+    },
+  );
+
+  Widget _statsOverlay() {
+    final rates = _rtcRates;
+    final fps = _rtcLive ? rates?.fps : _fps.toDouble();
+    final kbit = _rtcLive ? rates?.kbitPerSecond : _jpegKbitPerSecond;
+    final tap = _tapFrameMs;
+    final label = _rtcLive ? 'H.264' : 'MJPEG';
+    final fallback = _fallbackReason;
+    return IgnorePointer(
+      child: Align(
+        alignment: Alignment.topLeft,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: const Color(0xDD0A0A0F),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            child: Text(
+              '$label · ${kbit?.round() ?? '–'} kbit/s · ${fps?.toStringAsFixed(1) ?? '–'} fps'
+              '\nTap → frame (est.)  ${tap == null ? '–' : '${tap.round()} ms'}'
+              '${fallback == null ? '' : '\n$fallback'}',
+              style: const TextStyle(color: Colors.white, fontSize: 11),
+              maxLines: 4,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _videoLayers() {
+    final renderer = _rtc?.renderer;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (renderer != null)
+          ValueListenableBuilder<RTCVideoValue>(
+            valueListenable: renderer,
+            builder: (context, value, _) {
+              final width = value.rotation % 180 == 0
+                  ? value.width
+                  : value.height;
+              final height = value.rotation % 180 == 0
+                  ? value.height
+                  : value.width;
+              if (width <= 0 || height <= 0) return const SizedBox.shrink();
+              return FittedBox(
+                fit: _boxFit,
+                clipBehavior: Clip.hardEdge,
+                child: SizedBox(
+                  width: width,
+                  height: height,
+                  child: RTCVideoView(renderer),
+                ),
+              );
+            },
+          ),
+        if (!_rtcLive)
+          ColoredBox(
+            color: Colors.black,
+            child: ValueListenableBuilder<ui.Image?>(
+              valueListenable: _decoded,
+              builder: (context, img, _) {
+                if (img == null) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                return CustomPaint(
+                  painter: MirrorFramePainter(
+                    image: img,
+                    fit: _boxFit,
+                    repaint: _decoded,
+                  ),
+                  child: const SizedBox.expand(),
+                );
+              },
+            ),
+          ),
+      ],
     );
   }
 
@@ -1617,30 +1684,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                           ..scaleByDouble(_zoom.scale, _zoom.scale, 1, 1),
                         child: child,
                       ),
-                      child: _rtcLive && _renderer != null
-                          ? RTCVideoView(
-                              _renderer!,
-                              objectFit: RTCVideoViewObjectFit
-                                  .RTCVideoViewObjectFitContain,
-                            )
-                          : ValueListenableBuilder<ui.Image?>(
-                              valueListenable: _decoded,
-                              builder: (context, img, _) {
-                                if (img == null) {
-                                  return const Center(
-                                    child: CircularProgressIndicator(),
-                                  );
-                                }
-                                return CustomPaint(
-                                  painter: MirrorFramePainter(
-                                    image: img,
-                                    fit: _boxFit,
-                                    repaint: _decoded,
-                                  ),
-                                  child: const SizedBox.expand(),
-                                );
-                              },
-                            ),
+                      child: _videoLayers(),
                     ),
                     _cursorOverlay(),
                   ],
