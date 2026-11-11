@@ -141,6 +141,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
 
   MirrorWebrtc? _rtc;
   bool get _rtcLive => _rtc?.live ?? false;
+  final _rtcRetryPolicy = MirrorRetryPolicy();
+  Timer? _rtcRetry;
 
   final _kbController = TextEditingController.fromValue(_kbEmpty);
   static const _kbEmpty = TextEditingValue(
@@ -549,7 +551,10 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   void _tryWebrtc(RpcClient client) {
     final streamId = _streamId;
     if (streamId == null || !client.supports('screen.h264.v1')) return;
-    final attempt = MirrorWebrtc(
+    _rtcRetry?.cancel();
+    _rtcRetry = null;
+    late final MirrorWebrtc attempt;
+    attempt = MirrorWebrtc(
       client: client,
       streamId: streamId,
       sessionId: _session?.sessionId,
@@ -583,7 +588,19 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         });
         _sharpRequested = false;
         _maybeRequestSharp();
-        if (code == 'region-changed') _tryWebrtc(client);
+        final delay = _rtcRetryPolicy.afterFallback(code, attempt.livedFor);
+        if (delay == Duration.zero) {
+          _tryWebrtc(client);
+        } else if (delay != null) {
+          _rtcRetry = Timer(delay, () {
+            if (mounted &&
+                _rtc == null &&
+                _streamId == streamId &&
+                _phase == MirrorPhase.streaming) {
+              _tryWebrtc(client);
+            }
+          });
+        }
       },
     );
     _rtc = attempt;
@@ -657,6 +674,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       if (id != null) client.notify('screen.stopCapture', {'streamId': id});
       if (win != null) client.notify('window.release', {'windowId': win});
     }
+    _rtcRetry?.cancel();
     _rtc?.dispose();
     // Home keeps the virtual session alive (like backgrounding a phone app).
     super.dispose();

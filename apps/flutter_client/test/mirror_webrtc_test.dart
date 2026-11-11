@@ -60,4 +60,30 @@ void main() {
     expect(rates.rttMs, 85);
     expect(before.since(after), isNull);
   });
+
+  test('retries H.264 with backoff, never after the capture or host refuses', () {
+    final policy = MirrorRetryPolicy();
+    expect(policy.afterFallback('capture-ended', Duration.zero), isNull);
+    expect(policy.afterFallback('unavailable', Duration.zero), isNull);
+    expect(policy.afterFallback('region-changed', Duration.zero), Duration.zero);
+    final waits = [
+      for (var i = 0; i < 5; i++) policy.afterFallback('failed', Duration.zero),
+    ];
+    expect(waits, [
+      const Duration(seconds: 10),
+      const Duration(seconds: 30),
+      const Duration(seconds: 60),
+      const Duration(minutes: 2),
+      const Duration(minutes: 2),
+    ]);
+    // A long healthy run followed by one stall starts the backoff over.
+    expect(
+      policy.afterFallback(null, MirrorRetryPolicy.healthyRun),
+      const Duration(seconds: 10),
+    );
+    expect(
+      policy.afterFallback(null, const Duration(seconds: 5)),
+      const Duration(seconds: 30),
+    );
+  });
 }

@@ -39,6 +39,31 @@ class MirrorPlayback {
   }
 }
 
+/// When to try H.264 again after it fell back to MJPEG. A transient stall on
+/// mobile data must not leave the rest of the session on MJPEG.
+class MirrorRetryPolicy {
+  static const delays = [
+    Duration(seconds: 10),
+    Duration(seconds: 30),
+    Duration(seconds: 60),
+    Duration(minutes: 2),
+  ];
+
+  /// An attempt that played this long counts as healthy and resets the backoff.
+  static const healthyRun = Duration(seconds: 60);
+  int _failures = 0;
+
+  /// Null means do not retry; [Duration.zero] means retry now.
+  Duration? afterFallback(String? code, Duration livedFor) {
+    if (code == 'capture-ended' || code == 'unavailable') return null;
+    if (code == 'region-changed') return Duration.zero;
+    if (livedFor >= healthyRun) _failures = 0;
+    final delay = delays[math.min(_failures, delays.length - 1)];
+    _failures++;
+    return delay;
+  }
+}
+
 class MirrorRtcCounters {
   const MirrorRtcCounters({
     required this.at,
@@ -113,6 +138,14 @@ class MirrorWebrtc {
   final _playback = MirrorPlayback();
   final _clock = Stopwatch()..start();
   bool get live => _playback.codec == MirrorCodec.h264;
+  Duration? _liveAt, _endedAt;
+
+  /// How long this attempt showed H.264 pictures (zero if it never did).
+  Duration get livedFor {
+    final since = _liveAt;
+    if (since == null) return Duration.zero;
+    return (_endedAt ?? _clock.elapsed) - since;
+  }
   RTCVideoRenderer? renderer;
   RTCPeerConnection? _peer;
   String? _id;
@@ -207,6 +240,7 @@ class MirrorWebrtc {
       if (reply['available'] != true || id is! String) {
         _fail(
           reply['reason']?.toString() ?? 'H.264 is unavailable on the host',
+          'unavailable',
         );
         return;
       }
@@ -307,6 +341,7 @@ class MirrorWebrtc {
         !_playback.firstPicture(_clock.elapsed)) {
       return;
     }
+    _liveAt = _clock.elapsed;
     _send({'kind': 'playing'});
     if (_zoomed) _send({'kind': 'zoom', 'zoomed': true});
     onChanged();
@@ -434,6 +469,7 @@ class MirrorWebrtc {
   void dispose() {
     if (_closed) return;
     _closed = true;
+    _endedAt = _clock.elapsed;
     _playback.fallback();
     _watchdog?.cancel();
     _unsubscribe?.call();
