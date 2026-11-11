@@ -111,6 +111,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   List<AgentModelOption> _liveModels = [];
   bool _loading = true;
   bool _busy = false;
+
+  /// Bumped whenever the phone learns a turn ended (result, error, stop, or a
+  /// host update saying idle). A host snapshot asked for before the bump is
+  /// older than that news and must not switch Working back on.
+  int _turnEndEpoch = 0;
   bool _sending = false;
   int _chatTab = 0;
   final Set<String> _terminalVisited = {};
@@ -374,6 +379,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final client = _client;
     if (client == null || client.status != RpcStatus.connected) return;
     final gen = ++_syncGen;
+    final endEpoch = _turnEndEpoch;
     final activeId = _active?.agentSessionId;
     final shouldSyncTranscript = syncTranscript && activeId != null;
     try {
@@ -442,9 +448,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           }
           if (match != null) {
             _active = match;
-            // Same rule as _onSessionUpdate: a stale busy:true snapshot
-            // must not resurrect Stop after the phone already ended the turn.
-            if (!match.busy) _busy = false;
+            // The host's own state is the truth after a reconnect or resume.
+            // Only a turn end the phone saw while this was in flight (or an
+            // ongoing Stop) outranks a busy:true that is older than that.
+            if (!match.busy) {
+              _busy = false;
+            } else if (!_stopping && endEpoch == _turnEndEpoch) {
+              _busy = true;
+            }
           }
           if (shouldSyncTranscript && _active?.agentSessionId == activeId) {
             // Merge host events only; phone notes live in their own key
@@ -1168,9 +1179,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       }
       if (_active?.agentSessionId == updated.agentSessionId) {
         _active = updated;
-        // Never resurrect Working from a stale busy:true packet after
-        // the turn already finished on the phone.
-        if (!updated.busy) {
+        // The host sends the session as it is when it sends it, so busy:true
+        // is a turn that runs now (started elsewhere, or missed while away).
+        if (updated.busy) {
+          if (!_stopping) _busy = true;
+        } else {
+          _turnEndEpoch++;
           _busy = false;
           if (_transcript.hasOpenTools && _runningAgents == 0) {
             _transcript.settleOpenTools(
@@ -1200,6 +1214,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   }
 
   void _setBusy(bool busy) {
+    if (!busy) _turnEndEpoch++;
     _busy = busy;
     final session = _active;
     if (session == null) return;
@@ -1483,6 +1498,27 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
   }
 
+  /// The host's current record of [s], or [s] itself when it cannot be read.
+  Future<AgentSessionInfo> _freshSession(
+    RpcClient client,
+    AgentSessionInfo s,
+  ) async {
+    try {
+      final raw = await client.requestList(
+        'agent.listSessions',
+        const {},
+        const Duration(seconds: 8),
+      );
+      for (final row in raw.whereType<Map>()) {
+        final info = AgentSessionInfo.fromJson(Map<String, dynamic>.from(row));
+        if (info.agentSessionId == s.agentSessionId) return info;
+      }
+    } catch (_) {
+      // Keep what the list had.
+    }
+    return s;
+  }
+
   Future<void> _openSession(AgentSessionInfo s) async {
     final client = _client;
     if (client == null) return;
@@ -1497,6 +1533,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         : await client.requestList('agent.history', {
             'agentSessionId': s.agentSessionId,
           });
+    if (gen != _syncGen) return;
+    // The list row may be older than the chat (updates missed while the page
+    // was closed or the socket was down): ask the host for the session now.
+    s = await _freshSession(client, s);
     if (gen != _syncGen) return;
     _hasOlder = page?['hasMore'] == true;
     if (!mounted) return;

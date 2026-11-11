@@ -1055,6 +1055,17 @@ function saveAgentSessionsToDisk(): void {
   }
 }
 
+/** True when the last user message was never followed by a result, an error or a stop. */
+export function turnLeftOpen(history: AgentEvent[]): boolean {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const e = history[i]!;
+    if (e.agentId) continue;
+    if (e.kind === 'result' || e.kind === 'error' || (e.kind === 'status' && e.text === 'cancelled')) return false;
+    if (e.kind === 'user') return true;
+  }
+  return false;
+}
+
 let agentSessionsLoaded = false;
 function loadAgentSessionsFromDisk(): void {
   if (agentSessionsLoaded) return;
@@ -1069,10 +1080,23 @@ function loadAgentSessionsFromDisk(): void {
       if (!def) continue;
       const loaded = Array.isArray(item.history) ? sanitizeAgentHistory(item.history) : [];
       // No process survives a host restart: open tools and sub-agents end here.
-      const history = closeDanglingAgents(closeDanglingToolStarts(loaded));
+      let history = closeDanglingAgents(closeDanglingToolStarts(loaded));
+      // A turn that was running (busy, or its user message stored but busy
+      // not yet) never gets its own end: give the phone one to show.
+      // (The store has already turned busy/running into 'interrupted' by now.)
+      const interrupted = (!!info.busy || ['running', 'waiting', 'interrupted'].includes(info.taskState ?? '')) && turnLeftOpen(history);
+      if (interrupted) {
+        history = [...history, {
+          seq: history.reduce((m, e) => Math.max(m, e.seq ?? 0), 0) + 1,
+          ts: Date.now(),
+          kind: 'error',
+          text: 'Interrupted: the PC host restarted while this turn was running. Send your message again to continue.',
+          turnId: info.turnId,
+        }];
+      }
       const lastLoaded = loaded.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
       const settled = history.filter((e) => (e.seq ?? 0) > lastLoaded);
-      const restored: AgentSessionInfo = { ...info, busy: false, status: 'running', taskState: info.busy ? 'interrupted' : (info.taskState || 'idle') };
+      const restored: AgentSessionInfo = { ...info, busy: false, status: 'running', taskState: interrupted ? 'interrupted' : (info.taskState || 'idle') };
       if (restored.runningAgents) restored.runningAgents = 0;
       if (settled.length) {
         // Store the closing events too, so agent.historyPage replays them.
@@ -1160,7 +1184,10 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
   const savedInfo={...session.info};
   void persistAgent({info:savedInfo,events:[full]}).then(()=>{
     broadcast({ type:'agent-event', agentSessionId:savedInfo.agentSessionId,event:full });
-    if(activityChanged || ['result','error','permission-request','user','status','agent-start','agent-end'].includes(full.kind)) broadcast({type:'agent-session-update',session:savedInfo});
+    // The session as it is now, not as it was when the event was emitted:
+    // setBusy() may have run in between, and an older snapshot sent after it
+    // would flip the phone's Working state the wrong way.
+    if(activityChanged || ['result','error','permission-request','user','status','agent-start','agent-end'].includes(full.kind)) broadcast({type:'agent-session-update',session:{...session.info}});
   }).catch(error=>{
     session.info.taskState='failed';
     broadcast({type:'agent-event',agentSessionId:session.info.agentSessionId,event:{kind:'error',seq:++session.seq,ts:Date.now(),text:'Task history could not be saved. Check host storage.'}});
@@ -1852,6 +1879,30 @@ export function sanitizeCliError(text: string, agentName: string): string {
     }
   }
   return cleaned;
+}
+
+/**
+ * The text of an error that ends a turn. Internal tool noise is hidden from
+ * history and chat, so as the end of a turn it would leave the phone with no
+ * visible reason; say that the turn stopped instead.
+ */
+export function turnEndError(text: string, agentName: string): string {
+  const cleaned = sanitizeCliError(text, agentName);
+  if (isInternalCliNoise(text) || isInternalCliNoise(cleaned)) {
+    return `${agentName} stopped after a rejected tool call (invalid arguments or a path outside its allowed folders). Send your request again.`;
+  }
+  return cleaned || `${agentName} stopped without saying why.`;
+}
+
+/** Wait for a stream to finish, but not forever: a child that inherited the pipe can outlive the CLI. */
+async function settleWithin<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => { timer = setTimeout(() => resolve(fallback), ms); });
+  try {
+    return await Promise.race([promise.catch(() => fallback), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function sanitizeAgentHistory(history: AgentEvent[]): AgentEvent[] {
@@ -3646,9 +3697,10 @@ class AntigravityAdapter implements AgentAdapter {
     this.proc = proc;
     proc.exited.then(async (code) => {
       if (this.streamGen !== gen) return;
-      await drained.catch(() => {});
+      // A grandchild that inherited the pipes must not keep the turn open.
+      await settleWithin(drained, 2000, undefined);
       if (this.streamGen !== gen) return;
-      const errText = await stderr.catch(() => '');
+      const errText = await settleWithin(stderr, 1000, stderrCombined);
       if (this.conversationId) {
         let changed = false;
         if (!this.session.info.hostChatId) {
@@ -3670,6 +3722,14 @@ class AntigravityAdapter implements AgentAdapter {
       if (!this.session.info.busy) return;
       setBusy(this.session, false);
       const isSuccess = (code === 0 && (this.sawResult || this.streamedText)) || (this.sawResult && code === 0);
+      if (code === 0 && !isSuccess) {
+        // Exited cleanly but never said anything: not a finished turn.
+        emit(this.session, {
+          kind: 'error',
+          text: 'Antigravity ended unexpectedly: it exited without a reply. Send your message again.',
+        });
+        return;
+      }
       const fail = finishCliTurn({
         sawResult: isSuccess,
         exitCode: code,
@@ -3679,8 +3739,7 @@ class AntigravityAdapter implements AgentAdapter {
         emit(this.session, this.pendingResult ?? { kind: 'result', text: '' });
         return;
       }
-      const cleaned = sanitizeCliError(fail.text ?? '', 'Antigravity');
-      emit(this.session, { kind: 'error', text: cleaned });
+      emit(this.session, { kind: 'error', text: turnEndError(fail.text ?? '', 'Antigravity') });
     }).catch(() => {});
   }
 
@@ -3775,7 +3834,7 @@ class AntigravityAdapter implements AgentAdapter {
       }
 
       const out = ev.kind === 'error'
-        ? { kind: 'error' as const, text: sanitizeCliError(ev.text ?? '', 'Antigravity') }
+        ? { kind: 'error' as const, text: turnEndError(ev.text ?? '', 'Antigravity') }
         : ev;
       emit(this.session, withoutDuplicateResult(out, this.streamedText));
     }

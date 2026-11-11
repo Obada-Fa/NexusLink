@@ -8,7 +8,7 @@ const directory = process.env.NEXUSLINK_DATA_DIR!;
 const id = 'replay-subagents';
 const info = {
   agentSessionId: id, agent: 'claude', cwd: '/tmp', title: 'Replay', createdAt: 1, updatedAt: 1,
-  busy: false, status: 'running', taskState: 'completed', runningAgents: 1, turnId: 't1',
+  busy: process.env.REPLAY_BUSY === '1', status: 'running', taskState: process.env.REPLAY_TASKSTATE ?? 'completed', runningAgents: Number(process.env.REPLAY_RUNNING_AGENTS ?? 1), turnId: 't1',
 };
 const events = JSON.parse(process.env.REPLAY_EVENTS!) as unknown[];
 
