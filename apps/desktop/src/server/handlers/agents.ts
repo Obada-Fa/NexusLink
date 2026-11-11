@@ -219,8 +219,8 @@ const CODEX_MODELS: AgentModelOption[] = [
 const CLAUDE_MODELS: AgentModelOption[] = [
   { id: 'default', name: 'Default', supportsEffort: true },
   { id: 'sonnet', name: 'Sonnet', supportsEffort: true },
-  { id: 'opus', name: 'Opus', supportsEffort: false },
-  { id: 'haiku', name: 'Haiku', supportsEffort: false },
+  { id: 'opus', name: 'Opus', supportsEffort: true },
+  { id: 'haiku', name: 'Haiku', supportsEffort: true },
 ];
 
 const AGENT_DEFS: AgentDef[] = [
@@ -679,8 +679,8 @@ export function isModelEffortSupported(agentId?: string, modelId?: string): bool
     return m.includes('gemini');
   }
   if (agent === 'claude') {
-    if (!m || m === 'default' || m === 'sonnet' || m.includes('sonnet')) return true;
-    if (m === 'opus' || m === 'haiku' || m.includes('opus') || m.includes('haiku')) return false;
+    // Measured with claude 2.1.319: default, sonnet, opus and haiku all send
+    // the requested effort (and opus takes `ultracode`, sent as xhigh).
     return true;
   }
   if (agent === 'cursor') {

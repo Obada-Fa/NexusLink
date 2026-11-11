@@ -436,7 +436,8 @@ describe('composer flags and attachments', () => {
     expect(claudeOpus).toContain('plan');
     expect(claudeOpus).toContain('--model');
     expect(claudeOpus).toContain('opus');
-    expect(claudeOpus).not.toContain('--effort');
+    // Opus takes --effort (measured with claude 2.1.319).
+    expect(claudeOpus.slice(claudeOpus.indexOf('--effort'), claudeOpus.indexOf('--effort') + 2)).toEqual(['--effort', 'high']);
 
     const claudeSonnet = claudeSpawnArgs({ bin: 'claude', mode: 'agent', model: 'sonnet', thinking: 'high' });
     expect(claudeSonnet).toContain('--model');
@@ -461,7 +462,9 @@ describe('composer flags and attachments', () => {
     expect(isModelEffortSupported('antigravity', 'gemini-3.7-flash')).toBe(true);
     expect(isModelEffortSupported('antigravity', 'claude-sonnet-4-6')).toBe(false);
     expect(isModelEffortSupported('claude', 'sonnet')).toBe(true);
-    expect(isModelEffortSupported('claude', 'opus')).toBe(false);
+    for (const model of ['default', 'opus', 'haiku', 'claude-opus-5-5', undefined]) {
+      expect(isModelEffortSupported('claude', model)).toBe(true);
+    }
     expect(isModelEffortSupported('cursor', 'auto')).toBe(false);
     expect(isModelEffortSupported('cursor', 'composer-2.5')).toBe(true);
 

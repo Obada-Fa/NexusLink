@@ -66,9 +66,9 @@ after the turn's result). Missing means 0.
 
 ### 1.4 Ultra Code advertisement
 
-`AgentModelOption.thinkingLevels?: string[]` — per-model thinking levels. For Code Agent models
-that support effort (`default`, `sonnet` today) it is `['low','medium','high','ultracode']`; for
-models without effort (`opus`, `haiku` per `isModelEffortSupported`) it is absent. The agent-wide
+`AgentModelOption.thinkingLevels?: string[]` — per-model thinking levels. Every Code Agent model
+supports effort (measured, section 6): `default`, `sonnet`, `opus` and `haiku` all have
+`supportsEffort: true` and `thinkingLevels: ['low','medium','high','ultracode']`. The agent-wide
 `capabilities.thinkingLevels` stays `['low','medium','high']`. See section 6 for why.
 
 ## 2. Lifecycle and ordering guarantees
@@ -158,10 +158,25 @@ chat/banner (label them with the agent's name); do not hide them inside the agen
 ## 6. Ultra Code
 
 - Value: thinking `"ultracode"` (send it as the existing `thinking` prompt option).
-- Host: for `claude`, models that support effort get `--effort ultracode`; it is part of the
-  process spawn key, so switching to/from it restarts the CLI with `--resume` (except while
-  sub-agents run, section 3). Models without effort get no `--effort` flag (as for other
-  levels).
+- Host: for `claude`, every model gets `--effort ultracode`; it is part of the process spawn key,
+  so switching to/from it restarts the CLI with `--resume` (except while sub-agents run,
+  section 3).
+- Which models take effort (measured 2026-11-11, claude 2.1.319, one-line `-p` runs, the effort
+  read from the API request the CLI recorded in the session transcript):
+
+  | model flag | resolved model | flag sent | request `effort` |
+  |---|---|---|---|
+  | `--model opus` | claude-opus-5-5 | `--effort ultracode` | `xhigh` |
+  | `--model sonnet` | claude-sonnet-5-5 | `--effort low` | `low` |
+  | `--model haiku` | claude-haiku-5-5 | `--effort low` | `low` |
+  | none (`default`) | claude-fable-5-2 | `--effort low` | `low` |
+
+  So `isModelEffortSupported('claude', …)` is now `true` for every model (it said false for
+  opus and haiku before). Consequence for existing levels: on **Opus and Haiku**, `low` now sends
+  `--effort low` and `high` sends `--effort high`, where before no `--effort` was sent at all
+  (the CLI default, `medium`, applied). `medium` still sends nothing. The phone's effort chip
+  (enabled by `supportsEffort`) now works for these models on released phones too, so a level a
+  phone keeps selected now takes effect on Opus/Haiku turns.
 - Other providers never receive it: the host maps `ultracode` to that agent's highest advertised
   level (Cursor/OpenCode `max`, Antigravity/Codex `high`, Demo `extra-high`); direct builder
   calls also treat it as `high`.

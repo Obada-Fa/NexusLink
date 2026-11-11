@@ -221,11 +221,15 @@ describe('replay helpers', () => {
 });
 
 describe('Ultra Code', () => {
-  test('claude passes --effort ultracode only for models with effort', () => {
-    const sonnet = claudeSpawnArgs({ bin: 'claude', model: 'sonnet', thinking: 'ultracode' });
-    expect(sonnet.slice(sonnet.indexOf('--effort'), sonnet.indexOf('--effort') + 2)).toEqual(['--effort', 'ultracode']);
-    expect(claudeSpawnArgs({ bin: 'claude', thinking: 'ultracode' })).toContain('ultracode');
-    expect(claudeSpawnArgs({ bin: 'claude', model: 'opus', thinking: 'ultracode' })).not.toContain('--effort');
+  test('claude passes --effort ultracode for every Code Agent model', () => {
+    const effortOf = (argv: string[]) => (argv.includes('--effort') ? argv[argv.indexOf('--effort') + 1] : undefined);
+    for (const model of ['sonnet', 'opus', 'haiku', 'default', undefined]) {
+      expect(effortOf(claudeSpawnArgs({ bin: 'claude', model, thinking: 'ultracode' }))).toBe('ultracode');
+    }
+    // Opus and Haiku used to get no --effort at all; now low/high reach them too.
+    expect(effortOf(claudeSpawnArgs({ bin: 'claude', model: 'opus', thinking: 'low' }))).toBe('low');
+    expect(effortOf(claudeSpawnArgs({ bin: 'claude', model: 'haiku', thinking: 'high' }))).toBe('high');
+    expect(effortOf(claudeSpawnArgs({ bin: 'claude', model: 'opus', thinking: 'medium' }))).toBeUndefined();
     // Unchanged: other levels (xhigh/max still collapse to high for claude).
     expect(claudeSpawnArgs({ bin: 'claude', model: 'sonnet', thinking: 'max' })).toContain('high');
     expect(claudeSpawnArgs({ bin: 'claude', model: 'sonnet', thinking: 'medium' })).not.toContain('--effort');
@@ -263,8 +267,9 @@ describe('Ultra Code', () => {
     const levels = Object.fromEntries(claude.capabilities.models.map((m) => [m.id, m.thinkingLevels]));
     expect(levels.default).toEqual(['low', 'medium', 'high', 'ultracode']);
     expect(levels.sonnet).toEqual(['low', 'medium', 'high', 'ultracode']);
-    expect(levels.opus).toBeUndefined();
-    expect(levels.haiku).toBeUndefined();
+    expect(levels.opus).toEqual(['low', 'medium', 'high', 'ultracode']);
+    expect(levels.haiku).toEqual(['low', 'medium', 'high', 'ultracode']);
+    expect(claude.capabilities.models.every((m) => m.supportsEffort === true)).toBe(true);
     for (const agent of agents.filter((a) => a.id !== 'claude')) {
       expect(agent.capabilities.thinkingLevels).not.toContain('ultracode');
       expect(agent.capabilities.models.every((m) => m.thinkingLevels === undefined)).toBe(true);
