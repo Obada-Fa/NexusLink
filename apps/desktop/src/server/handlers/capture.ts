@@ -366,6 +366,9 @@ function spawnGrabber(
   );
 }
 
+/** Consecutive missing-region checks before a tracked capture is stopped. */
+const REGION_MISS_LIMIT = 3;
+
 function regionsDiffer(a: Region, b: Region): boolean {
   return a.x !== b.x || a.y !== b.y || a.width !== b.width || a.height !== b.height;
 }
@@ -455,13 +458,17 @@ export function startCapture(
 
   void pumpFrames(session, session.gen).catch(() => {});
 
+  let missStreak = 0;
   const regrab = (current: Region | null) => {
     if (!sessions.has(id)) return;
     const next = current && clampRegion(current, display ? current : getScreenMetadata());
     if (!next || next.width < 16 || next.height < 16) {
-      stopCapture(id);
+      // One failed xwininfo/xrandr read must not end the stream; only a
+      // region that stays gone for several checks does.
+      if (++missStreak >= REGION_MISS_LIMIT) stopCapture(id);
       return;
     }
+    missStreak = 0;
     if (!session.region || !regionsDiffer(session.region, next)) return;
     session.region = next;
     if (!session.paused) restartGrabber(session, next);
