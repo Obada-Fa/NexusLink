@@ -1270,8 +1270,12 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
               bottom: overlayBottom,
               child: SafeArea(child: _zoomBadge()),
             ),
+          // Keyed: the button above disappears when the IME opens, and without a
+          // key that shift rebuilds the hidden field, which drops the IME
+          // connection (keyboard visible, typing goes nowhere).
           if (_keyboardOpen)
             Positioned(
+              key: const ValueKey('stream-key-bar'),
               left: 0,
               right: 0,
               bottom: barBottom,

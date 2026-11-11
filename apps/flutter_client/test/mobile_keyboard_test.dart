@@ -85,6 +85,48 @@ void main() {
     );
   }
 
+  testWidgets('typing still reaches the field after the IME opens', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [activeClientProvider.overrideWithValue(null)],
+        child: const MaterialApp(
+          home: MirrorScreen(target: MirrorTarget(title: 'Test app')),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byTooltip('Show or hide keyboard'));
+    await tester.pump();
+    final before = tester.state(find.byType(EditableText));
+    tester.testTextInput.log.clear();
+
+    // The IME rising removes the floating keyboard button above the bar.
+    addTearDown(tester.view.resetViewInsets);
+    tester.view.viewInsets = FakeViewPadding(
+      bottom: 300 * tester.view.devicePixelRatio,
+    );
+    await tester.pump();
+
+    expect(tester.state(find.byType(EditableText)), same(before));
+    expect(
+      tester.testTextInput.log.map((call) => call.method),
+      isNot(contains('TextInput.clearClient')),
+    );
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: '${imeSentinel}abc',
+        selection: TextSelection.collapsed(offset: 4),
+      ),
+    );
+    await tester.pump();
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.controller!.text, '${imeSentinel}abc');
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('open IME floats over the stream with the key bar above it', (
     tester,
   ) async {
