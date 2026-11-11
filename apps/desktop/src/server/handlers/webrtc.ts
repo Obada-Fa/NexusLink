@@ -3,7 +3,7 @@
 import { fileURLToPath } from 'node:url';
 import type { WsMessage, WebRtcClientSignal, WebRtcSignal } from '@nexuslink/rpc-types';
 import { getAppSession, getSessionAudioSource } from './app-sessions';
-import { getCaptureTarget, pauseCapture, watchCapture } from './capture';
+import { getCaptureTarget, pauseCapture, stopCapture, watchCapture } from './capture';
 
 const agentPath = fileURLToPath(new URL('../webrtc-agent.py', import.meta.url));
 const pci = () => process.env.NEXUSLINK_VAAPI_PCI || '0000:03:00.0';
@@ -156,7 +156,10 @@ export async function startWebrtc(
   }
   stream.startupTimer = setTimeout(() => fail(stream, 'WebRTC connection timed out'), 15_000);
   stream.authTimer = setInterval(() => {
-    if (ws.readyState !== 1 || !authorized(ws)) stopWebrtc(id);
+    if (ws.readyState !== 1 || !authorized(ws)) {
+      stopWebrtc(id);
+      if (streamId) stopCapture(streamId, ws);
+    }
   }, 1000);
   void pumpAgent(stream).then(
     () => fail(stream, 'H.264 encoder exited'),

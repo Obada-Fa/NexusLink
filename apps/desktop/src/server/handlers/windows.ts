@@ -401,10 +401,9 @@ export async function listWindows(): Promise<WindowInfo[]> {
 
 /** Original geometry per adopted window, restored on release. */
 const savedGeometry = new Map<string, CaptureRegion & { maximized: boolean }>();
-/** Placement + live capture rect so the stream follows the window. */
+/** Placement used to compute the capture rect as the window moves. */
 const adoptedSessions = new Map<string, {
   aspect: number;
-  region: CaptureRegion;
   target: { x: number; y: number; width: number; height: number };
 }>();
 
@@ -517,7 +516,7 @@ export async function adoptWindow(
   }
 
   const cropped = streamRegionForAdopted(actual, target, aspect, screen);
-  adoptedSessions.set(windowId, { aspect, region: cropped, target });
+  adoptedSessions.set(windowId, { aspect, target });
 
   return { region: cropped };
 }
@@ -527,11 +526,9 @@ export function getAdoptedCaptureRegion(windowId: string): CaptureRegion | null 
   const session = adoptedSessions.get(windowId);
   if (!session) return null;
   const live = getWindowGeometry(windowId);
-  if (!live) return session.region;
+  if (!live) return null;
   const screen = getScreenMetadata();
-  const cropped = streamRegionForAdopted(live, session.target, session.aspect, screen);
-  session.region = cropped;
-  return cropped;
+  return streamRegionForAdopted(live, session.target, session.aspect, screen);
 }
 
 /** Restore a previously adopted window to its original geometry. */

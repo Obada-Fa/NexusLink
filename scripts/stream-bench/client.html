@@ -2,10 +2,14 @@
 <html lang="en">
 <meta charset="utf-8">
 <title>NexusLink stream benchmark</title>
+<video autoplay muted playsinline style="position:absolute;width:1px;height:1px"></video>
 <canvas></canvas>
 <script type="module">
 const canvas = document.querySelector('canvas');
 const context = canvas.getContext('2d', { willReadFrequently: true });
+const video = document.querySelector('video');
+const options = new URLSearchParams(location.search);
+const h264 = options.get('codec') === 'h264';
 const socket = new WebSocket(`ws://${location.host}/stream`);
 socket.binaryType = 'arraybuffer';
 
@@ -13,77 +17,227 @@ const durationMs = 10000;
 const taps = 10;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const now = () => performance.now();
-let bytes = 0;
-let frames = 0;
+const send = (message) => socket.send(JSON.stringify(message));
+let mjpegBytes = 0;
+let mjpegFrames = 0;
+let h264Frames = 0;
 let marker;
 let pendingTap;
 let latestFrame;
 let decoding = false;
-let pictureReady;
-const firstPicture = new Promise((resolve) => { pictureReady = resolve; });
+let useWebrtc = false;
+let webRtcStopped = false;
+let connectedAt;
+let mjpegStartedMs;
+let h264StartedMs;
+let resolvePicture;
+let fallbackPicture;
+const firstPicture = new Promise((resolve) => { resolvePicture = resolve; });
+let failSent = false;
 
-async function drawFrames() {
+function fail(error) {
+  if (!failSent && socket.readyState === WebSocket.OPEN) {
+    failSent = true;
+    send({ error: String(error) });
+  }
+}
+
+function draw(image, width, height) {
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  context.drawImage(image, 0, 0);
+  const [red, green] = context.getImageData(
+    Math.floor(width * 0.12), Math.floor(height * 0.12), 1, 1,
+  ).data;
+  if (Math.abs(red - green) < 80) throw new Error('Unexpected tap marker colour');
+  marker = red > green;
+  if (pendingTap && marker !== pendingTap.previous) {
+    pendingTap.finish(now() - pendingTap.started);
+    pendingTap = undefined;
+  }
+}
+
+function checkCrop() {
+  // The top-left corner of the cropped test window is inside the marker.
+  // A whole-screen grab at that position would be outside the test window.
+  const [red, green] = context.getImageData(
+    Math.floor(canvas.width * 0.025), Math.floor(canvas.height * 0.025), 1, 1,
+  ).data;
+  if (Math.abs(red - green) < 80) throw new Error('The decoded picture has the wrong crop');
+}
+
+async function drawJpegs() {
   if (decoding) return;
   decoding = true;
   try {
-    while (latestFrame) {
+    while (latestFrame && !useWebrtc) {
       const data = latestFrame;
       latestFrame = undefined;
       const image = await createImageBitmap(new Blob([data], { type: 'image/jpeg' }));
-      if (canvas.width !== image.width || canvas.height !== image.height) {
-        canvas.width = image.width;
-        canvas.height = image.height;
+      try {
+        if (useWebrtc) return;
+        draw(image, image.width, image.height);
+      } finally {
+        image.close();
       }
-      context.drawImage(image, 0, 0);
-      image.close();
-      const [red, green] = context.getImageData(
-        Math.floor(canvas.width * 0.12), Math.floor(canvas.height * 0.12), 1, 1,
-      ).data;
-      if (Math.abs(red - green) < 80) throw new Error('Unexpected tap marker colour');
-      marker = red > green;
-      frames++;
-      pictureReady();
-      if (pendingTap && marker !== pendingTap.previous) {
-        pendingTap.finish(now() - pendingTap.started);
-        pendingTap = undefined;
+      mjpegFrames++;
+      if (mjpegStartedMs === undefined) {
+        mjpegStartedMs = now() - connectedAt;
+        checkCrop();
+        if (!h264) resolvePicture();
       }
+      fallbackPicture?.();
     }
   } finally {
     decoding = false;
   }
 }
 
-function fail(error) {
-  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ error: String(error) }));
+const pc = h264 ? new RTCPeerConnection({ iceServers: [] }) : null;
+const pendingIce = [];
+let signalQueue = Promise.resolve();
+let rtcCodec;
+let rtcRemoteStream;
+if (pc) {
+  pc.onicecandidate = ({ candidate }) => {
+    if (candidate) send({ type: 'signal', data: {
+      kind: 'ice', candidate: candidate.candidate, sdpMLineIndex: candidate.sdpMLineIndex,
+    } });
+  };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed' && !webRtcStopped) fail('WebRTC connection failed');
+  };
+  pc.ontrack = ({ track, streams }) => {
+    rtcRemoteStream = streams.length > 0;
+    video.srcObject = streams[0] ?? new MediaStream([track]);
+    video.play().catch(fail);
+    video.requestVideoFrameCallback(drawWebrtc);
+  };
 }
 
+function drawWebrtc() {
+  if (webRtcStopped || failSent) return;
+  try {
+    draw(video, video.videoWidth, video.videoHeight);
+    h264Frames++;
+    if (h264StartedMs === undefined) {
+      h264StartedMs = now() - connectedAt;
+      checkCrop();
+      useWebrtc = true;
+      latestFrame = undefined;
+      send({ type: 'signal', data: { kind: 'playing' } });
+      resolvePicture();
+    }
+    video.requestVideoFrameCallback(drawWebrtc);
+  } catch (error) {
+    fail(error);
+  }
+}
+
+async function handleSignal(message) {
+  if (message.type === 'webrtc-start' && !message.available) {
+    throw new Error(message.reason || 'H.264 unavailable');
+  }
+  if (message.type !== 'webrtc-signal' || webRtcStopped) return;
+  const data = message.data;
+  if (data.kind === 'error') throw new Error(data.reason);
+  if (data.kind === 'offer') {
+    await pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    if (!/a=rtpmap:\d+ H264\/90000/i.test(answer.sdp)) throw new Error('Answer rejected H.264');
+    send({ type: 'signal', data: { kind: 'answer', sdp: answer.sdp } });
+    for (const ice of pendingIce.splice(0)) await pc.addIceCandidate(ice);
+  }
+  if (data.kind === 'ice') {
+    const ice = { candidate: data.candidate, sdpMLineIndex: data.sdpMLineIndex };
+    if (pc.remoteDescription) await pc.addIceCandidate(ice);
+    else pendingIce.push(ice);
+  }
+}
+
+socket.onopen = () => {
+  connectedAt = now();
+  if (h264) send({ type: 'start-h264' });
+};
+
 socket.onmessage = ({ data }) => {
+  if (typeof data === 'string') {
+    signalQueue = signalQueue.then(() => handleSignal(JSON.parse(data))).catch(fail);
+    return;
+  }
   if (!(data instanceof ArrayBuffer) || new DataView(data).getUint32(0, true) !== 0x4e4c4631) {
     fail('Expected an NLF1 frame');
     return;
   }
-  bytes += data.byteLength;
+  mjpegBytes += data.byteLength;
+  if (useWebrtc) return;
   latestFrame = data.slice(16);
-  drawFrames().catch(fail);
+  drawJpegs().catch(fail);
 };
 
-async function measure() {
-  await Promise.race([
-    firstPicture,
-    sleep(12000).then(() => { throw new Error('No decoded picture after 12 seconds'); }),
+async function sample() {
+  let bytes = mjpegBytes;
+  const frames = h264 ? h264Frames : mjpegFrames;
+  if (h264) {
+    const stats = await pc.getStats();
+    const inbound = [...stats.values()].find((report) => report.type === 'inbound-rtp' && report.kind === 'video');
+    if (!inbound) throw new Error('No inbound WebRTC video stats');
+    rtcCodec = stats.get(inbound.codecId)?.mimeType;
+    if (rtcCodec?.toLowerCase() !== 'video/h264') throw new Error(`Unexpected codec: ${rtcCodec}`);
+    bytes = inbound.bytesReceived;
+  }
+  return { bytes, frames, mjpegBytes, at: now() };
+}
+
+function bitrate(before, after) {
+  return (after.bytes - before.bytes) * 8 / (after.at - before.at);
+}
+
+async function checkQos(normalKbitPerSecond) {
+  send({ type: 'signal', data: { kind: 'zoom', zoomed: true } });
+  await sleep(1500);
+  const zoomStart = await sample();
+  await sleep(2000);
+  const zoom = bitrate(zoomStart, await sample());
+  send({ type: 'signal', data: { kind: 'zoom', zoomed: false } });
+  for (let i = 0; i < 4; i++) {
+    send({ type: 'signal', data: { kind: 'stats', fps: 8, loss: 0.08, jitterMs: 70 } });
+    await sleep(1900);
+  }
+  const floorStart = await sample();
+  await sleep(2000);
+  const floor = bitrate(floorStart, await sample());
+  if (zoom <= normalKbitPerSecond * 1.10 || floor >= normalKbitPerSecond * 0.80) {
+    throw new Error(`Expected encoder bitrate to respond to feedback (normal ${normalKbitPerSecond}, zoom ${zoom}, floor ${floor})`);
+  }
+  return { zoomKbitPerSecond: zoom, floorKbitPerSecond: floor };
+}
+
+function deadline(promise, timeout, message) {
+  return Promise.race([
+    promise,
+    sleep(timeout).then(() => { throw new Error(message); }),
   ]);
+}
+
+async function measure() {
+  await deadline(firstPicture, 12000, 'No decoded picture after 12 seconds');
   await sleep(1000);
-  const initialBytes = bytes;
-  const initialFrames = frames;
-  const started = now();
-  const throughput = sleep(durationMs).then(() => {
-    const seconds = (now() - started) / 1000;
+  const initial = await sample();
+  const throughput = sleep(durationMs).then(async () => {
+    const final = await sample();
+    if (h264 && final.mjpegBytes !== initial.mjpegBytes) throw new Error('MJPEG continued alongside H.264');
+    const seconds = (final.at - initial.at) / 1000;
     return {
       seconds,
-      kbitPerSecond: (bytes - initialBytes) * 8 / seconds / 1000,
-      fps: (frames - initialFrames) / seconds,
+      kbitPerSecond: bitrate(initial, final),
+      fps: (final.frames - initial.frames) / seconds,
     };
   });
+
   const tapMs = [];
   for (let i = 0; i < taps; i++) {
     // Vary the tap spacing to sample different phases of the capture clock.
@@ -106,8 +260,25 @@ async function measure() {
     if (delay === null) throw new Error(`Tap ${i + 1} did not change the picture within 2 seconds`);
     tapMs.push(delay);
   }
-  const result = { ...(await throughput), width: canvas.width, height: canvas.height, tapMs };
-  socket.send(JSON.stringify({ result }));
+  const result = {
+    ...(await throughput), width: canvas.width, height: canvas.height, tapMs,
+    mjpegStartedMs, h264StartedMs, rtcCodec, rtcRemoteStream,
+  };
+  if (h264 && options.get('qos') === '1') {
+    result.qos = await checkQos(result.kbitPerSecond);
+  }
+
+  if (h264 && options.get('fallback') === '1') {
+    const started = now();
+    webRtcStopped = true;
+    pc.close();
+    useWebrtc = false;
+    const fallback = new Promise((resolve) => { fallbackPicture = resolve; });
+    send({ type: 'stop-h264' });
+    await deadline(fallback, 6000, 'MJPEG did not resume after stopping WebRTC');
+    result.fallbackMs = now() - started;
+  }
+  send({ result });
 }
 
 measure().catch(fail);
