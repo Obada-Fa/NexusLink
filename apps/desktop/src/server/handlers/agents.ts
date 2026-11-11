@@ -316,10 +316,10 @@ export function getCachedAgentIcon(_agentId: string): string | undefined {
 export function listAgents(): AgentInfo[] {
   return AGENT_DEFS.map((d) => {
     const catalog = listAgentModels(d.id);
-    const models = collapseModelFamilies(catalog).map((m) => ({
+    const models = withModelThinkingLevels(d.id, collapseModelFamilies(catalog).map((m) => ({
       ...m,
       supportsEffort: m.supportsEffort ?? isModelEffortSupported(d.id, m.id),
-    }));
+    })));
     const bin = d.bin ? which(d.bin) : null;
     return {
       id: d.id,
@@ -586,10 +586,40 @@ function refreshAgentModels(agentId: string, network = false): Promise<void> {
 }
 
 function augmentAgentModels(agentId: string, models: AgentModelOption[]): AgentModelOption[] {
-  return models.map((m) => ({
+  return withModelThinkingLevels(agentId, models.map((m) => ({
     ...m,
     supportsEffort: m.supportsEffort ?? isModelEffortSupported(agentId, m.id),
-  }));
+  })));
+}
+
+/** Code Agent only: the session setting that `--effort ultracode` selects. */
+export const ULTRACODE_THINKING = 'ultracode';
+
+/**
+ * Ultra Code is offered per model, not in the agent-wide thinkingLevels:
+ * released phones label unknown levels "Medium", so a new agent-wide entry
+ * would show them a second "Medium" that silently runs Ultra Code.
+ */
+function withModelThinkingLevels(agentId: string, models: AgentModelOption[]): AgentModelOption[] {
+  if (agentId !== 'claude') return models;
+  const base = AGENT_DEFS.find((d) => d.id === agentId)?.capabilities.thinkingLevels ?? [];
+  return models.map((m) =>
+    m.supportsEffort === false || !isModelEffortSupported(agentId, m.id)
+      ? m
+      : { ...m, thinkingLevels: [...base.filter((l) => l !== ULTRACODE_THINKING), ULTRACODE_THINKING] },
+  );
+}
+
+/**
+ * The thinking value an adapter receives. `ultracode` is a Code Agent setting;
+ * any other agent gets its own highest advertised level instead, so the value
+ * never reaches another CLI's flags.
+ */
+export function normalizeThinkingForAgent(agentId: string, thinking?: string): string | undefined {
+  if ((thinking ?? '').toLowerCase() !== ULTRACODE_THINKING) return thinking;
+  if (agentId === 'claude') return ULTRACODE_THINKING;
+  const levels = AGENT_DEFS.find((d) => d.id === agentId)?.capabilities.thinkingLevels ?? [];
+  return levels.at(-1) ?? 'high';
 }
 
 /**
@@ -632,7 +662,9 @@ export function thinkingToEffort(thinking?: string): 'low' | 'medium' | 'high' |
   const t = thinking.toLowerCase();
   if (t === 'none' || t === 'off') return undefined;
   if (t === 'low' || t === 'minimal') return 'low';
-  if (t === 'high' || t === 'extra-high' || t === 'max' || t === 'xhigh') return 'high';
+  // `ultracode` only reaches here if a caller skipped normalizeThinkingForAgent:
+  // treat it as the highest level these three-step CLIs know.
+  if (t === 'high' || t === 'extra-high' || t === 'max' || t === 'xhigh' || t === ULTRACODE_THINKING) return 'high';
   return 'medium';
 }
 
@@ -683,7 +715,7 @@ export function cursorModelFlag(model?: string, thinking?: string): string | und
   // Cursor model ids already encode thinking (…-thinking-high, …-xhigh).
   if (/thinking|xhigh|-high|-low|-medium|-max|-fast/i.test(m)) return m;
   const effort = thinkingToEffort(thinking);
-  const extraHigh = ['extra-high', 'max', 'xhigh'].includes((thinking || '').toLowerCase());
+  const extraHigh = ['extra-high', 'max', 'xhigh', ULTRACODE_THINKING].includes((thinking || '').toLowerCase());
   if (!effort || (effort === 'medium' && !extraHigh)) return m;
   return `${m}[effort=${effort}${extraHigh ? ',fast=false' : ''}]`;
 }
@@ -763,7 +795,7 @@ export function buildOpencodeArgv(opts: {
   if (opts.mode === 'plan') argv.push('--agent', 'plan');
   if (isModelEffortSupported('opencode', opts.model)) {
     const variant = opts.thinking && opts.thinking !== 'medium' ? opts.thinking : undefined;
-    if (variant) argv.push('--variant', variant === 'extra-high' ? 'max' : variant);
+    if (variant) argv.push('--variant', variant === 'extra-high' || variant === ULTRACODE_THINKING ? 'max' : variant);
   }
   if (opts.session) argv.push('--session', opts.session);
   for (const p of opts.imagePaths ?? []) argv.push('--file', p);
@@ -825,8 +857,14 @@ export function claudeSpawnArgs(opts: {
   if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
   if (opts.resumeId) argv.push('--resume', opts.resumeId);
   if (isModelEffortSupported('claude', opts.model)) {
-    const effort = thinkingToEffort(opts.thinking);
-    if (effort && effort !== 'medium') argv.push('--effort', effort);
+    if ((opts.thinking ?? '').toLowerCase() === ULTRACODE_THINKING) {
+      // In --print mode (CLI 2.1.319) this sends the same request as
+      // `--effort xhigh`; see docs/AGENT-SUBAGENT-EVENTS.md.
+      argv.push('--effort', ULTRACODE_THINKING);
+    } else {
+      const effort = thinkingToEffort(opts.thinking);
+      if (effort && effort !== 'medium') argv.push('--effort', effort);
+    }
   }
   return argv;
 }
@@ -1029,11 +1067,20 @@ function loadAgentSessionsFromDisk(): void {
       const info: AgentSessionInfo = item.info;
       const def = AGENT_DEFS.find((d) => d.id === info.agent);
       if (!def) continue;
-      const history = Array.isArray(item.history)
-        ? closeDanglingToolStarts(sanitizeAgentHistory(item.history))
-        : [];
+      const loaded = Array.isArray(item.history) ? sanitizeAgentHistory(item.history) : [];
+      // No process survives a host restart: open tools and sub-agents end here.
+      const history = closeDanglingAgents(closeDanglingToolStarts(loaded));
+      const lastLoaded = loaded.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
+      const settled = history.filter((e) => (e.seq ?? 0) > lastLoaded);
+      const restored: AgentSessionInfo = { ...info, busy: false, status: 'running', taskState: info.busy ? 'interrupted' : (info.taskState || 'idle') };
+      if (restored.runningAgents) restored.runningAgents = 0;
+      if (settled.length) {
+        // Store the closing events too, so agent.historyPage replays them.
+        void persistAgent({ info: { ...restored }, events: settled })
+          .catch((error) => console.error('[agents] Persistence failed:', error.message));
+      }
       const session: AgentSession = {
-        info: { ...info, busy: false, status: 'running', taskState: info.busy ? 'interrupted' : (info.taskState || 'idle') },
+        info: restored,
         history,
         adapter: null as unknown as AgentAdapter,
         seq: history.length > 0 ? (history[history.length - 1].seq ?? 0) : 0,
@@ -1113,7 +1160,7 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
   const savedInfo={...session.info};
   void persistAgent({info:savedInfo,events:[full]}).then(()=>{
     broadcast({ type:'agent-event', agentSessionId:savedInfo.agentSessionId,event:full });
-    if(activityChanged || ['result','error','permission-request','user','status'].includes(full.kind)) broadcast({type:'agent-session-update',session:savedInfo});
+    if(activityChanged || ['result','error','permission-request','user','status','agent-start','agent-end'].includes(full.kind)) broadcast({type:'agent-session-update',session:savedInfo});
   }).catch(error=>{
     session.info.taskState='failed';
     broadcast({type:'agent-event',agentSessionId:session.info.agentSessionId,event:{kind:'error',seq:++session.seq,ts:Date.now(),text:'Task history could not be saved. Check host storage.'}});
@@ -1122,7 +1169,7 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
 
   // If no active websocket clients are connected (e.g. mobile app is closed/screen off),
   // send a native push notification to registered devices.
-  if (!hasActivePushSessions()) {
+  if (!hasActivePushSessions() && !isResultWhileAgentsRun(full, session.info)) {
     if (full.kind === 'result') {
       const title = session.info.title ? `Agent Done (${session.info.title})` : 'Agent is Done';
       const body = (full.text || '').trim() || 'The agent has finished working.';
@@ -1155,6 +1202,14 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
       });
     }
   }
+}
+
+/**
+ * A result while sub-agents still run is not "done": background agents bring
+ * a second round with its own result, and that one sends the push instead.
+ */
+export function isResultWhileAgentsRun(event: Pick<AgentEvent, 'kind'>, info: Pick<AgentSessionInfo, 'runningAgents'>): boolean {
+  return event.kind === 'result' && (info.runningAgents ?? 0) > 0;
 }
 
 function setBusy(session: AgentSession, busy: boolean): void {
@@ -1445,8 +1500,9 @@ export function agentHistory(agentSessionId: string): AgentEvent[] {
     seedHistory(session, history);
   }
   session.history = sanitizeAgentHistory(session.history);
-  if (!session.info.busy) {
-    const settled = closeDanglingToolStarts(session.history);
+  // Background sub-agents keep tools open after the turn's result.
+  if (!session.info.busy && !(session.info.runningAgents ?? 0)) {
+    const settled = closeDanglingAgents(closeDanglingToolStarts(session.history));
     if (settled.length !== session.history.length) {
       session.history = settled;
       session.seq = Math.max(session.seq, settled[settled.length - 1]?.seq ?? 0);
@@ -1492,7 +1548,7 @@ export function promptAgent(
   session.adapter.prompt(text.trim() || 'Please look at the attached image(s).', {
     model: opts.model,
     mode: opts.mode,
-    thinking: opts.thinking,
+    thinking: normalizeThinkingForAgent(session.info.agent, opts.thinking),
     imagePaths: materialized.paths,
     images: materialized.files,
   });
@@ -1570,7 +1626,7 @@ export function cancelAgent(agentSessionId: string): { ok: boolean } {
   if (session.info.hostChatId) {
     killHostChatProcesses(session.info.agent, session.info.hostChatId);
   }
-  const settled = closeDanglingToolStarts(session.history, 'Stopped.');
+  const settled = closeDanglingAgents(closeDanglingToolStarts(session.history, 'Stopped.'), 'Stopped.');
   if (settled.length !== session.history.length) {
     session.history = settled;
     session.seq = Math.max(session.seq, settled[settled.length - 1]?.seq ?? 0);
@@ -1851,6 +1907,295 @@ export function closeDanglingToolStarts(
     refId: start.refId,
   }));
   return [...history, ...extra];
+}
+
+const AGENT_RECORD_KEYS = [
+  'agentId', 'refId', 'agentName', 'agentType', 'agentDepth', 'agentParentId', 'agentBackground',
+] as const;
+
+/** Copy the sub-agent record fields of an agent-* event (no kind/seq/text). */
+function agentRecord(e: Partial<AgentEvent>): Partial<AgentEvent> {
+  const out: Partial<AgentEvent> = {};
+  for (const key of AGENT_RECORD_KEYS) {
+    if (e[key] !== undefined) (out as Record<string, unknown>)[key] = e[key];
+  }
+  return out;
+}
+
+/** Latest agent-start/agent-update of every sub-agent that has no agent-end after it. */
+export function runningAgentEvents(history: AgentEvent[]): AgentEvent[] {
+  const latest = new Map<string, AgentEvent>();
+  for (const e of history) {
+    if (!e.agentId) continue;
+    if (e.kind === 'agent-start' || e.kind === 'agent-update') latest.set(e.agentId, e);
+    else if (e.kind === 'agent-end') latest.delete(e.agentId);
+  }
+  return [...latest.values()];
+}
+
+/**
+ * End sub-agents that never got an agent-end (host restart, lost process), so
+ * a replay never shows an agent running forever. Deepest agents end first.
+ */
+export function closeDanglingAgents(
+  history: AgentEvent[],
+  text = 'Interrupted — host restarted.',
+): AgentEvent[] {
+  const open = runningAgentEvents(history);
+  if (open.length === 0) return history;
+  const turns = new Map<string, string>();
+  for (const e of history) if (e.agentId && e.turnId) turns.set(e.agentId, e.turnId);
+  let seq = history.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
+  const extra: AgentEvent[] = open
+    .sort((a, b) => (b.agentDepth ?? 1) - (a.agentDepth ?? 1))
+    .map((last) => ({
+      ...agentRecord(last),
+      seq: ++seq,
+      ts: Date.now(),
+      kind: 'agent-end' as const,
+      agentStatus: 'stopped' as const,
+      text,
+      ...(turns.has(last.agentId!) ? { turnId: turns.get(last.agentId!) } : {}),
+    }));
+  return [...history, ...extra];
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code sub-agents (stream-json `system` task events + parent_tool_use_id)
+// ---------------------------------------------------------------------------
+
+interface TrackedAgent {
+  agentId: string;
+  refId?: string;
+  agentName?: string;
+  agentType?: string;
+  agentDepth: number;
+  agentParentId?: string;
+  agentBackground: boolean;
+  running: boolean;
+  /** Latest progress line, repeated on agent-update events. */
+  lastText?: string;
+}
+
+function str(value: unknown): string | undefined {
+  return typeof value === 'string' && value ? value : undefined;
+}
+
+/** task_notification status → agentStatus. */
+export function claudeTaskStatus(status: unknown): 'completed' | 'failed' | 'stopped' {
+  const s = String(status ?? '').toLowerCase();
+  if (/fail|error/.test(s)) return 'failed';
+  if (/kill|stop|cancel|abort|interrupt/.test(s)) return 'stopped';
+  return 'completed';
+}
+
+/**
+ * Turns `task_started` / `task_progress` / `task_updated` / `task_notification`
+ * into agent-start / agent-update / agent-end, and tells which sub-agent owns a
+ * message. Only agent tasks count: background shell commands (`local_bash`)
+ * are tasks too but are not agents.
+ */
+export class ClaudeSubagentTracker {
+  private agents = new Map<string, TrackedAgent>();
+  private byTask = new Map<string, string>();
+  private byToolUse = new Map<string, string>();
+
+  get runningCount(): number {
+    let n = 0;
+    for (const a of this.agents.values()) if (a.running) n++;
+    return n;
+  }
+
+  isRunning(agentId: string): boolean {
+    return this.agents.get(agentId)?.running === true;
+  }
+
+  /** agentId for a task id the CLI used (agent_id on messages / control requests). */
+  knownAgent(taskId: unknown): string | undefined {
+    const id = str(taskId);
+    if (!id) return undefined;
+    const mapped = this.byTask.get(id) ?? id;
+    return this.agents.has(mapped) ? mapped : undefined;
+  }
+
+  private event(kind: 'agent-start' | 'agent-update' | 'agent-end', a: TrackedAgent, extra: Partial<AgentEvent> = {}): AgentDelta {
+    const out: AgentDelta = { kind, agentId: a.agentId };
+    if (a.refId) out.refId = a.refId;
+    if (a.agentName) out.agentName = a.agentName;
+    if (a.agentType) out.agentType = a.agentType;
+    out.agentDepth = a.agentDepth;
+    if (a.agentParentId) out.agentParentId = a.agentParentId;
+    out.agentBackground = a.agentBackground;
+    out.agentStatus = 'running';
+    return { ...out, ...extra };
+  }
+
+  /**
+   * Owner of an assistant/user message. Messages carry `agent_id` and
+   * `parent_tool_use_id`; when the agent was never announced, an agent-start
+   * is synthesized so an agentId is never seen before its start.
+   */
+  ownerOf(msg: Record<string, unknown>): { agentId?: string; starts: AgentDelta[] } {
+    const parent = str(msg.parent_tool_use_id);
+    if (!parent) return { starts: [] };
+    const taskId = str(msg.agent_id);
+    const known = (taskId && this.knownAgent(taskId)) || this.byToolUse.get(parent);
+    if (known) return { agentId: known, starts: [] };
+    const agent: TrackedAgent = {
+      agentId: taskId ?? parent,
+      refId: parent,
+      agentName: str(msg.task_description),
+      agentType: str(msg.subagent_type),
+      agentDepth: 1,
+      agentBackground: false,
+      running: true,
+    };
+    this.agents.set(agent.agentId, agent);
+    this.byToolUse.set(parent, agent.agentId);
+    if (taskId) this.byTask.set(taskId, agent.agentId);
+    return { agentId: agent.agentId, starts: [this.event('agent-start', agent)] };
+  }
+
+  /** A `system` message; returns agent-* deltas (empty for anything else). */
+  onSystem(msg: Record<string, unknown>): AgentDelta[] {
+    const subtype = msg.subtype;
+    if (subtype === 'task_started') return this.started(msg);
+    const agentId = this.knownAgent(msg.task_id);
+    const agent = agentId ? this.agents.get(agentId) : undefined;
+    if (!agent || !agent.running) return [];
+    if (subtype === 'task_progress') {
+      const line = str(msg.description);
+      if (line) agent.lastText = clip(line, 300);
+      const extra: Partial<AgentEvent> = {};
+      if (agent.lastText) extra.text = agent.lastText;
+      const tool = str(msg.last_tool_name);
+      if (tool) extra.toolName = tool;
+      return [this.event('agent-update', agent, extra)];
+    }
+    if (subtype === 'task_updated') {
+      // Status patches are ignored: an agent ends on its task_notification.
+      const patch = (msg.patch ?? {}) as Record<string, unknown>;
+      let changed = false;
+      if (typeof patch.is_backgrounded === 'boolean' && patch.is_backgrounded !== agent.agentBackground) {
+        agent.agentBackground = patch.is_backgrounded;
+        changed = true;
+      }
+      const description = str(patch.description);
+      if (description && description !== agent.agentName) {
+        agent.agentName = description;
+        changed = true;
+      }
+      if (!changed) return [];
+      return [this.event('agent-update', agent, agent.lastText ? { text: agent.lastText } : {})];
+    }
+    if (subtype === 'task_notification') {
+      agent.running = false;
+      const summary = str(msg.summary);
+      return [this.event('agent-end', agent, {
+        agentStatus: claudeTaskStatus(msg.status),
+        ...(summary ? { text: summary.slice(0, 4000) } : {}),
+      })];
+    }
+    return [];
+  }
+
+  private started(msg: Record<string, unknown>): AgentDelta[] {
+    const taskType = String(msg.task_type ?? '');
+    const isAgent = /agent/i.test(taskType) || (!taskType && !!str(msg.subagent_type));
+    const taskId = str(msg.task_id);
+    if (!isAgent || !taskId) return [];
+    const toolUse = str(msg.tool_use_id);
+    const existingId = this.byTask.get(taskId) ?? (toolUse ? this.byToolUse.get(toolUse) : undefined)
+      ?? (this.agents.has(taskId) ? taskId : undefined);
+    const existing = existingId ? this.agents.get(existingId) : undefined;
+    const parentTask = str(msg.parent_task_id);
+    const parentId = parentTask ? (this.knownAgent(parentTask) ?? parentTask) : undefined;
+    const parentDepth = parentId ? this.agents.get(parentId)?.agentDepth : undefined;
+    const depth = typeof msg.spawn_depth === 'number' && msg.spawn_depth > 0
+      ? msg.spawn_depth
+      : parentDepth !== undefined ? parentDepth + 1 : 1;
+    const agent: TrackedAgent = existing ?? {
+      agentId: taskId,
+      agentDepth: depth,
+      agentBackground: false,
+      running: true,
+    };
+    const wasRunning = existing?.running === true;
+    agent.refId = toolUse ?? agent.refId;
+    agent.agentName = str(msg.description) ?? agent.agentName;
+    agent.agentType = str(msg.subagent_type) ?? agent.agentType;
+    agent.agentDepth = depth;
+    if (parentId) agent.agentParentId = parentId;
+    agent.agentBackground = msg.is_backgrounded === true;
+    agent.running = true;
+    agent.lastText = undefined;
+    this.agents.set(agent.agentId, agent);
+    this.byTask.set(taskId, agent.agentId);
+    if (toolUse) this.byToolUse.set(toolUse, agent.agentId);
+    // Synthesized earlier from a message: the start is already out, add details.
+    if (wasRunning) return [this.event('agent-update', agent)];
+    const prompt = str(msg.prompt);
+    return [this.event('agent-start', agent, prompt ? { agentPrompt: prompt.slice(0, 4000) } : {})];
+  }
+
+  /** End every running agent (process exit, cancel). Deepest first. */
+  endAll(status: 'stopped' | 'failed', text: string): AgentDelta[] {
+    const running = [...this.agents.values()].filter((a) => a.running)
+      .sort((a, b) => b.agentDepth - a.agentDepth);
+    return running.map((a) => {
+      a.running = false;
+      return this.event('agent-end', a, { agentStatus: status, text });
+    });
+  }
+
+  reset(): void {
+    this.agents.clear();
+    this.byTask.clear();
+    this.byToolUse.clear();
+  }
+}
+
+/**
+ * Normalize one claude stream-json line that carries chat content: assistant
+ * and user messages (main agent or, with `parent_tool_use_id`, a sub-agent)
+ * and the `system` task events. Other lines return [].
+ */
+export function translateClaudeEvent(msg: Record<string, unknown>, agents: ClaudeSubagentTracker): AgentDelta[] {
+  const type = String(msg.type ?? '');
+  if (type === 'system') return agents.onSystem(msg);
+  if (type !== 'assistant' && type !== 'user') return [];
+  const message = msg.message as Record<string, unknown> | undefined;
+  const content = message?.content;
+  if (!Array.isArray(content)) return [];
+  const owner = agents.ownerOf(msg);
+  const out: AgentDelta[] = [...owner.starts];
+  const tag = (d: AgentDelta): AgentDelta => (owner.agentId ? { ...d, agentId: owner.agentId } : d);
+  for (const raw of content) {
+    const part = raw as Record<string, unknown>;
+    if (type === 'assistant') {
+      if (part.type === 'text' && typeof part.text === 'string' && part.text.trim()) {
+        out.push(tag({ kind: 'text', text: part.text }));
+      } else if (part.type === 'thinking' && typeof part.thinking === 'string') {
+        out.push(tag({ kind: 'thinking', text: part.thinking }));
+      } else if (part.type === 'tool_use') {
+        out.push(tag({
+          kind: 'tool-start',
+          toolName: String(part.name ?? 'tool'),
+          toolInput: JSON.stringify(part.input ?? {}, null, 2),
+          refId: String(part.id ?? ''),
+        }));
+      }
+    } else if (part.type === 'tool_result') {
+      // Tool results come back as user messages in the transcript stream. A
+      // sub-agent's text parts are its task prompt (already on agent-start).
+      out.push(tag({
+        kind: 'tool-end',
+        refId: String(part.tool_use_id ?? ''),
+        toolOutput: contentToText(part.content).slice(0, 4000),
+      }));
+    }
+  }
+  return out;
 }
 
 function asToolRecord(value: unknown): Record<string, unknown> {
@@ -2587,20 +2932,43 @@ export function isSafeAgentToolCall(
 // Claude Code adapter — persistent `claude --print` with stream-json in/out.
 // ---------------------------------------------------------------------------
 
+function claudeSpawnKey(opts?: AdapterPromptOpts): string {
+  return `${opts?.model ?? ''}|${opts?.mode ?? 'agent'}|${opts?.thinking ?? ''}`;
+}
+
 class ClaudeAdapter implements AgentAdapter {
   private proc: Proc | null = null;
   private spawnKey = '';
   private sawResult = false;
+  /** Main-agent text was streamed in the current round (sub-agent text does not count). */
   private streamedText = false;
   private resumeId: string | null = null;
   private hasPrompted = false;
+  private agents = new ClaudeSubagentTracker();
 
   constructor(private session: AgentSession) {}
 
   bindHostChat(id: string): void { this.resumeId = id; this.hasPrompted = true; }
 
+  private procAlive(): boolean {
+    return !!this.proc && this.proc.exitCode === null && !this.proc.killed;
+  }
+
+  /** Emit, keeping info.runningAgents current before the session update goes out. */
+  private emitTracked(d: AgentDelta): void {
+    if (d.kind === 'agent-start' || d.kind === 'agent-end') {
+      this.session.info.runningAgents = this.agents.runningCount;
+    }
+    if (d.kind === 'text' && !d.agentId) this.streamedText = true;
+    emit(this.session, d);
+  }
+
+  private endAgents(text: string): void {
+    for (const d of this.agents.endAll('stopped', text)) this.emitTracked(d);
+  }
+
   private ensureProc(opts?: AdapterPromptOpts): Proc {
-    const key = `${opts?.model ?? ''}|${opts?.mode ?? 'agent'}|${opts?.thinking ?? ''}`;
+    const key = claudeSpawnKey(opts);
     if (this.proc && this.proc.exitCode === null && !this.proc.killed && this.spawnKey === key) {
       return this.proc;
     }
@@ -2631,7 +2999,11 @@ class ClaudeAdapter implements AgentAdapter {
     }).catch(() => {});
     spawned.exited.then(async (code) => {
       if (this.proc !== spawned) return;
+      // Sub-agents die with the process, busy or not (background agents run
+      // after the turn's result).
+      this.endAgents('The agent process ended.');
       const stderr = await stderrP.catch(() => '');
+      if (this.proc !== spawned) return;
       if (!this.session.info.busy) return;
       setBusy(this.session, false);
       const isSuccess = code === 0 && (this.streamedText || this.sawResult);
@@ -2664,44 +3036,13 @@ class ClaudeAdapter implements AgentAdapter {
       }
     }
     const type = String(msg.type ?? '');
-    if (type === 'assistant') {
-      const message = msg.message as Record<string, unknown> | undefined;
-      const content = message?.content;
-      if (Array.isArray(content)) {
-        for (const raw of content) {
-          const part = raw as Record<string, unknown>;
-          if (part.type === 'text' && typeof part.text === 'string' && part.text.trim()) {
-            this.streamedText = true;
-            emit(s, { kind: 'text', text: part.text });
-          } else if (part.type === 'thinking' && typeof part.thinking === 'string') {
-            emit(s, { kind: 'thinking', text: part.thinking });
-          } else if (part.type === 'tool_use') {
-            emit(s, {
-              kind: 'tool-start',
-              toolName: String(part.name ?? 'tool'),
-              toolInput: JSON.stringify(part.input ?? {}, null, 2),
-              refId: String(part.id ?? ''),
-            });
-          }
-        }
-      }
-    } else if (type === 'user') {
-      // Tool results come back as user messages in the transcript stream.
-      const message = msg.message as Record<string, unknown> | undefined;
-      const content = message?.content;
-      if (Array.isArray(content)) {
-        for (const raw of content) {
-          const part = raw as Record<string, unknown>;
-          if (part.type === 'tool_result') {
-            emit(s, {
-              kind: 'tool-end',
-              refId: String(part.tool_use_id ?? ''),
-              toolOutput: contentToText(part.content).slice(0, 4000),
-            });
-          }
-        }
-      }
+    if (type === 'assistant' || type === 'user' || (type === 'system' && msg.subtype !== 'init')) {
+      for (const d of translateClaudeEvent(msg, this.agents)) this.emitTracked(d);
     } else if (type === 'result') {
+      // Any result ends the phone's turn. With background sub-agents the CLI
+      // later starts a round by itself (system init … result, `origin.kind`
+      // 'task-notification'); that round is never busy, so the phone can send
+      // meanwhile, and its events arrive as normal main-agent events.
       this.sawResult = true;
       setBusy(s, false);
       const failed = msg.is_error === true || (typeof msg.subtype === 'string' && msg.subtype.startsWith('error'));
@@ -2710,6 +3051,9 @@ class ClaudeAdapter implements AgentAdapter {
         text: typeof msg.result === 'string' ? msg.result : failed ? JSON.stringify(msg.errors ?? 'Provider turn failed') : '',
       }, this.streamedText));
     } else if (type === 'system' && msg.subtype === 'init') {
+      // Every round starts with init, including one the CLI starts by itself.
+      this.sawResult = false;
+      this.streamedText = false;
       emit(s, { kind: 'status', text: 'ready' });
     } else if (type === 'control_cancel_request') {
       // Claude withdrew a prompt (turn interrupted or answered elsewhere).
@@ -2757,12 +3101,15 @@ class ClaudeAdapter implements AgentAdapter {
         return;
       }
 
+      // A sub-agent's request names it in `agent_id` (only when announced).
+      const agentId = this.agents.knownAgent(request.agent_id);
       emit(s, {
         kind: 'permission-request',
         refId: requestId,
         toolName,
         toolInput: JSON.stringify(toolInput, null, 2),
         text: safety.reason || `Allow ${toolName}?`,
+        ...(agentId ? { agentId } : {}),
       });
       s.pendingPermissions.set(requestId, respond);
       trackPermissionTimeout(s, requestId);
@@ -2784,13 +3131,22 @@ class ClaudeAdapter implements AgentAdapter {
   prompt(text: string, opts?: AdapterPromptOpts): void {
     this.sawResult = false;
     this.streamedText = false;
-    const nextKey = `${opts?.model ?? ''}|${opts?.mode ?? 'agent'}|${opts?.thinking ?? ''}`;
-    if (this.hasPrompted && !this.resumeId && (!this.proc || this.proc.exitCode !== null || this.proc.killed || this.spawnKey !== nextKey)) {
+    const nextKey = claudeSpawnKey(opts);
+    // A new model / mode / effort needs a new process, and killing it would
+    // stop background sub-agents. While any run, keep the process and say so.
+    const keep = this.procAlive() && this.spawnKey !== nextKey && this.agents.runningCount > 0;
+    if (!keep && this.hasPrompted && !this.resumeId && (!this.proc || this.proc.exitCode !== null || this.proc.killed || this.spawnKey !== nextKey)) {
       setBusy(this.session, false);
       emit(this.session, { kind: 'error', text: 'Cannot continue this conversation: provider session ID was not recovered.' });
       return;
     }
-    const proc = this.ensureProc(opts);
+    if (keep) {
+      emit(this.session, {
+        kind: 'status',
+        text: 'Sub-agents are still running, so this message keeps the current model, mode and effort. The new choice applies once they finish.',
+      });
+    }
+    const proc = keep ? this.proc! : this.ensureProc(opts);
     this.hasPrompted = true;
     const line = JSON.stringify({
       type: 'user',
@@ -2807,7 +3163,9 @@ class ClaudeAdapter implements AgentAdapter {
   }
 
   cancel(): void {
-    // Claude Code has no in-band cancel on stream-json stdin; drop the process.
+    // Claude Code has no in-band cancel on stream-json stdin; drop the process
+    // and with it every sub-agent (foreground and background).
+    this.endAgents('Stopped.');
     try {
       this.proc?.kill();
     } catch {
@@ -2817,6 +3175,9 @@ class ClaudeAdapter implements AgentAdapter {
   }
 
   close(): void {
+    // The session is being deleted: no closing events for it.
+    this.agents.reset();
+    this.session.info.runningAgents = 0;
     this.cancel();
   }
 }

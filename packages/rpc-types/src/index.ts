@@ -519,6 +519,12 @@ export interface AgentModelOption {
   id: string
   name: string
   supportsEffort?: boolean
+  /**
+   * Thinking levels for this model when they differ from the agent's
+   * `capabilities.thinkingLevels`. Code Agent (claude) models that support
+   * effort list ['low','medium','high','ultracode']. Older phones ignore it.
+   */
+  thinkingLevels?: string[]
 }
 
 /** What the phone composer should offer for this CLI. */
@@ -576,7 +582,17 @@ export interface AgentSessionInfo {
   status: 'running' | 'exited'
   hostChatId?: string
   icon?: string
+  /**
+   * Sub-agents of this session that are running now (all depths). Only the
+   * claude provider sets it. Can be > 0 while `busy` is false: background
+   * agents keep working after the main turn's `result`. See
+   * docs/AGENT-SUBAGENT-EVENTS.md.
+   */
+  runningAgents?: number
 }
+
+/** Lifecycle state carried by agent-start / agent-update / agent-end events. */
+export type AgentSubagentStatus = 'running' | 'completed' | 'failed' | 'stopped'
 
 /** A conversation that already exists on the PC (CLI or IDE), not started from the phone. */
 export interface AgentHostChat {
@@ -607,14 +623,40 @@ export interface AgentEvent {
     | 'result'
     | 'error'
     | 'status'
+    | 'agent-start'
+    | 'agent-update'
+    | 'agent-end'
   text?: string
   toolName?: string
   toolInput?: string
   toolOutput?: string
-  /** Correlates tool-start/tool-end pairs and permission requests. */
+  /**
+   * Correlates tool-start/tool-end pairs and permission requests. On
+   * agent-start/update/end it is the tool_use id of the spawning Agent call.
+   */
   refId?: string
   /** Filenames of photos attached to a user message. */
   images?: string[]
+  /**
+   * Sub-agent that produced this event. Absent means the main agent. Set on
+   * text, thinking, tool-start, tool-end and permission-request events that
+   * belong to a sub-agent, and always on agent-start/update/end.
+   */
+  agentId?: string
+  /** agent-* only: short description given when the agent was spawned. */
+  agentName?: string
+  /** agent-* only: sub-agent type (e.g. "general-purpose", "Explore"). */
+  agentType?: string
+  /** agent-* only: 1 = spawned by the main agent, 2 = by a depth-1 agent, … */
+  agentDepth?: number
+  /** agent-* only: agentId of the spawning sub-agent when agentDepth > 1. */
+  agentParentId?: string
+  /** agent-* only: true when the agent runs in the background. */
+  agentBackground?: boolean
+  /** agent-* only: lifecycle state; agent-end never carries 'running'. */
+  agentStatus?: AgentSubagentStatus
+  /** agent-start only: the task prompt given to the sub-agent (clipped). */
+  agentPrompt?: string
 }
 
 export type WsMessage =
