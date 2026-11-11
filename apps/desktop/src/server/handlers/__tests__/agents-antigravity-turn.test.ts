@@ -177,6 +177,32 @@ describe('AntigravityAdapter turn ends (fake agy)', () => {
     await expectEnded(id, 'result', 4500);
   });
 
+  test('a result is delivered and the turn ends while the process is still alive', async () => {
+    const id = start('early', [init, text('hi'), result('SUCCESS', 'hi'), sleep(1500), { __fake: 'exit', code: 0 }]);
+    promptAgent(id, 'go');
+    await waitFor('result', () => terminal(id).length > 0, 1200);
+    expect(updates(id).at(-1)!.busy).toBe(false);
+    await Bun.sleep(1800);
+    expect(terminal(id).filter((e) => e.kind === 'result')).toHaveLength(1);
+    expect(terminal(id)).toHaveLength(1);
+  });
+
+  test('a non-zero exit after a delivered result adds no error', async () => {
+    const id = start('late-fail', [init, text('hi'), result('SUCCESS', 'hi'), sleep(200), { __fake: 'stderr', text: 'cleanup failed' }, { __fake: 'exit', code: 1 }]);
+    promptAgent(id, 'go');
+    await expectEnded(id, 'result');
+    await Bun.sleep(700);
+    expect(terminal(id)).toHaveLength(1);
+    expect(terminal(id)[0]!.kind).toBe('result');
+  });
+
+  test('a process that exits without any result still gives the error', async () => {
+    const id = start('no-result', [init, { __fake: 'exit', code: 0 }]);
+    promptAgent(id, 'go');
+    const end = await expectEnded(id, 'error');
+    expect(end.text).toMatch(/exited without a reply/i);
+  });
+
   test('Stop mid-turn: cancelled status and busy false, no later error from the killed process', async () => {
     const id = start('stop', [init, tool('ACTIVE'), sleep(2000), result('SUCCESS')]);
     promptAgent(id, 'go');

@@ -1140,6 +1140,7 @@ export function flushAgentDeltas(agentSessionId?: string): void {
 }
 function emitDelta(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): void {
   const id = session.info.agentSessionId;
+  silentTouch(session);
   const full: AgentEvent = { ...event, seq: ++session.seq, ts: Date.now(), turnId: session.info.turnId };
   session.info.updatedAt = full.ts;
   const activityChanged = session.info.activity !== 'responding';
@@ -1158,6 +1159,7 @@ function emitDelta(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>)
 }
 
 function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): void {
+  silentTouch(session);
   if (event.kind === 'text-delta') { emitDelta(session, event); return; }
   flushDelta(session.info.agentSessionId);
   if (isRedundantToolStart(session.history, event)) return;
@@ -1239,8 +1241,82 @@ export function isResultWhileAgentsRun(event: Pick<AgentEvent, 'kind'>, info: Pi
   return event.kind === 'result' && (info.runningAgents ?? 0) > 0;
 }
 
+// ---------------------------------------------------------------------------
+// Silent-turn watchdog: a busy turn that goes quiet gets one status line.
+// Never kills or changes busy; works for every adapter because it only looks
+// at emit() and setBusy().
+// ---------------------------------------------------------------------------
+
+export const SILENT_TURN_MS = 10 * 60 * 1000;
+export const SILENT_TURN_TEXT = 'No output for 10 min. Still running; tap Stop if it looks stuck.';
+/** Mutable so tests can shorten the threshold and fake the clock. */
+export const silentWatchdogConfig: { thresholdMs: number; now: () => number } = {
+  thresholdMs: SILENT_TURN_MS,
+  now: () => Date.now(),
+};
+interface SilentWatch { timer?: ReturnType<typeof setTimeout>; last: number; fired: boolean }
+const silentWatches = new Map<string, SilentWatch>();
+let silentWatchdogEmitting = false;
+
+function silentSchedule(session: AgentSession, watch: SilentWatch, delay: number): void {
+  if (watch.timer) clearTimeout(watch.timer);
+  watch.timer = setTimeout(() => silentCheck(session), Math.max(1, delay));
+  (watch.timer as { unref?: () => void }).unref?.();
+}
+
+function silentCheck(session: AgentSession): void {
+  const id = session.info.agentSessionId;
+  const watch = silentWatches.get(id);
+  if (!watch) return;
+  watch.timer = undefined;
+  if (!session.info.busy) { silentWatches.delete(id); return; }
+  const { thresholdMs, now } = silentWatchdogConfig;
+  const remaining = watch.last + thresholdMs - now();
+  if (remaining > 0) { silentSchedule(session, watch, remaining); return; }
+  const waiting = session.pendingPermissions.size > 0 || pendingAgentApprovals(id).length > 0;
+  // A tool still running is not silence: look again after another threshold.
+  if (waiting || unmatchedToolStarts(session.history).length > 0) { silentSchedule(session, watch, thresholdMs); return; }
+  watch.fired = true;
+  silentWatchdogEmitting = true;
+  try { emit(session, { kind: 'status', text: SILENT_TURN_TEXT }); } finally { silentWatchdogEmitting = false; }
+}
+
+function silentTouch(session: AgentSession): void {
+  if (silentWatchdogEmitting) return;
+  const watch = silentWatches.get(session.info.agentSessionId);
+  if (!watch) return;
+  watch.last = silentWatchdogConfig.now();
+  if (watch.fired) {
+    watch.fired = false;
+    silentSchedule(session, watch, silentWatchdogConfig.thresholdMs);
+  }
+}
+
+function silentArm(session: AgentSession): void {
+  const id = session.info.agentSessionId;
+  if (silentWatches.has(id)) return;
+  const watch: SilentWatch = { last: silentWatchdogConfig.now(), fired: false };
+  silentWatches.set(id, watch);
+  silentSchedule(session, watch, silentWatchdogConfig.thresholdMs);
+}
+
+function silentDisarm(id: string): void {
+  const watch = silentWatches.get(id);
+  if (watch?.timer) clearTimeout(watch.timer);
+  silentWatches.delete(id);
+}
+
+/** Test hooks: drive emit/setBusy on a live session without a real adapter. */
+export const agentWatchdogTestHooks = {
+  emit: (id: string, event: Omit<AgentEvent, 'seq' | 'ts'>) => { const s = agentSessions.get(id); if (s) emit(s, event); },
+  setBusy: (id: string, busy: boolean) => { const s = agentSessions.get(id); if (s) setBusy(s, busy); },
+  pendingPermissions: (id: string) => agentSessions.get(id)?.pendingPermissions,
+  watching: (id: string) => silentWatches.has(id),
+};
+
 function setBusy(session: AgentSession, busy: boolean): void {
   session.info.busy = busy;
+  if (busy) silentArm(session); else silentDisarm(session.info.agentSessionId);
   broadcast({ type: 'agent-session-update', session: { ...session.info } });
 }
 
@@ -1671,6 +1747,7 @@ export function closeAgentSession(agentSessionId: string): { ok: boolean } {
   const session = agentSessions.get(agentSessionId);
   if (!session) return { ok: false };
   flushDelta(agentSessionId);
+  silentDisarm(agentSessionId);
   clearAllPermissionTimeouts(agentSessionId);
   session.adapter?.close?.();
   session.info.status = 'exited';
@@ -3614,7 +3691,7 @@ class AntigravityAdapter implements AgentAdapter {
   private streamGen = 0;
   private conversationId: string | null = null;
   private sawResult = false;
-  private pendingResult: AgentDelta | undefined;
+  private resultDelivered = false;
   private streamedText = false;
   private newProjectAttempted = false;
   private authUrlEmitted = false;
@@ -3655,7 +3732,7 @@ class AntigravityAdapter implements AgentAdapter {
     }
     this.cancel();
     this.sawResult = false;
-    this.pendingResult = undefined;
+    this.resultDelivered = false;
     this.streamedText = false;
     this.authUrlEmitted = false;
     this.authHintEmitted = false;
@@ -3719,7 +3796,7 @@ class AntigravityAdapter implements AgentAdapter {
           broadcast({ type: 'agent-session-update', session: { ...this.session.info } });
         }
       }
-      if (!this.session.info.busy) return;
+      if (this.resultDelivered || !this.session.info.busy) return;
       setBusy(this.session, false);
       const isSuccess = (code === 0 && (this.sawResult || this.streamedText)) || (this.sawResult && code === 0);
       if (code === 0 && !isSuccess) {
@@ -3736,7 +3813,7 @@ class AntigravityAdapter implements AgentAdapter {
         stderr: isSuccess ? '' : errText,
       });
       if (!fail) {
-        emit(this.session, this.pendingResult ?? { kind: 'result', text: '' });
+        emit(this.session, { kind: 'result', text: '' });
         return;
       }
       emit(this.session, { kind: 'error', text: turnEndError(fail.text ?? '', 'Antigravity') });
@@ -3776,8 +3853,15 @@ class AntigravityAdapter implements AgentAdapter {
     for (const ev of events) {
       if (ev.kind === 'text' || ev.kind === 'text-delta') this.streamedText = true;
       if (ev.kind === 'result') {
-        this.pendingResult = withoutDuplicateResult(ev, this.streamedText);
+        // Deliver now: the CLI may stay alive after its result, and the turn
+        // is over. Errors never reach here as results (the parser turns an
+        // ERROR status into an error event), so nothing needs the exit code.
         this.sawResult = true;
+        this.resultDelivered = true;
+        if (this.session.info.busy) {
+          setBusy(this.session, false);
+          emit(this.session, withoutDuplicateResult(ev, this.streamedText));
+        }
         continue;
       }
       if (ev.kind === 'error') {
