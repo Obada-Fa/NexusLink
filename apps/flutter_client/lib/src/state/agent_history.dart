@@ -1,16 +1,7 @@
 import '../rpc/models.dart';
 
-AgentEvent _copyEvent(AgentEvent e, {required int seq}) => AgentEvent(
-      seq: seq,
-      ts: e.ts,
-      kind: e.kind,
-      text: e.text,
-      toolName: e.toolName,
-      toolInput: e.toolInput,
-      toolOutput: e.toolOutput,
-      refId: e.refId,
-      images: e.images,
-    );
+// copyWith keeps every field, including the sub-agent ones.
+AgentEvent _copyEvent(AgentEvent e, {required int seq}) => e.copyWith(seq: seq);
 
 /// Host snapshots occasionally arrive without stable seq numbers (legacy imports,
 /// host-chat seed). Collapsing them in a seq-keyed map would leave one row.

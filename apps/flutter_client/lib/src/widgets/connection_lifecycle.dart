@@ -107,7 +107,15 @@ class _ConnectionLifecycleState extends ConsumerState<ConnectionLifecycle>
         }
         for (final ev in events.whereType<Map>()) {
           final parsed = AgentEvent.fromJson(Map<String, dynamic>.from(ev));
-          if (parsed.ts < sinceMs) continue;
+          if (parsed.ts < sinceMs) {
+            // Older sub-agent starts/ends still decide whether a newer
+            // `result` is the real end of the work.
+            NotificationService.instance.observeAgentEvent(
+              session.agentSessionId,
+              parsed,
+            );
+            continue;
+          }
           NotificationService.instance.handleAgentEvent(
             session.agentSessionId,
             parsed,

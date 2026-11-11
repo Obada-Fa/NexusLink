@@ -17,6 +17,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_recognition_error.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
+import '../agents/subagent_widgets.dart';
+import '../agents/subagents.dart';
 import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
 import '../services/notification_service.dart';
@@ -83,6 +85,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   // Streamed text is applied in batches and only rebuilds the transcript list.
   static const _streamFlushInterval = Duration(milliseconds: 80);
   final _transcriptTick = ValueNotifier<int>(0);
+
+  /// Bumped after every setState so an open agent view rebuilds live.
+  final _viewTick = ValueNotifier<int>(0);
+
+  /// The agent view while it is open (taps on nested agents push into it).
+  SubagentSheetController? _agentSheet;
   Timer? _streamFlush;
   bool _scrollQueued = false;
   final _input = TextEditingController();
@@ -154,6 +162,33 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           _deliveryOperation == null);
 
   RpcClient? get _client => ref.read(activeClientProvider);
+
+  @override
+  void setState(VoidCallback fn) {
+    super.setState(fn);
+    // setState never runs during build here, so notifying is safe.
+    _viewTick.value++;
+  }
+
+  int _subagentsRevision = -1;
+  SubagentState _subagentsCache = SubagentState.empty;
+
+  /// Sub-agents of the open chat from the full transcript.
+  SubagentState get _subagents {
+    if (_subagentsRevision != _transcript.revision) {
+      _subagentsCache = buildSubagents(_transcript.display);
+      _subagentsRevision = _transcript.revision;
+    }
+    return _subagentsCache;
+  }
+
+  /// Sub-agents running now: the host's count, or the local records when
+  /// they know more (library chats, a session update not seen yet).
+  int get _runningAgents {
+    final host = _active?.runningAgents ?? 0;
+    final local = _subagents.runningCount;
+    return host > local ? host : local;
+  }
 
   @override
   void initState() {
@@ -422,7 +457,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   ? current
                   : merged,
             );
-            if (!_busy && _transcript.hasOpenTools) {
+            // Background agents keep tools open after the result; the host
+            // closes them itself on stop, exit and restart.
+            if (!_busy && _transcript.hasOpenTools && _runningAgents == 0) {
               _transcript.settleOpenTools('Interrupted — host restarted.');
             }
           }
@@ -818,6 +855,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           ?.title ??
       'Another chat';
 
+  /// " · from" plus the agent name for a parked approval a sub-agent asked for.
+  String _backgroundAgentSuffix(String sessionId, AgentEvent e) {
+    if (e.agentId == null) return '';
+    final name = NotificationService.instance.agentName(sessionId, e.agentId);
+    return ' · from ${name ?? 'an agent'}';
+  }
+
   Widget _approvalBanner() {
     final waiting = _backgroundApprovals;
     if (waiting.isEmpty) return const SizedBox.shrink();
@@ -825,6 +869,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     final label = waiting.length == 1
         ? '${_sessionTitle(first.sessionId)} needs approval · '
               '${first.event.toolName ?? 'action'}'
+              '${_backgroundAgentSuffix(first.sessionId, first.event)}'
         : '${waiting.length} approvals waiting in other chats';
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
@@ -895,7 +940,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
                             Text(
-                              _sessionTitle(item.sessionId),
+                              '${_sessionTitle(item.sessionId)}'
+                              '${_backgroundAgentSuffix(item.sessionId, item.event)}',
                               style: const TextStyle(
                                 fontWeight: FontWeight.w700,
                                 color: NX.text,
@@ -1126,7 +1172,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         // the turn already finished on the phone.
         if (!updated.busy) {
           _busy = false;
-          if (_transcript.hasOpenTools) {
+          if (_transcript.hasOpenTools && _runningAgents == 0) {
             _transcript.settleOpenTools(
               _stopping
                   ? 'Stopped.'
@@ -1197,6 +1243,11 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       sessionId,
       parsed,
       sessionTitle: matchedSession?.title ?? _active?.title,
+      runningAgents: parsed.kind != 'result'
+          ? null
+          : sessionId == _active?.agentSessionId
+          ? _runningAgents
+          : matchedSession?.runningAgents,
     );
 
     if (sessionId != _active?.agentSessionId) {
@@ -1223,6 +1274,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (parsed.kind == 'user' && _pendingThumbs != null) {
       _thumbsBySeq[parsed.seq] = _pendingThumbs!;
       _pendingThumbs = null;
+    }
+    if (!isMainTimelineEvent(parsed)) {
+      // Sub-agent messages and agent-* records feed the strip and the agent
+      // view; they never move the main chat or show "Jump to latest".
+      setState(() => _transcript.addHost(parsed));
+      _transcriptTick.value++;
+      return;
     }
     if (parsed.kind == 'text' ||
         parsed.kind == 'text-delta' ||
@@ -1314,6 +1372,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            if (e.agentId != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Text(
+                  'From agent: ${_agentLabel(e.agentId)}',
+                  style: const TextStyle(color: Colors.white70, fontSize: 13),
+                ),
+              ),
             Text(
               e.text ?? 'Allow this tool?',
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
@@ -1444,7 +1510,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       _transcript
         ..clear()
         ..replaceHost(loaded);
-      if (!s.busy && _transcript.hasOpenTools) {
+      if (!s.busy && _transcript.hasOpenTools && _runningAgents == 0) {
         _transcript.settleOpenTools('Interrupted — host restarted.');
       }
       _photos.clear();
@@ -1583,11 +1649,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       mode = caps.modes.isNotEmpty ? caps.modes.first : 'agent';
     }
     var thinking = p.getString('agent-composer-$agentId-thinking') ?? 'medium';
-    if (caps.thinkingLevels.isNotEmpty &&
-        !caps.thinkingLevels.contains(thinking)) {
-      thinking = caps.thinkingLevels.contains('medium')
-          ? 'medium'
-          : caps.thinkingLevels[caps.thinkingLevels.length ~/ 2];
+    // Ultra Code is advertised per model and the live catalog may not be in
+    // yet, so keep any level some model offers; _refreshModels re-checks it
+    // against the selected model.
+    final offered = {
+      ...caps.thinkingLevels,
+      for (final m in caps.models) ...?m.thinkingLevels,
+    };
+    if (caps.thinkingLevels.isNotEmpty && !offered.contains(thinking)) {
+      thinking = fallbackThinking(thinking, caps.thinkingLevels);
     }
     var model = p.getString('agent-composer-$agentId-model');
     final families = collapseModelFamilies(caps.models);
@@ -1620,6 +1690,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           .toList();
       if (!mounted || models.isEmpty) return;
       setState(() => _liveModels = models);
+      _normalizeThinking();
     } catch (_) {
       // Old host has no agent.listModels — fallback catalog still shows.
     }
@@ -1727,7 +1798,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             'model': _model,
           if (_mode != 'agent') 'mode': _mode,
           if (_thinking.isNotEmpty && _modelSupportsEffort)
-            'thinking': _thinking,
+            'thinking': _effectiveThinking,
           if (photos.isNotEmpty)
             'images': [
               for (final p in photos)
@@ -1860,6 +1931,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       setState(() => _model = modelFamilyId(hit.id));
       await _saveComposerPrefs();
       _localStatus('Model set to ${hit.name} (`${modelFamilyId(hit.id)}`).');
+      _normalizeThinking(announce: true);
       return true;
     }
     if (cmd == 'thinking' || cmd == 'effort') {
@@ -1870,7 +1942,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       final levels = _thinkingLevels;
       if (arg.isEmpty) {
         _localStatus(
-          'Thinking: ${_thinkingLabel(_thinking)}. /thinking ${_thinkingLevels.join('|')}',
+          'Thinking: ${_thinkingLabel(_effectiveThinking)}. /thinking ${_thinkingLevels.join('|')}',
         );
         await _pickThinking();
         return true;
@@ -2142,15 +2214,58 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     'high' => 'High',
     'extra-high' => 'Extra high',
     'max' => 'Max',
+    'ultracode' => 'Ultra Code',
     _ => 'Medium',
   };
 
   List<AgentModelOption> get _pickerModels =>
       collapseModelFamilies(_caps.models);
 
+  /// The model the next message runs on (the first one when the CLI
+  /// default is selected), or null when the catalog does not list it.
+  AgentModelOption? get _selectedModelOption =>
+      _modelOptionFor(_model, _pickerModels);
+
+  static AgentModelOption? _modelOptionFor(
+    String? id,
+    List<AgentModelOption> models,
+  ) {
+    if (models.isEmpty) return null;
+    if (id == null) return models.first;
+    final fam = modelFamilyId(id);
+    for (final m in models) {
+      if (m.id == id || modelFamilyId(m.id) == fam) return m;
+    }
+    return null;
+  }
+
+  /// Per-model levels first (Code Agent models add Ultra Code), then the
+  /// agent's levels.
   List<String> get _thinkingLevels {
+    final perModel = _selectedModelOption?.thinkingLevels;
+    if (perModel != null && perModel.isNotEmpty) return perModel;
     if (_caps.thinkingLevels.isNotEmpty) return _caps.thinkingLevels;
     return const ['low', 'medium', 'high'];
+  }
+
+  /// [_thinking] when the selected model offers it, else the closest level
+  /// it does offer (Ultra Code falls back to the highest ordinary level).
+  String get _effectiveThinking => fallbackThinking(_thinking, _thinkingLevels);
+
+  /// Re-checks the thinking choice after the model or catalog changed.
+  /// Says so in the chat when Ultra Code is dropped by an explicit switch.
+  void _normalizeThinking({bool announce = false}) {
+    if (!_modelSupportsEffort) return;
+    final next = _effectiveThinking;
+    if (next == _thinking) return;
+    final dropped = _thinking;
+    setState(() => _thinking = next);
+    unawaited(_saveComposerPrefs());
+    if (announce && dropped == 'ultracode') {
+      _localStatus(
+        '$_modelLabel has no Ultra Code. Thinking set to ${_thinkingLabel(next)}.',
+      );
+    }
   }
 
   bool get _modelSupportsEffort =>
@@ -2327,7 +2442,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               ),
               title: const Text('Thinking'),
               subtitle: _modelSupportsEffort
-                  ? Text(_thinkingLabel(_thinking))
+                  ? Text(_thinkingLabel(_effectiveThinking))
                   : Text(
                       'Not supported for $_modelLabel',
                       style: const TextStyle(color: Colors.white38),
@@ -2435,8 +2550,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             ),
             for (final level in levels)
               ListTile(
+                key: ValueKey('thinking-$level'),
                 title: Text(_thinkingLabel(level)),
-                trailing: level == _thinking
+                // Measured: headless, Ultra Code raises effort and nothing
+                // else, so promise only that.
+                subtitle: level == 'ultracode'
+                    ? const Text('Runs at the highest effort level')
+                    : null,
+                trailing: level == _effectiveThinking
                     ? const Icon(Icons.check, color: Color(0xFF2A6AFF))
                     : null,
                 onTap: () => Navigator.pop(ctx, level),
@@ -2659,6 +2780,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (chosen == null || !mounted) return;
     setState(() => _model = modelFamilyId(chosen));
     await _saveComposerPrefs();
+    _normalizeThinking(announce: true);
   }
 
   Future<void> _attachPhoto() async {
@@ -2765,6 +2887,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     _libraryPushTimer?.cancel();
     _streamFlush?.cancel();
     _transcriptTick.dispose();
+    _viewTick.dispose();
     if (_isLibrary) {
       final chat = widget.libraryChat!;
       unawaited(
@@ -2968,7 +3091,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       ? 0
       : s.taskState == 'failed'
       ? 1
-      : s.busy
+      : s.busy || s.runningAgents > 0
       ? 2
       : 3;
   Widget _picker() {
@@ -3079,6 +3202,8 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                           ? 'Approval needed'
                           : s.busy
                           ? 'Working'
+                          : s.runningAgents > 0
+                          ? '${agentsCountLabel(s.runningAgents)} running'
                           : s.taskState;
                       return Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -3298,8 +3423,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             child: ListenableBuilder(
               listenable: _transcriptTick,
               builder: (context, _) {
-                _display = _transcript.display;
-                final display = groupAgentDisplay(_display);
+                // Main chat = events without agentId; sub-agents live in the
+                // strip and the agent view.
+                _display = mainTimeline(_transcript.display);
+                final agents = _subagents;
+                final display = splitSpawnCalls(
+                  groupAgentDisplay(_display),
+                  (ref) => agents.bySpawnRef(ref) != null,
+                );
                 return ListView.builder(
                   controller: _scroll,
                   padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
@@ -3348,9 +3479,67 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               'Start new chat — creates a separate conversation',
             ),
           ),
+        ListenableBuilder(
+          listenable: _transcriptTick,
+          builder: (context, _) => _agentsStrip(),
+        ),
         _composer(),
       ],
     );
+  }
+
+  String _agentLabel(String? agentId) =>
+      _subagents.nameOf(agentId) ??
+      NotificationService.instance.agentName(
+        _active?.agentSessionId ?? '',
+        agentId,
+      ) ??
+      'Agent';
+
+  /// The agents strip above the composer: only while this chat has
+  /// sub-agents in the current turn or still running.
+  Widget _agentsStrip() {
+    if (_active == null) return const SizedBox.shrink();
+    final strip = _subagents.stripAgents();
+    final running = _runningAgents;
+    if (strip.isEmpty && running == 0) return const SizedBox.shrink();
+    return SubagentStrip(
+      agents: strip,
+      runningCount: running,
+      onOpen: _openAgent,
+      onShowAll: () => _openAgent(null),
+    );
+  }
+
+  /// Opens the agent view for [agentId] (all agents when null). While the
+  /// view is open, taps on nested agents push into it instead.
+  Future<void> _openAgent(String? agentId) async {
+    final open = _agentSheet;
+    if (open != null) {
+      if (agentId != null) open.push(agentId);
+      return;
+    }
+    final controller = SubagentSheetController([?agentId]);
+    _agentSheet = controller;
+    try {
+      await showSubagentSheet(
+        context: context,
+        controller: controller,
+        listenable: Listenable.merge([_transcriptTick, _viewTick]),
+        read: () => _subagents,
+        eventBuilder: _bubble,
+        textBuilder: (text) =>
+            _bubble(AgentEvent(seq: 0, ts: 0, kind: 'text', text: text)),
+        onStopAll: _savedCopy
+            ? null
+            : () async {
+                await _cancel();
+              },
+      );
+    } finally {
+      // Not disposed: the sheet may still be animating out and listening.
+      if (identical(_agentSheet, controller)) _agentSheet = null;
+    }
   }
 
   Widget _workingRow() {
@@ -3536,11 +3725,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           if (e.kind == 'result' &&
               _display.isNotEmpty &&
               e.seq == _display.last.seq) {
-            return const Padding(
-              padding: EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+            final running = _runningAgents;
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
               child: Text(
-                'Done',
-                style: TextStyle(
+                // The turn is over but background agents still work.
+                running > 0
+                    ? '${agentsCountLabel(running)} still running'
+                    : 'Done',
+                style: const TextStyle(
                   color: Colors.white38,
                   fontSize: 12,
                   fontStyle: FontStyle.italic,
@@ -3611,11 +3804,21 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           ),
         );
       case 'tool-start':
-        if (_isQuestionTool(e.toolName)) {
-          return _questionBubble(e, running: true);
-        }
-        return _toolCard(e, running: true);
       case 'tool-end':
+        final spawned = _subagents.bySpawnRef(e.refId);
+        if (spawned != null) {
+          return SubagentSpawnCard(
+            agent: spawned,
+            borderColor: _borderColor(_active?.agent),
+            onTap: () => _openAgent(spawned.id),
+          );
+        }
+        if (e.kind == 'tool-start') {
+          if (_isQuestionTool(e.toolName)) {
+            return _questionBubble(e, running: true);
+          }
+          return _toolCard(e, running: true);
+        }
         if (_isQuestionTool(e.toolName)) {
           return _questionBubble(e, running: false);
         }
@@ -3639,6 +3842,32 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (e.agentId != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.account_tree_outlined,
+                            size: 13,
+                            color: Colors.white54,
+                          ),
+                          const SizedBox(width: 4),
+                          Flexible(
+                            child: Text(
+                              'From agent: ${_agentLabel(e.agentId)}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Colors.white70,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   Text(
                     e.text ?? 'Allow this tool?',
                     style: const TextStyle(
@@ -4645,7 +4874,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                       const SizedBox(width: 2),
                       if (!_isLibrary) _modeChip(),
                       const SizedBox(width: 6),
-                      if (!_isLibrary) Flexible(child: _modelChip()),
+                      // flex > 1: the Spacer below must not take half the
+                      // free room from the model name.
+                      if (!_isLibrary) Flexible(flex: 4, child: _modelChip()),
                       const SizedBox(width: 4),
                       const Spacer(),
                       IconButton(
@@ -4871,6 +5102,10 @@ class _CopyButtonState extends State<_CopyButton> {
 class AgentTranscript {
   final List<AgentEvent> _host = [];
   final Set<int> _hostSeqs = {};
+
+  /// Changes on every mutation, so derived state can be cached.
+  int get revision => _revision;
+  int _revision = 0;
   final List<({int anchor, int order, bool settlement, AgentEvent event})>
   _local = [];
   int _localCount = 0;
@@ -4900,10 +5135,12 @@ class AgentTranscript {
   bool addHost(AgentEvent event) {
     if (event.seq > 0 && !_hostSeqs.add(event.seq)) return false;
     _host.add(event);
+    _revision++;
     return true;
   }
 
   void replaceHost(Iterable<AgentEvent> events) {
+    _revision++;
     _host
       ..clear()
       ..addAll(events);
@@ -4919,6 +5156,7 @@ class AgentTranscript {
         if (e.seq <= 0 || _hostSeqs.add(e.seq)) e,
     ];
     _host.insertAll(0, fresh);
+    _revision++;
   }
 
   /// A phone-only status/error line, shown after the host events seen so far.
@@ -4932,6 +5170,7 @@ class AgentTranscript {
   );
 
   void _addLocal(AgentEvent event, {bool settlement = false}) {
+    _revision++;
     final order = ++_localCount;
     _local.add((
       anchor: latestHostSeq,
@@ -4951,13 +5190,15 @@ class AgentTranscript {
     ));
   }
 
-  /// Ends every unfinished tool on the phone so the UI leaves "Working".
-  /// Settlements disappear by themselves once the host sends real tool ends.
+  /// Ends every unfinished main-agent tool on the phone so the UI leaves
+  /// "Working". Settlements disappear by themselves once the host sends real
+  /// tool ends. Sub-agent tools (`agentId`) are never settled here: the host
+  /// ends them itself on stop, exit and restart.
   void settleOpenTools(String output) {
     final ts = DateTime.now().millisecondsSinceEpoch;
     for (final start in mergeToolEvents(
       display,
-    ).where((e) => e.kind == 'tool-start')) {
+    ).where((e) => e.kind == 'tool-start' && e.agentId == null)) {
       _addLocal(
         AgentEvent(
           seq: 0,
@@ -4976,6 +5217,7 @@ class AgentTranscript {
   bool get hasOpenTools => transcriptHasOpenTools(display);
 
   void clear() {
+    _revision++;
     _host.clear();
     _hostSeqs.clear();
     _local.clear();

@@ -115,16 +115,45 @@ class AgentModelOption {
   final String id;
   final String name;
   final bool? supportsEffort;
+
+  /// Thinking levels this model takes, when they differ from the agent-wide
+  /// `capabilities.thinkingLevels` (Code Agent models that support effort add
+  /// `ultracode`). Null means "use the agent's levels".
+  final List<String>? thinkingLevels;
   const AgentModelOption({
     required this.id,
     required this.name,
     this.supportsEffort,
+    this.thinkingLevels,
   });
   factory AgentModelOption.fromJson(Map<String, dynamic> j) => AgentModelOption(
     id: j['id'] as String,
     name: (j['name'] as String?) ?? j['id'] as String,
     supportsEffort: j['supportsEffort'] as bool?,
+    thinkingLevels: (j['thinkingLevels'] as List?)
+        ?.map((e) => '$e')
+        .where((e) => e.isNotEmpty)
+        .toList(),
   );
+}
+
+/// The thinking level to use when [current] is not one of [levels] (the
+/// user switched to a model that does not offer it). Ultra Code and other
+/// top levels fall back to the highest ordinary level the model offers;
+/// anything else to medium, or the middle level.
+String fallbackThinking(String current, List<String> levels) {
+  if (levels.isEmpty || levels.contains(current)) return current;
+  final ordinary = levels.where((l) => l != 'ultracode').toList();
+  if (ordinary.isEmpty) return levels.first;
+  const top = ['ultracode', 'max', 'extra-high', 'xhigh'];
+  if (top.contains(current)) {
+    for (final level in const ['max', 'extra-high', 'xhigh', 'high']) {
+      if (ordinary.contains(level)) return level;
+    }
+    return ordinary.last;
+  }
+  if (ordinary.contains('medium')) return 'medium';
+  return ordinary[ordinary.length ~/ 2];
 }
 
 /// Strip thinking / effort suffixes (`-high`, `-thinking-high`, `-xhigh-fast`).
@@ -164,6 +193,7 @@ List<AgentModelOption> collapseModelFamilies(List<AgentModelOption> models) {
         id: fam,
         name: name.isEmpty ? fam : name,
         supportsEffort: m.supportsEffort,
+        thinkingLevels: m.thinkingLevels,
       ),
     );
   }
@@ -360,6 +390,10 @@ class AgentSessionInfo {
   final int updatedAt;
   final String? preview;
 
+  /// Sub-agents of this session running now (all depths). Can be > 0 while
+  /// [busy] is false: background agents keep working after the turn's result.
+  final int runningAgents;
+
   AgentSessionInfo({
     required this.agentSessionId,
     required this.agent,
@@ -373,6 +407,7 @@ class AgentSessionInfo {
     this.archived = false,
     this.updatedAt = 0,
     this.preview,
+    this.runningAgents = 0,
   });
 
   factory AgentSessionInfo.fromJson(Map<String, dynamic> j) => AgentSessionInfo(
@@ -392,6 +427,7 @@ class AgentSessionInfo {
         (j['createdAt'] as num?)?.toInt() ??
         0,
     preview: j['preview'] as String?,
+    runningAgents: (j['runningAgents'] as num?)?.toInt() ?? 0,
   );
 
   AgentSessionInfo copyWith({
@@ -403,6 +439,7 @@ class AgentSessionInfo {
     String? status,
     String? hostChatId,
     String? icon,
+    int? runningAgents,
   }) => AgentSessionInfo(
     agentSessionId: agentSessionId ?? this.agentSessionId,
     agent: agent ?? this.agent,
@@ -416,6 +453,7 @@ class AgentSessionInfo {
     archived: archived,
     updatedAt: updatedAt,
     preview: preview,
+    runningAgents: runningAgents ?? this.runningAgents,
   );
 }
 
@@ -504,6 +542,21 @@ class AgentEvent {
   final String? refId;
   final List<String> images;
 
+  /// Set on events that belong to a sub-agent (and on every `agent-*`
+  /// event). Absent means the main agent. See docs/AGENT-SUBAGENT-EVENTS.md.
+  final String? agentId;
+
+  /// `agent-start` / `agent-update` / `agent-end` record fields.
+  final String? agentName;
+  final String? agentType;
+  final int? agentDepth;
+  final String? agentParentId;
+  final bool? agentBackground;
+
+  /// 'running' | 'completed' | 'failed' | 'stopped'.
+  final String? agentStatus;
+  final String? agentPrompt;
+
   AgentEvent({
     required this.seq,
     required this.ts,
@@ -514,6 +567,14 @@ class AgentEvent {
     this.toolOutput,
     this.refId,
     this.images = const [],
+    this.agentId,
+    this.agentName,
+    this.agentType,
+    this.agentDepth,
+    this.agentParentId,
+    this.agentBackground,
+    this.agentStatus,
+    this.agentPrompt,
   });
 
   factory AgentEvent.fromJson(Map<String, dynamic> j) => AgentEvent(
@@ -526,6 +587,48 @@ class AgentEvent {
     toolOutput: j['toolOutput'] as String?,
     refId: j['refId'] as String?,
     images: (j['images'] as List?)?.map((e) => '$e').toList() ?? const [],
+    agentId: _nonEmpty(j['agentId']),
+    agentName: _nonEmpty(j['agentName']),
+    agentType: _nonEmpty(j['agentType']),
+    agentDepth: (j['agentDepth'] as num?)?.toInt(),
+    agentParentId: _nonEmpty(j['agentParentId']),
+    agentBackground: j['agentBackground'] as bool?,
+    agentStatus: _nonEmpty(j['agentStatus']),
+    agentPrompt: j['agentPrompt'] as String?,
+  );
+
+  static String? _nonEmpty(Object? v) => v is String && v.isNotEmpty ? v : null;
+
+  /// True for `agent-start` / `agent-update` / `agent-end`.
+  bool get isAgentRecord => kind.startsWith('agent-');
+
+  AgentEvent copyWith({
+    int? seq,
+    int? ts,
+    String? kind,
+    String? text,
+    String? toolName,
+    String? toolInput,
+    String? toolOutput,
+    String? refId,
+  }) => AgentEvent(
+    seq: seq ?? this.seq,
+    ts: ts ?? this.ts,
+    kind: kind ?? this.kind,
+    text: text ?? this.text,
+    toolName: toolName ?? this.toolName,
+    toolInput: toolInput ?? this.toolInput,
+    toolOutput: toolOutput ?? this.toolOutput,
+    refId: refId ?? this.refId,
+    images: images,
+    agentId: agentId,
+    agentName: agentName,
+    agentType: agentType,
+    agentDepth: agentDepth,
+    agentParentId: agentParentId,
+    agentBackground: agentBackground,
+    agentStatus: agentStatus,
+    agentPrompt: agentPrompt,
   );
 }
 
@@ -575,6 +678,7 @@ List<AgentEvent> mergeToolEvents(List<AgentEvent> events) {
           toolInput: start.toolInput,
           toolOutput: e.toolOutput,
           refId: ref.isNotEmpty ? ref : start.refId,
+          agentId: e.agentId ?? start.agentId,
         );
         continue;
       }
@@ -641,19 +745,23 @@ List<AgentDisplayItem> groupAgentDisplay(List<AgentEvent> events) {
 bool toolGroupRunning(List<AgentEvent> tools) =>
     tools.any((e) => e.kind == 'tool-start');
 
-/// True when a tool-start never got a matching tool-end (host died, cancel
-/// never arrived, etc.).
-bool transcriptHasOpenTools(List<AgentEvent> events) =>
-    mergeToolEvents(events).any((e) => e.kind == 'tool-start');
+/// True when a main-agent tool-start never got a matching tool-end (host
+/// died, cancel never arrived, etc.). Sub-agent tools (with `agentId`) are
+/// closed by the host itself and never count.
+bool transcriptHasOpenTools(List<AgentEvent> events) => mergeToolEvents(
+  events,
+).any((e) => e.kind == 'tool-start' && e.agentId == null);
 
-/// Pair leftover tool-starts with tool-end so the chat can leave "Working".
+/// Pair leftover main-agent tool-starts with tool-end so the chat can leave
+/// "Working". Sub-agent tools are left alone: the host ends them on stop,
+/// exit and restart.
 List<AgentEvent> closeOpenTools(
   List<AgentEvent> events, {
   String output = 'Interrupted.',
 }) {
   final open = mergeToolEvents(
     events,
-  ).where((e) => e.kind == 'tool-start').toList();
+  ).where((e) => e.kind == 'tool-start' && e.agentId == null).toList();
   if (open.isEmpty) return events;
   var seq = 0;
   for (final e in events) {

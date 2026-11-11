@@ -114,11 +114,47 @@ class NotificationService {
   /// fetching history to do so) is wasted work.
   bool get showsAgentAlerts => !kIsWeb && !Platform.isAndroid;
 
+  /// Running sub-agents per session (`agentId` → name), from the
+  /// `agent-start` / `agent-end` events this service has seen.
+  final Map<String, Map<String, String>> _runningAgents = {};
+
+  /// Track sub-agent starts and ends without raising anything. Catch-up
+  /// replays feed older events here so a later `result` knows whether
+  /// background agents were still running.
+  void observeAgentEvent(String? sessionId, AgentEvent event) {
+    final id = event.agentId;
+    if (sessionId == null || id == null || !event.isAgentRecord) return;
+    final running = _runningAgents.putIfAbsent(sessionId, () => {});
+    if (event.kind == 'agent-end') {
+      running.remove(id);
+      if (running.isEmpty) _runningAgents.remove(sessionId);
+    } else {
+      running[id] = event.agentName ?? 'Agent';
+    }
+  }
+
+  /// Name of a running sub-agent, for labelling its approval requests.
+  String? agentName(String sessionId, String? agentId) =>
+      agentId == null ? null : _runningAgents[sessionId]?[agentId];
+
+  int runningAgentsFor(String sessionId) =>
+      _runningAgents[sessionId]?.length ?? 0;
+
+  /// A `result` while sub-agents still run is not the end of the work: the
+  /// CLI starts another round when they finish, and that round's result is
+  /// the one worth a "finished" alert.
+  bool shouldAnnounceResult(String? sessionId, {int? runningAgents}) {
+    final tracked = sessionId == null ? 0 : runningAgentsFor(sessionId);
+    return (runningAgents ?? 0) <= 0 && tracked <= 0;
+  }
+
   void handleAgentEvent(
     String? sessionId,
     AgentEvent event, {
     String? sessionTitle,
+    int? runningAgents,
   }) {
+    observeAgentEvent(sessionId, event);
     if (!showsAgentAlerts) return;
     if (sessionId != null) {
       final key = '${sessionId}_${event.seq}_${event.kind}';
@@ -129,14 +165,23 @@ class NotificationService {
       }
     }
 
+    if (event.kind == 'result' &&
+        !shouldAnnounceResult(sessionId, runningAgents: runningAgents)) {
+      return;
+    }
     if (event.kind == 'result') {
       showAgentFinishedNotification(
         sessionTitle: sessionTitle,
         summary: event.text,
       );
     } else if (event.kind == 'permission-request') {
+      final agentName = sessionId == null || event.agentId == null
+          ? null
+          : _runningAgents[sessionId]?[event.agentId];
       showPermissionRequiredNotification(
-        toolName: event.toolName ?? 'Action',
+        toolName: agentName == null
+            ? event.toolName ?? 'Action'
+            : '${event.toolName ?? 'Action'} · $agentName',
         sessionTitle: sessionTitle,
         input: event.toolInput,
       );
