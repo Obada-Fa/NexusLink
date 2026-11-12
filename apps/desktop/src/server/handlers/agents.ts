@@ -66,6 +66,7 @@ export interface AgentPromptOpts {
 }
 
 interface AdapterPromptOpts {
+  permissionMode?: AgentSessionInfo['permissionMode'];
   model?: string;
   mode?: AgentMode;
   thinking?: string;
@@ -766,11 +767,14 @@ export function buildCursorArgv(opts: {
   thinking?: string;
   imagePaths?: string[];
   catalog?: AgentModelOption[];
+  permissionMode?: AgentSessionInfo['permissionMode'];
 }): string[] {
   const argv = [
     opts.bin, '--print', '--output-format', 'stream-json',
     '--workspace', opts.cwd,
   ];
+  // The gateway obtains approval before dispatching an Ask turn to this print-only CLI.
+  if (opts.permissionMode) argv.push('--force');
   if (opts.mode === 'plan' || opts.mode === 'ask') argv.push('--mode', opts.mode);
   const resolved = pickModelVariant(opts.model, opts.thinking, opts.catalog ?? []);
   const model = cursorModelFlag(resolved, opts.thinking);
@@ -789,8 +793,11 @@ export function buildOpencodeArgv(opts: {
   mode?: AgentMode;
   thinking?: string;
   imagePaths?: string[];
+  permissionMode?: AgentSessionInfo['permissionMode'];
 }): string[] {
   const argv = [opts.bin, 'run', '--format', 'json', '--dir', opts.cwd];
+  // Ask turns reach this adapter only after whole-turn approval in Nexus.
+  if (opts.permissionMode) argv.push('--auto');
   if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
   if (opts.mode === 'plan') argv.push('--agent', 'plan');
   if (isModelEffortSupported('opencode', opts.model)) {
@@ -815,6 +822,7 @@ export function buildAgyArgv(opts: {
   thinking?: string;
   imagePaths?: string[];
   catalog?: AgentModelOption[];
+  permissionMode?: AgentSessionInfo['permissionMode'];
 }): string[] {
   const argv = [
     opts.bin,
@@ -843,13 +851,14 @@ export function claudeSpawnArgs(opts: {
   mode?: AgentMode;
   thinking?: string;
   resumeId?: string | null;
+  permissionMode?: AgentSessionInfo['permissionMode'];
 }): string[] {
   const argv = [
     opts.bin, '--print',
     '--input-format', 'stream-json',
     '--output-format', 'stream-json',
     '--verbose',
-    '--permission-mode', opts.mode === 'plan' ? 'plan' : 'acceptEdits',
+    '--permission-mode', opts.mode === 'plan' ? 'plan' : opts.permissionMode === 'full-access' ? 'bypassPermissions' : opts.permissionMode === 'ask' ? 'default' : 'acceptEdits',
     // Route permission prompts to us over stdin/stdout (control_request
     // can_use_tool). Without it --print silently denies anything that would ask.
     '--permission-prompt-tool', 'stdio',
@@ -1400,18 +1409,28 @@ export function createAgentSession(
   return { ...info };
 }
 
-/** Save a chat override; Codex receives it before its next turn. */
+/** Save a chat override; the gateway and adapter apply it before the next turn. */
 export function setAgentPermissionMode(agentSessionId: string, mode: string): { ok: boolean; reason?: string; session?: AgentSessionInfo } {
   loadAgentSessionsFromDisk();
   const session = agentSessions.get(agentSessionId);
   if (!session || session.info.status !== 'running') return { ok: false, reason: 'This chat is closed.' };
-  if (session.info.agent !== 'codex') return { ok: false, reason: 'Chat permission modes are currently supported for Codex.' };
-  if (session.info.busy || session.pendingPermissions.size) return { ok: false, reason: 'Stop the current reply before changing permissions.' };
+  if (session.info.busy || session.pendingPermissions.size || session.info.runningAgents) return { ok: false, reason: 'Stop the current reply and wait for background agents before changing permissions.' };
   if (mode !== 'ask' && mode !== 'full-access') return { ok: false, reason: 'Unknown permission mode.' };
   session.info.permissionMode = mode;
   saveAgentSessionsToDisk();
   broadcast({ type: 'agent-session-update', session: { ...session.info } });
   return { ok: true, session: { ...session.info } };
+}
+
+/** Print-only providers cannot pause individual tools reliably: approve before spawning. */
+export function usesTurnApproval(agent: string): boolean {
+  return !['claude', 'codex', 'mock'].includes(agent);
+}
+
+function sessionApprovalMode(session: AgentSession): AgentApprovalMode {
+  if (session.info.permissionMode === 'full-access') return 'auto';
+  if (session.info.permissionMode === 'ask') return usesTurnApproval(session.info.agent) ? 'auto' : 'ask';
+  return getAgentApprovalMode(session.info.agent);
 }
 
 /** Explicit overrides avoid inheriting a PC-wide never/danger-full-access configuration. */
@@ -1676,13 +1695,33 @@ export function promptAgent(
     images: materialized.files.map((f) => f.name),
   });
   setBusy(session, true);
-  session.adapter.prompt(text.trim() || 'Please look at the attached image(s).', {
+  const dispatch = () => session.adapter.prompt(text.trim() || 'Please look at the attached image(s).', {
+    permissionMode: session.info.permissionMode,
     model: opts.model,
     mode: opts.mode,
     thinking: normalizeThinkingForAgent(session.info.agent, opts.thinking),
     imagePaths: materialized.paths,
     images: materialized.files,
   });
+  if (session.info.permissionMode === 'ask' && usesTurnApproval(session.info.agent)) {
+    const turnId = session.info.turnId;
+    const requestId = `turn-approval-${turnId}`;
+    session.pendingPermissions.set(requestId, allow => {
+      // A stopped, replaced or closed turn must never start from an old card.
+      if (!session.info.busy || session.info.turnId !== turnId || !agentSessions.has(agentSessionId)) return;
+      if (allow) dispatch();
+      else {
+        setBusy(session, false);
+        emit(session, { kind: 'result', text: 'Turn not started: permission was denied or expired.' });
+      }
+    });
+    emit(session, {
+      kind: 'permission-request', refId: requestId, toolName: 'Run agent turn',
+      toolInput: JSON.stringify({ agent: session.info.agent, cwd: session.info.cwd, prompt: display }),
+      text: 'Allow this entire turn? The agent may edit files, run commands and use the network within its PC policy. Individual tools will not ask again during this turn.',
+    });
+    trackPermissionTimeout(session, requestId);
+  } else dispatch();
   return { ok: true };
 }
 
@@ -3089,7 +3128,7 @@ export function isSafeAgentToolCall(
 // ---------------------------------------------------------------------------
 
 function claudeSpawnKey(opts?: AdapterPromptOpts): string {
-  return `${opts?.model ?? ''}|${opts?.mode ?? 'agent'}|${opts?.thinking ?? ''}`;
+  return `${opts?.model ?? ''}|${opts?.mode ?? 'agent'}|${opts?.thinking ?? ''}|${opts?.permissionMode ?? ''}`;
 }
 
 class ClaudeAdapter implements AgentAdapter {
@@ -3138,6 +3177,7 @@ class ClaudeAdapter implements AgentAdapter {
         mode: opts?.mode,
         thinking: opts?.thinking,
         resumeId: this.resumeId,
+        permissionMode: opts?.permissionMode,
       })),
       {
         cwd: this.session.info.cwd,
@@ -3244,7 +3284,7 @@ class ClaudeAdapter implements AgentAdapter {
       // Auto mode answers immediately, so a turn can never block on a phone that
       // is closed, backgrounded, or watching a different session. Actions that
       // would have required a tap are still announced, so the log stays honest.
-      if (getAgentApprovalMode(s.info.agent) === 'auto') {
+      if (sessionApprovalMode(s) === 'auto') {
         respond(true);
         if (!safety.safe) {
           emit(s, { kind: 'status', text: `Auto-approved: ${safety.reason || toolName}` });
@@ -3398,6 +3438,7 @@ class CursorAdapter implements AgentAdapter {
     this.idle.clear();
     const bin = resolveBin('cursor-agent') ?? 'cursor-agent';
     const argv = buildCursorArgv({
+      permissionMode: opts?.permissionMode,
       bin,
       cwd: this.session.info.cwd,
       chatId: this.chatId,
@@ -3627,6 +3668,7 @@ class OpenCodeAdapter implements AgentAdapter {
     this.streamedText = false;
     const bin = resolveBin('opencode') ?? 'opencode';
     const argv = buildOpencodeArgv({
+      permissionMode: opts?.permissionMode,
       bin,
       cwd: this.session.info.cwd,
       session: this.ocSession,
@@ -3770,6 +3812,7 @@ class AntigravityAdapter implements AgentAdapter {
     const newProject = !this.conversationId && !projectId && !this.newProjectAttempted;
     if (newProject) this.newProjectAttempted = true;
     const argv = buildAgyArgv({
+      permissionMode: opts?.permissionMode,
       bin,
       cwd,
       conversationId: this.conversationId,
@@ -3914,7 +3957,7 @@ class AntigravityAdapter implements AgentAdapter {
           }
         };
 
-        const approvalMode = getAgentApprovalMode(this.session.info.agent);
+        const approvalMode = sessionApprovalMode(this.session);
         if (approvalMode === 'auto') {
           respond(true);
           emit(this.session, { kind: 'status', text: `Auto-approved: ${ev.toolName || 'action'}` });
@@ -3929,7 +3972,7 @@ class AntigravityAdapter implements AgentAdapter {
 
       if (ev.kind === 'tool-start') {
         const safety = isSafeAgentToolCall(ev.toolName ?? 'tool', ev.toolInput, this.session.info.cwd);
-        const approvalMode = getAgentApprovalMode(this.session.info.agent);
+        const approvalMode = sessionApprovalMode(this.session);
         if (approvalMode === 'auto') {
           if (!safety.safe) {
             emit(this.session, { kind: 'status', text: `Auto-approved: ${safety.reason || ev.toolName}` });
@@ -4094,14 +4137,7 @@ class MockAdapter implements AgentAdapter {
         refId: 'mock-1',
       }));
     at(500, () => {
-      emit(s, {
-        kind: 'permission-request',
-        refId: 'mock-perm',
-        toolName: 'Shell',
-        toolInput: JSON.stringify({ command: 'echo demo' }, null, 2),
-        text: 'Allow the demo agent to run `echo demo`?',
-      });
-      s.pendingPermissions.set('mock-perm', (allow) => {
+      const respond = (allow: boolean) => {
         if (!allow) {
           emit(s, { kind: 'error', text: 'Permission denied' });
           setBusy(s, false);
@@ -4115,7 +4151,19 @@ class MockAdapter implements AgentAdapter {
         });
         setBusy(s, false);
         emit(s, { kind: 'result', text: '' });
-      });
+      };
+      if (sessionApprovalMode(s) === 'auto') respond(true);
+      else {
+        s.pendingPermissions.set('mock-perm', respond);
+        emit(s, {
+          kind: 'permission-request',
+          refId: 'mock-perm',
+          toolName: 'Shell',
+          toolInput: JSON.stringify({ command: 'echo demo' }, null, 2),
+          text: 'Allow the demo agent to run `echo demo`?',
+        });
+        trackPermissionTimeout(s, 'mock-perm');
+      }
     });
   }
 
@@ -4289,7 +4337,7 @@ class CodexAppServerAdapter implements AgentAdapter {
       else this.server?.reject(id);
       emit(this.session,{kind:'status',text:'Codex requested an interaction this phone does not support. Open the chat on the PC.'});return;
     }
-    if(this.session.info.permissionMode === 'full-access' || (!this.session.info.permissionMode && getAgentApprovalMode('codex')==='auto')){this.server?.respond(id,{decision:'accept'});return;}
+    if(sessionApprovalMode(this.session)==='auto'){this.server?.respond(id,{decision:'accept'});return;}
     const server=this.server;
     this.session.pendingPermissions.set(ref,allow=>server?.respond(id,{decision:allow?'accept':'decline'}));
     emit(this.session,{kind:'permission-request',refId:ref,toolName:method==='item/commandExecution/requestApproval'?'Command':'File changes',toolInput:JSON.stringify(params),text:params.reason || 'Codex needs your approval.'});

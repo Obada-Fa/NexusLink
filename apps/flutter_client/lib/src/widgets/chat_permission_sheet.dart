@@ -1,9 +1,24 @@
 import 'package:flutter/material.dart';
 
-/// A choice applies to this Codex chat from its next turn onward.
+bool chatUsesTurnApproval(String agent) =>
+    !['claude', 'codex', 'mock'].contains(agent);
+
+String chatPermissionLabel(String? mode, String agent) => switch (mode) {
+  'ask' =>
+    chatUsesTurnApproval(agent) ? 'Approve each turn' : 'Ask for approval',
+  'full-access' => agent == 'codex' ? 'Full access' : 'Auto-approve',
+  _ => 'Using PC settings',
+};
+
+/// A choice applies to this agent chat from its next turn onward.
 class ChatPermissionSheet extends StatelessWidget {
-  const ChatPermissionSheet({super.key, this.permissionMode});
+  const ChatPermissionSheet({
+    super.key,
+    this.permissionMode,
+    this.agentId = 'codex',
+  });
   final String? permissionMode;
+  final String agentId;
 
   @override
   Widget build(BuildContext context) => ListView(
@@ -12,7 +27,7 @@ class ChatPermissionSheet extends StatelessWidget {
     children: [
       const ListTile(
         title: Text('Permissions'),
-        subtitle: Text('For this Codex chat, starting with your next message.'),
+        subtitle: Text('For this chat, starting with your next message.'),
       ),
       if (permissionMode == null)
         const ListTile(
@@ -26,11 +41,15 @@ class ChatPermissionSheet extends StatelessWidget {
           leading: Icon(
             mode == 'ask' ? Icons.shield_outlined : Icons.lock_open_outlined,
           ),
-          title: Text(mode == 'ask' ? 'Ask for approval' : 'Full access'),
+          title: Text(chatPermissionLabel(mode, agentId)),
           subtitle: Text(
             mode == 'ask'
-                ? 'Work in this project. Safe reads can run automatically; other commands and broader access can ask you first.'
-                : 'Access your PC and network without sandboxing or approval prompts.',
+                ? chatUsesTurnApproval(agentId)
+                      ? 'Before the agent starts, approve the entire turn, including its edits, commands and network use. Individual tools will not ask again during that turn.'
+                      : 'Safe actions can run automatically. Other tool requests ask you here in Nexus.'
+                : agentId == 'codex'
+                ? 'Access your PC and network without sandboxing or approval prompts.'
+                : 'Run without Nexus approval prompts. Agent and administrator restrictions still apply.',
           ),
           trailing: permissionMode == mode ? const Icon(Icons.check) : null,
           onTap: () => Navigator.pop(context, mode),

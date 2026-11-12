@@ -2393,11 +2393,13 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     await _saveComposerPrefs();
   }
 
-  String get _permissionLabel => switch (_active?.permissionMode) {
-    'ask' => 'Ask for approval',
-    'full-access' => 'Full access',
-    _ => 'Using PC settings',
-  };
+  String get _permissionLabel =>
+      chatPermissionLabel(_active?.permissionMode, _active?.agent ?? '');
+
+  bool get _permissionSupported =>
+      _client?.supports('agent.setPermissionMode') == true &&
+      (_active?.agent == 'codex' ||
+          _client?.supports('agent.permissions.all.v1') == true);
 
   Future<void> _pickPermissions() async {
     final client = _client;
@@ -2408,8 +2410,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       isScrollControlled: true,
       useSafeArea: true,
       backgroundColor: _panelBackgroundColor(session.agent),
-      builder: (_) =>
-          ChatPermissionSheet(permissionMode: session.permissionMode),
+      builder: (_) => ChatPermissionSheet(
+        permissionMode: session.permissionMode,
+        agentId: session.agent,
+      ),
     );
     if (chosen == null ||
         !mounted ||
@@ -2452,7 +2456,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         setState(() => _active = updated);
       }
       _toast(
-        'Permissions saved for the next message: ${chosen == 'ask' ? 'Ask for approval' : 'Full access'}.',
+        'Permissions saved for the next message: ${chatPermissionLabel(chosen, session.agent)}.',
       );
       if (_isLibrary) await _loadLibrary(quiet: true);
     } catch (e) {
@@ -2569,19 +2573,16 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   unawaited(_pickMode());
                 },
               ),
-            if (_active?.agent == 'codex')
+            if (_active != null)
               ListTile(
                 leading: const Icon(Icons.shield_outlined),
                 title: const Text('Permissions'),
                 subtitle: Text(
-                  _client?.supports('agent.setPermissionMode') == true
+                  _permissionSupported
                       ? _permissionLabel
                       : 'Update NexusLink on your PC to change permissions',
                 ),
-                enabled:
-                    !_busy &&
-                    !_sending &&
-                    _client?.supports('agent.setPermissionMode') == true,
+                enabled: !_busy && !_sending && _permissionSupported,
                 onTap: () {
                   Navigator.pop(ctx);
                   unawaited(_pickPermissions());

@@ -577,7 +577,7 @@ export interface AgentInfo {
 }
 
 export interface AgentSessionInfo {
-  /** Explicit permission override for a Nexus-driven Codex chat. */
+  /** Explicit permission override for this Nexus-driven agent chat. */
   permissionMode?: 'ask' | 'full-access'
   /** Latest observed activity, not an estimate of task completion. */
   activity?: 'working' | 'editing' | 'reading' | 'running-command' | 'thinking' | 'responding'

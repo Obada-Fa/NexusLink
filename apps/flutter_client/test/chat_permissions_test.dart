@@ -15,20 +15,24 @@ import 'agent_running_state_test.dart' show RunningHost, settle, teardown;
 
 class PermissionsHost extends RunningHost {
   String? permissionMode;
+  String agent = 'codex';
+  bool allAgents = true;
   bool supported = true;
   bool fail = false;
   bool materialized = false;
   final changes = <Map<String, dynamic>>[];
 
   @override
-  bool supports(String feature) => feature == 'agent.setPermissionMode'
+  bool supports(String feature) => feature == 'agent.permissions.all.v1'
+      ? allAgents
+      : feature == 'agent.setPermissionMode'
       ? supported
       : super.supports(feature);
 
   @override
   Map<String, dynamic> get session => {
     ...super.session,
-    'agent': 'codex',
+    'agent': agent,
     'permissionMode': permissionMode,
   };
 
@@ -40,7 +44,7 @@ class PermissionsHost extends RunningHost {
   ]) async {
     if (method == 'agent.list') {
       return [
-        {'id': 'codex', 'name': 'Codex', 'available': true},
+        {'id': agent, 'name': agent, 'available': true},
       ];
     }
     if (method == 'agent.openHostChat') {
@@ -75,7 +79,7 @@ class PermissionsRepository extends ChatRepository {
   Map<String, dynamic> get summary => {
     'id': 'library-chat',
     'hostId': 'pc',
-    'source': 'codex',
+    'source': pc.agent,
     'nativeId': 'native-thread',
     'title': 'Saved chat',
     'folderPath': '/project',
@@ -282,6 +286,72 @@ void main() {
       expect(pc.changes.single, {'agentSessionId': 'task-1', 'mode': 'ask'});
       await openMenu(tester);
       expect(find.text('Ask for approval'), findsOneWidget);
+      await teardown(tester);
+    },
+  );
+
+  for (final agent in ['claude', 'cursor', 'opencode', 'antigravity', 'mock']) {
+    testWidgets('$agent chat exposes permission modes and saves both choices', (
+      tester,
+    ) async {
+      final pc = PermissionsHost()..agent = agent;
+      await openChat(tester, pc);
+      await openMenu(tester);
+      await tester.tap(find.widgetWithText(ListTile, 'Permissions'));
+      await settle(tester);
+      final askLabel = chatPermissionLabel('ask', agent);
+      await tester.scrollUntilVisible(
+        find.widgetWithText(ListTile, askLabel),
+        120,
+        scrollable: find
+            .descendant(
+              of: find.byType(BottomSheet).last,
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      await tester.tap(find.widgetWithText(ListTile, askLabel));
+      await settle(tester);
+      expect(pc.changes.single, {'agentSessionId': 'task-1', 'mode': 'ask'});
+      await openMenu(tester);
+      expect(find.text(askLabel), findsOneWidget);
+      await tester.tap(find.widgetWithText(ListTile, 'Permissions'));
+      await settle(tester);
+      await tester.scrollUntilVisible(
+        find.widgetWithText(ListTile, 'Auto-approve'),
+        120,
+        scrollable: find
+            .descendant(
+              of: find.byType(BottomSheet).last,
+              matching: find.byType(Scrollable),
+            )
+            .first,
+      );
+      await tester.tap(find.widgetWithText(ListTile, 'Auto-approve'));
+      await settle(tester);
+      expect(pc.changes.last['mode'], 'full-access');
+      await teardown(tester);
+    });
+  }
+
+  testWidgets(
+    'a host with only Codex support explains the required upgrade for Claude',
+    (tester) async {
+      final pc = PermissionsHost()
+        ..agent = 'claude'
+        ..allAgents = false;
+      await openChat(tester, pc);
+      await openMenu(tester);
+      expect(
+        find.text('Update NexusLink on your PC to change permissions'),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<ListTile>(find.widgetWithText(ListTile, 'Permissions'))
+            .enabled,
+        isFalse,
+      );
       await teardown(tester);
     },
   );

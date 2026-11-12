@@ -84,10 +84,10 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
   }
 },15000);
 
-test('chat permission mode rejects unsupported agents and missing chats', () => {
+test('chat permission mode supports other agents and rejects missing chats', () => {
   const chat=createAgentSession('mock',tmpdir(),'test');
   try {
-    expect(setAgentPermissionMode(chat.agentSessionId,'ask').ok).toBe(false);
+    expect(setAgentPermissionMode(chat.agentSessionId,'ask').ok).toBe(true);
     expect(setAgentPermissionMode('missing','full-access').ok).toBe(false);
   } finally {closeAgentSession(chat.agentSessionId);}
 });
