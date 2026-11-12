@@ -1400,6 +1400,34 @@ export function createAgentSession(
   return { ...info };
 }
 
+/** Save a chat override; Codex receives it before its next turn. */
+export function setAgentPermissionMode(agentSessionId: string, mode: string): { ok: boolean; reason?: string; session?: AgentSessionInfo } {
+  loadAgentSessionsFromDisk();
+  const session = agentSessions.get(agentSessionId);
+  if (!session || session.info.status !== 'running') return { ok: false, reason: 'This chat is closed.' };
+  if (session.info.agent !== 'codex') return { ok: false, reason: 'Chat permission modes are currently supported for Codex.' };
+  if (session.info.busy || session.pendingPermissions.size) return { ok: false, reason: 'Stop the current reply before changing permissions.' };
+  if (mode !== 'ask' && mode !== 'full-access') return { ok: false, reason: 'Unknown permission mode.' };
+  session.info.permissionMode = mode;
+  saveAgentSessionsToDisk();
+  broadcast({ type: 'agent-session-update', session: { ...session.info } });
+  return { ok: true, session: { ...session.info } };
+}
+
+/** Explicit overrides avoid inheriting a PC-wide never/danger-full-access configuration. */
+export function codexPermissionPolicy(mode: AgentSessionInfo['permissionMode'], cwd: string) {
+  if (mode === 'ask') return {
+    approvalPolicy: 'untrusted',
+    approvalsReviewer: 'user',
+    sandboxPolicy: { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: false },
+  };
+  if (mode === 'full-access') return {
+    approvalPolicy: 'never',
+    sandboxPolicy: { type: 'dangerFullAccess' },
+  };
+  return {};
+}
+
 export function listAgentSessions(): AgentSessionInfo[] {
   loadAgentSessionsFromDisk();
   return [...agentSessions.values()]
@@ -4224,7 +4252,7 @@ class CodexAppServerAdapter implements AgentAdapter {
     const model=options.model || result.model;
     if(plan && !model)throw new Error('Codex returned no model for Plan mode');
     const collaborationMode=plan || this.planActive?{collaborationMode:{mode:plan?'plan':'default',settings:{model,reasoning_effort:effort ?? null,developer_instructions:null}}}:{};
-    const turn=await this.server!.request('turn/start',{threadId:this.threadId,input,...(options.model?{model:options.model}:{}),...(effort?{effort}:{}),...collaborationMode});
+    const turn=await this.server!.request('turn/start',{threadId:this.threadId,input,...codexPermissionPolicy(this.session.info.permissionMode,this.session.info.cwd),...(options.model?{model:options.model}:{}),...(effort?{effort}:{}),...collaborationMode});
     this.planActive=plan;
     if(generation!==this.generation){if(turn.turn?.id)await this.server?.request('turn/interrupt',{threadId:this.threadId,turnId:turn.turn.id});return;}
     if(this.session.info.busy)this.turnId=turn.turn?.id;
@@ -4261,7 +4289,7 @@ class CodexAppServerAdapter implements AgentAdapter {
       else this.server?.reject(id);
       emit(this.session,{kind:'status',text:'Codex requested an interaction this phone does not support. Open the chat on the PC.'});return;
     }
-    if(getAgentApprovalMode('codex')==='auto'){this.server?.respond(id,{decision:'accept'});return;}
+    if(this.session.info.permissionMode === 'full-access' || (!this.session.info.permissionMode && getAgentApprovalMode('codex')==='auto')){this.server?.respond(id,{decision:'accept'});return;}
     const server=this.server;
     this.session.pendingPermissions.set(ref,allow=>server?.respond(id,{decision:allow?'accept':'decline'}));
     emit(this.session,{kind:'permission-request',refId:ref,toolName:method==='item/commandExecution/requestApproval'?'Command':'File changes',toolInput:JSON.stringify(params),text:params.reason || 'Codex needs your approval.'});

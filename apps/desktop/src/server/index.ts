@@ -41,7 +41,7 @@ import { micStatus, startMic, stopMic, stopMicForSocket, handleMicFrame, setMicA
 import {
   listAgents, createAgentSession, renameAgentSession, setAgentSessionCwd, listAgentSessions, listHostChats, openHostChat, promptAgent,
   cancelAgent, closeAgentSession, agentHistory, resolveAgentPermission, setAgentBroadcast,
-  listAgentModels, AGENT_ICON_NAMES, resolveAgentIcon, setAgentApprovalMode,
+  listAgentModels, AGENT_ICON_NAMES, resolveAgentIcon, setAgentApprovalMode, setAgentPermissionMode,
 } from './handlers/agents';
 import { startIde, stopIde, ideStatus } from './handlers/ide';
 import type { WebRtcClientSignal, AgentImageAttachment } from '@nexuslink/rpc-types';
@@ -591,6 +591,12 @@ export async function startRpcServer(port = 45678, hostname?: string) {
           params.allow as boolean,
         ));
         break;
+      case 'agent.setPermissionMode':
+        result = await withTaskMutation(String(params.agentSessionId), async () => setAgentPermissionMode(
+          params.agentSessionId as string,
+          params.mode as string,
+        ));
+        break;
       case 'agent.setApprovalMode':
         result = setAgentApprovalMode(
           params.agent as string,
@@ -747,7 +753,7 @@ export async function startRpcServer(port = 45678, hostname?: string) {
       default:
         throw new WorkspaceError('UNSUPPORTED', `Unsupported RPC method: ${method}`);
     }
-    if (['agent.createSession','agent.prompt','agent.renameSession','agent.setSessionCwd','agent.permission','agent.cancel','agent.close'].includes(method)) await flushAgents();
+    if (['agent.createSession','agent.prompt','agent.renameSession','agent.setSessionCwd','agent.setPermissionMode','agent.permission','agent.cancel','agent.close'].includes(method)) await flushAgents();
     const response: RpcResponse = { id: req.id, result };
     send(ws, { type: 'rpc-response', response });
   }

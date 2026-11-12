@@ -43,6 +43,13 @@ I’d keep the dark visual identity, the direct access to PC tools, and the pixe
 
 ## Progress log
 
+- 2026-11-12, Codex chat permissions in the composer:
+  - Codex chats now offer **+ → Permissions → Ask for approval / Full access**. The choice is stored on the host per chat and applies from the next message; changing it is disabled during a reply. Chats without an explicit choice say **Using PC settings**. Older hosts show an update explanation.
+  - `agent.setPermissionMode` saves and broadcasts the session override. Ask sends Codex `approvalPolicy: untrusted`, `approvalsReviewer: user`, and a project workspace sandbox with network access disabled. Full access sends `never` and `dangerFullAccess`. Ask bypasses Nexus's global auto-approve handling so approval cards reach the phone. PC-wide Codex configuration is unchanged.
+  - Existing library chats can select a mode before their first Nexus reply. Their summaries carry the override. Fixed draft saving during chat disposal to retain the cache while mounted rather than reading Riverpod after unmount.
+  - Verified: full Flutter suite 583 passed, five skipped; 119 host/protocol tests passed; Flutter analysis and host TypeScript checking clean. Coverage includes switching Ask → Full access → Ask on a resumed thread, approval delivery and response, isolation between chats, unsupported/busy sessions, saving and failed saves from the + menu, older hosts, saved PC chats, cancellation, and the permission sheet at 320 dp with 2× text.
+  - Not verified: a live Codex model turn or paired-phone walkthrough. No APK built/installed and no host deployment performed. Protocol fields checked against the installed Codex schema and [official app-server documentation](https://learn.chatgpt.com/docs/app-server).
+
 - 2026-11-12, New chat agent choice:
   - New chat → Chat here in Nexus now shows **Choose agent** before creating a session, rather than silently selecting the last-used or first available agent. The existing picker shows the selected project folder and the PC's agents, with unavailable CLIs disabled. When none are available it explains how to proceed. Cancelling creates no session; the separate Start for Claude app flow is unchanged.
   - Verified: Flutter analysis clean; 39 targeted tests passed across new-chat choice, Claude app flow, running state and chat reliability. New regressions select Cursor and Claude despite a saved preference, preserve the folder, cancel without creation and show the unavailable-agent state.

@@ -2,6 +2,7 @@ import type { AgentEvent, AgentImageAttachment } from './index';
 
 export type ContinuationSafety = 'ready' | 'busy' | 'unknown';
 export interface ChatSummary {
+  permissionMode?: 'ask' | 'full-access';
   id: string;
   hostId: string;
   source: string;

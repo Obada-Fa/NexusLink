@@ -61,6 +61,7 @@ export type RpcMethod = keyof WorkspaceRpc | keyof ChatRpc
   | 'agent.prompt'
   | 'agent.permission'
   | 'agent.setApprovalMode'
+  | 'agent.setPermissionMode'
   | 'agent.cancel'
   | 'agent.close'
   | 'agent.history'
@@ -210,6 +211,8 @@ export type Params<M extends RpcMethod> =
     ? { agentSessionId: string; requestId: string; allow: boolean }
     : M extends 'agent.setApprovalMode'
     ? { agent: string; mode: AgentApprovalMode }
+    : M extends 'agent.setPermissionMode'
+    ? { agentSessionId: string; mode: 'ask' | 'full-access' }
     : M extends 'agent.cancel'
     ? { agentSessionId: string }
     : M extends 'agent.close'
@@ -355,6 +358,8 @@ export type Result<M extends RpcMethod> =
     ? { ok: boolean; reason?: string }
     : M extends 'agent.setApprovalMode'
     ? { ok: boolean; mode?: AgentApprovalMode }
+    : M extends 'agent.setPermissionMode'
+    ? { ok: boolean; reason?: string; session?: AgentSessionInfo }
     : M extends 'agent.cancel'
     ? { ok: boolean }
     : M extends 'agent.close'
@@ -572,6 +577,8 @@ export interface AgentInfo {
 }
 
 export interface AgentSessionInfo {
+  /** Explicit permission override for a Nexus-driven Codex chat. */
+  permissionMode?: 'ask' | 'full-access'
   /** Latest observed activity, not an estimate of task completion. */
   activity?: 'working' | 'editing' | 'reading' | 'running-command' | 'thinking' | 'responding'
   activityAt?: number

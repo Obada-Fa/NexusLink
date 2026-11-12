@@ -51,7 +51,7 @@ export function sessionSummary(hostId: string, session: AgentSessionInfo, live?:
   const imported = session.imported === true;
   const interrupted = session.taskState === 'interrupted';
   const safety = session.busy ? 'busy' : interrupted ? 'unknown' : 'ready';
-  return {id:identity(hostId,session.agent,session.hostChatId || session.agentSessionId),hostId,source:session.agent,sourceName:sourceName(session.agent),nativeId:session.hostChatId,agentSessionId:session.agentSessionId,managed:!imported,title:session.title,preview:session.preview,folderId:folder.id,folderPath:folder.path,folderName:folder.name,activityAt:validActivity(session.updatedAt) || validActivity(session.createdAt),archived:session.archived === true,taskState:session.taskState,activity:session.activity,execution:session.taskState === 'waiting' ? 'needsReply' : session.busy ? 'working' : interrupted ? 'unknown' : 'idle',capabilities:{read:true,continue:safety === 'ready' && session.status === 'running',safety,reason:safety === 'busy' ? 'This chat is working on the PC.' : interrupted ? 'This chat was interrupted by a host restart. Check the original run on the PC, or start a new chat.' : undefined},live:sessionLive(session,live)};
+  return {id:identity(hostId,session.agent,session.hostChatId || session.agentSessionId),hostId,source:session.agent,sourceName:sourceName(session.agent),nativeId:session.hostChatId,agentSessionId:session.agentSessionId,permissionMode:session.permissionMode,managed:!imported,title:session.title,preview:session.preview,folderId:folder.id,folderPath:folder.path,folderName:folder.name,activityAt:validActivity(session.updatedAt) || validActivity(session.createdAt),archived:session.archived === true,taskState:session.taskState,activity:session.activity,execution:session.taskState === 'waiting' ? 'needsReply' : session.busy ? 'working' : interrupted ? 'unknown' : 'idle',capabilities:{read:true,continue:safety === 'ready' && session.status === 'running',safety,reason:safety === 'busy' ? 'This chat is working on the PC.' : interrupted ? 'This chat was interrupted by a host restart. Check the original run on the PC, or start a new chat.' : undefined},live:sessionLive(session,live)};
 }
 function sourceName(source: string) { return ({claude:'Claude Code',cursor:'Cursor',codex:'Codex',opencode:'OpenCode',antigravity:'Antigravity',mock:'NexusLink'} as Record<string,string>)[source] || source; }
 
@@ -267,6 +267,7 @@ export class ChatService {
     return row.agentSessionId ? this.options.gateway.sessions().find(session=>session.agentSessionId===row.agentSessionId) : undefined;
   }
   async historyPage(params:{chatId:string;olderCursor?:string;newerCursor?:string;limit?:number}):Promise<ChatHistoryPage> {
+    await this.syncSessions();
     const row:ChatSummary|undefined=await this.call('get',{id:params.chatId});
     if(!row) throw new Error('Chat no longer exists in the library');
     const limit=Math.min(100,Math.max(1,params.limit || 100));

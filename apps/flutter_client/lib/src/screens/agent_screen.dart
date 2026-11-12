@@ -40,7 +40,9 @@ import '../workspace/files_screen.dart';
 import '../workspace/project.dart';
 import '../workspace/changes_screen.dart';
 import '../chats/chat_models.dart';
+import '../widgets/chat_permission_sheet.dart';
 import '../chats/chat_repository.dart';
+import '../chats/chat_cache.dart';
 import '../theme/nexus_theme.dart';
 import '../theme/nx_widgets.dart';
 
@@ -155,6 +157,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   DateTime _lastLibraryFetch = DateTime.fromMillisecondsSinceEpoch(0);
   static const _libraryThrottle = Duration(milliseconds: 700);
   ChatSummary? _librarySummary;
+  late final ChatCache _draftCache;
   final Map<String, Map<String, dynamic>> _libraryEvents = {};
   String? _libraryRevision;
   ChatSummary get _chatSummary => _librarySummary ?? widget.libraryChat!;
@@ -198,6 +201,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
   @override
   void initState() {
     super.initState();
+    _draftCache = ref.read(chatCacheProvider);
     WidgetsBinding.instance.addObserver(this);
     _input.addListener(_draftChanged);
     if (_isLibrary) {
@@ -237,14 +241,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (_isLibrary) {
       final chat = _chatSummary;
       unawaited(
-        ref
-            .read(chatCacheProvider)
-            .saveDraft(
-              chat.hostId,
-              chat.id,
-              _input.text,
-              position: _scroll.hasClients ? _scroll.offset : null,
-            ),
+        _draftCache.saveDraft(
+          chat.hostId,
+          chat.id,
+          _input.text,
+          position: _scroll.hasClients ? _scroll.offset : null,
+        ),
       );
     }
   }
@@ -576,6 +578,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                 ? 'Some history is unavailable or content was truncated.'
                 : null);
         _active = AgentSessionInfo(
+          permissionMode: current.json['permissionMode'] as String?,
           agentSessionId: current.sessionId ?? 'library:${chat.id}',
           agent: current.source,
           cwd: current.folderPath ?? '',
@@ -2203,14 +2206,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (_isLibrary) {
       final chat = widget.libraryChat!;
       unawaited(
-        ref
-            .read(chatCacheProvider)
-            .saveDraft(
-              chat.hostId,
-              chat.id,
-              _input.text,
-              position: _scroll.hasClients ? _scroll.offset : null,
-            ),
+        _draftCache.saveDraft(
+          chat.hostId,
+          chat.id,
+          _input.text,
+          position: _scroll.hasClients ? _scroll.offset : null,
+        ),
       );
       Navigator.of(context).pop();
       return;
@@ -2392,6 +2393,73 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     await _saveComposerPrefs();
   }
 
+  String get _permissionLabel => switch (_active?.permissionMode) {
+    'ask' => 'Ask for approval',
+    'full-access' => 'Full access',
+    _ => 'Using PC settings',
+  };
+
+  Future<void> _pickPermissions() async {
+    final client = _client;
+    final session = _active;
+    if (client == null || session == null || _busy || _sending) return;
+    final chosen = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: _panelBackgroundColor(session.agent),
+      builder: (_) =>
+          ChatPermissionSheet(permissionMode: session.permissionMode),
+    );
+    if (chosen == null ||
+        !mounted ||
+        _busy ||
+        _sending ||
+        !identical(client, _client) ||
+        _active?.agentSessionId != session.agentSessionId) {
+      return;
+    }
+    try {
+      var id = session.agentSessionId;
+      if (_isLibrary && _librarySummary?.sessionId == null) {
+        final nativeId = session.hostChatId;
+        if (nativeId == null) {
+          throw StateError('Open this chat on the PC first.');
+        }
+        final opened = await client.requestMap('agent.openHostChat', {
+          'agent': session.agent,
+          'hostChatId': nativeId,
+          'cwd': session.cwd,
+          'title': session.title,
+        });
+        id = opened['agentSessionId'] as String;
+      }
+      final result = await client.requestMap('agent.setPermissionMode', {
+        'agentSessionId': id,
+        'mode': chosen,
+      });
+      if (result['ok'] != true) {
+        throw StateError(
+          result['reason'] as String? ?? 'Could not save permissions.',
+        );
+      }
+      if (!mounted || !identical(client, _client)) return;
+      final updated = AgentSessionInfo.fromJson(
+        Map<String, dynamic>.from(result['session'] as Map),
+      );
+      if (_active?.agentSessionId == session.agentSessionId ||
+          _active?.agentSessionId == id) {
+        setState(() => _active = updated);
+      }
+      _toast(
+        'Permissions saved for the next message: ${chosen == 'ask' ? 'Ask for approval' : 'Full access'}.',
+      );
+      if (_isLibrary) await _loadLibrary(quiet: true);
+    } catch (e) {
+      if (mounted) _toast('Could not change permissions: $e');
+    }
+  }
+
   Future<void> _openComposerMenu() async {
     if (_isLibrary && !_replyAllowed) return;
     await _refreshGitTree();
@@ -2499,6 +2567,24 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                 onTap: () {
                   Navigator.pop(ctx);
                   unawaited(_pickMode());
+                },
+              ),
+            if (_active?.agent == 'codex')
+              ListTile(
+                leading: const Icon(Icons.shield_outlined),
+                title: const Text('Permissions'),
+                subtitle: Text(
+                  _client?.supports('agent.setPermissionMode') == true
+                      ? _permissionLabel
+                      : 'Update NexusLink on your PC to change permissions',
+                ),
+                enabled:
+                    !_busy &&
+                    !_sending &&
+                    _client?.supports('agent.setPermissionMode') == true,
+                onTap: () {
+                  Navigator.pop(ctx);
+                  unawaited(_pickPermissions());
                 },
               ),
             ListTile(
@@ -2922,14 +3008,12 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     if (_isLibrary) {
       final chat = widget.libraryChat!;
       unawaited(
-        ref
-            .read(chatCacheProvider)
-            .saveDraft(
-              chat.hostId,
-              chat.id,
-              _input.text,
-              position: _scroll.hasClients ? _scroll.offset : null,
-            ),
+        _draftCache.saveDraft(
+          chat.hostId,
+          chat.id,
+          _input.text,
+          position: _scroll.hasClients ? _scroll.offset : null,
+        ),
       );
     }
     _draftTimer?.cancel();
@@ -4906,7 +4990,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
                   Row(
                     children: [
                       IconButton(
-                        tooltip: 'Photo, model, thinking, folder…',
+                        tooltip: 'Photo, model, thinking, permissions, folder…',
                         onPressed: _openComposerMenu,
                         icon: const Icon(Icons.add),
                       ),

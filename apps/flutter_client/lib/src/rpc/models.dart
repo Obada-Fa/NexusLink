@@ -377,6 +377,7 @@ class AgentInfo {
 }
 
 class AgentSessionInfo {
+  final String? permissionMode;
   final String agentSessionId;
   final String agent;
   final String cwd;
@@ -395,6 +396,7 @@ class AgentSessionInfo {
   final int runningAgents;
 
   AgentSessionInfo({
+    this.permissionMode,
     required this.agentSessionId,
     required this.agent,
     required this.cwd,
@@ -411,6 +413,7 @@ class AgentSessionInfo {
   });
 
   factory AgentSessionInfo.fromJson(Map<String, dynamic> j) => AgentSessionInfo(
+    permissionMode: j['permissionMode'] as String?,
     agentSessionId: j['agentSessionId'] as String,
     agent: (j['agent'] as String?) ?? '',
     cwd: (j['cwd'] as String?) ?? '',
@@ -441,6 +444,7 @@ class AgentSessionInfo {
     String? icon,
     int? runningAgents,
   }) => AgentSessionInfo(
+    permissionMode: permissionMode,
     agentSessionId: agentSessionId ?? this.agentSessionId,
     agent: agent ?? this.agent,
     cwd: cwd ?? this.cwd,
