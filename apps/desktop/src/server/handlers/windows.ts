@@ -266,9 +266,78 @@ export async function listApps(): Promise<AppInfo[]> {
     Promise.all(profilePromises),
   ]);
 
-  const out = [...apps, ...profs];
+  const out: AppInfo[] = [...apps, ...profs];
+  const roles = await defaultAppIds(out.map((a) => a.appId));
+  for (const app of out) {
+    if (app.appId === roles.terminal) app.role = 'terminal';
+    else if (app.appId === roles.files) app.role = 'files';
+  }
   out.sort((a, b) => a.name.localeCompare(b.name));
   return out;
+}
+
+const KNOWN_TERMINALS = [
+  'org.gnome.Ptyxis', 'org.gnome.Console', 'org.gnome.Terminal', 'org.kde.konsole', 'kitty',
+  'Alacritty', 'org.wezfurlong.wezterm', 'com.mitchellh.ghostty', 'xfce4-terminal', 'foot',
+  'com.system76.CosmicTerm', 'tilix', 'terminator', 'xterm',
+];
+
+function firstLine(text: string | undefined): string | undefined {
+  return text?.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
+}
+
+function desktopId(entry: string | undefined): string | undefined {
+  const id = entry?.trim().replace(/^'|'$/g, '').split(':')[0].replace(/\.desktop$/, '');
+  return id || undefined;
+}
+
+async function readText(path: string): Promise<string | undefined> {
+  try { return await Bun.file(path).text(); } catch { return undefined; }
+}
+
+async function commandOut(argv: string[]): Promise<string | undefined> {
+  try {
+    const proc = Bun.spawn(argv, { stdout: 'pipe', stderr: 'ignore' });
+    const text = await new Response(proc.stdout).text();
+    return (await proc.exited) === 0 ? text.trim() : undefined;
+  } catch { return undefined; }
+}
+
+/**
+ * The PC's default terminal and file manager as app ids from [installed].
+ * Terminal: xdg-terminal-exec's lists (desktop-specific first), then the
+ * GNOME setting, then well-known terminals. Files: the inode/directory handler.
+ */
+export async function defaultAppIds(
+  installed: string[],
+  probe: {
+    read?: (path: string) => Promise<string | undefined>;
+    run?: (argv: string[]) => Promise<string | undefined>;
+    env?: Record<string, string | undefined>;
+    home?: string;
+  } = {},
+): Promise<{ terminal?: string; files?: string }> {
+  const read = probe.read ?? readText;
+  const run = probe.run ?? commandOut;
+  const env = probe.env ?? process.env;
+  const config = env.XDG_CONFIG_HOME || join(probe.home ?? homedir(), '.config');
+  const has = new Set(installed);
+  const pick = (id: string | undefined) => (id && has.has(id) ? id : undefined);
+
+  let terminal: string | undefined;
+  const desktops = (env.XDG_CURRENT_DESKTOP ?? '').split(':').map((d) => d.toLowerCase()).filter(Boolean);
+  for (const name of [...desktops.map((d) => `${d}-xdg-terminals.list`), 'xdg-terminals.list']) {
+    terminal = pick(desktopId(firstLine(await read(join(config, name)))));
+    if (terminal) break;
+  }
+  if (!terminal) {
+    const exec = desktopId(await run(['gsettings', 'get', 'org.gnome.desktop.default-applications.terminal', 'exec']));
+    if (exec) terminal = installed.find((id) => id === exec || id.toLowerCase().endsWith(exec.toLowerCase()));
+  }
+  terminal ??= KNOWN_TERMINALS.find((id) => has.has(id));
+
+  const files = pick(desktopId(await run(['xdg-mime', 'query', 'default', 'inode/directory'])));
+  return { terminal, files };
 }
 
 /** Explicitly invalidate catalog & icon cache and broadcast updated app list. */

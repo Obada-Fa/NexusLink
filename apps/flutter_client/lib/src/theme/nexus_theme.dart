@@ -65,7 +65,7 @@ abstract final class Providers {
     'qwen': Color(0xFFB18CFF),
   };
   static const _names = <String, String>{
-    'claude': 'Code Agent',
+    'claude': 'Claude',
     'codex': 'Codex',
     'antigravity': 'Antigravity',
     'gemini': 'Gemini',

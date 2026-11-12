@@ -4,6 +4,7 @@ import 'package:nexuslink/src/session/target.dart';
 import 'package:nexuslink/src/shell/capabilities.dart';
 import 'package:nexuslink/src/shell/module.dart';
 import 'package:nexuslink/src/shell/module_registry.dart';
+import 'package:nexuslink/src/shell/home_art.dart';
 import 'package:nexuslink/src/shell/tiles.dart';
 import 'package:nexuslink/src/theme/nexus_theme.dart';
 
@@ -106,5 +107,40 @@ void main() {
     expect(opacities, [1.0, 0.5]);
     await tester.tap(find.text('Offline'));
     expect(taps, 1, reason: 'offline tiles still tap (to explain)');
+  });
+
+  testWidgets('a PC icon replaces the drawn art; a bad one falls back', (
+    tester,
+  ) async {
+    final ctx = ctxFor(hubTarget(), {UtilityIds.nexuslink});
+    // 1×1 transparent PNG.
+    const png =
+        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+    Future<void> pump(String? icon) => tester.pumpWidget(
+      MaterialApp(
+        theme: nexusTheme(),
+        home: Scaffold(
+          body: SizedBox(
+            width: 190,
+            child: ModuleTile(
+              tile: HomeTile(remote, TileStatus.ready),
+              ctx: ctx,
+              onTap: () {},
+              pcIcon: icon,
+            ),
+          ),
+        ),
+      ),
+    );
+    await pump(png);
+    await tester.pump();
+    expect(find.byType(Image), findsOneWidget);
+    expect(find.byType(HomeShortcutArt), findsNothing);
+    await pump('not-an-icon');
+    await tester.pump();
+    expect(find.byType(Image), findsNothing);
+    expect(find.byType(HomeShortcutArt), findsOneWidget);
+    await pump(null);
+    expect(find.byType(HomeShortcutArt), findsOneWidget);
   });
 }

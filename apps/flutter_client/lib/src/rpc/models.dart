@@ -36,13 +36,23 @@ class AppInfo {
   final String? icon; // data: URI
   final String? wmClass;
 
-  AppInfo({required this.appId, required this.name, this.icon, this.wmClass});
+  /// `terminal` or `files` on the PC's default terminal and file manager.
+  final String? role;
+
+  AppInfo({
+    required this.appId,
+    required this.name,
+    this.icon,
+    this.wmClass,
+    this.role,
+  });
 
   factory AppInfo.fromJson(Map<String, dynamic> j) => AppInfo(
     appId: j['appId'] as String,
     name: (j['name'] as String?) ?? j['appId'] as String,
     icon: j['icon'] as String?,
     wmClass: j['wmClass'] as String?,
+    role: j['role'] as String?,
   );
 }
 

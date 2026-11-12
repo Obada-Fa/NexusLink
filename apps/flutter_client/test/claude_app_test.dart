@@ -23,6 +23,7 @@ class ClaudeAppHost extends RpcClient {
   final handlers = <String, List<void Function(Map<String, dynamic>)>>{};
   int _next = 0;
   String? lastCreateCwd;
+  bool claudeAvailable = true;
 
   @override
   RpcStatus get status => RpcStatus.connected;
@@ -54,6 +55,12 @@ class ClaudeAppHost extends RpcClient {
     switch (method) {
       case 'system.getInfo':
         return {'homeDir': '/home/me'};
+      case 'agent.list':
+        return [
+          {'id': 'claude', 'name': 'Claude', 'available': claudeAvailable},
+          {'id': 'codex', 'name': 'Codex', 'available': true},
+          {'id': 'cursor', 'name': 'Cursor CLI', 'available': false},
+        ];
       case 'fs.listProjects':
         return [
           {'name': 'demo', 'path': '/home/me/demo'},
@@ -149,7 +156,7 @@ Widget _newChatButton(
       context: context,
       ref: ref,
       folder: folder,
-      openNexusChat: nexusChats.add,
+      openNexusChat: (folder, agent) => nexusChats.add('$folder|$agent'),
     ),
     child: const Text('New chat'),
   ),
@@ -242,17 +249,36 @@ void main() {
       // The existing folder picker comes first.
       await tester.tap(find.text('demo'));
       await _settle(tester);
-      expect(find.text('Chat here in Nexus'), findsOneWidget);
+      expect(find.text('Choose agent'), findsOneWidget);
+      expect(find.text('Claude'), findsOneWidget);
+      expect(find.text('Codex'), findsOneWidget);
+      expect(find.text('Not installed on the PC.'), findsOneWidget);
+      // The Claude app option belongs to Claude's row only: exactly one.
       expect(find.text('Start for Claude app'), findsOneWidget);
       expect(
         find.textContaining('it ends if the PC host restarts'),
         findsOneWidget,
       );
       expect(find.text('/home/me/demo'), findsOneWidget);
-      await tester.tap(find.text('Chat here in Nexus'));
+      await tester.tap(find.text('Codex'));
       await _settle(tester);
-      expect(chats, ['/home/me/demo']);
+      expect(chats, ['/home/me/demo|codex']);
       expect(h.host.calls, isNot(contains('terminal.create')));
+    });
+
+    testWidgets('no Claude app option without Claude', (tester) async {
+      final chats = <String?>[];
+      await _pump(
+        tester,
+        (c, r) => _newChatButton(c, r, chats, folder: '/home/me/demo'),
+        host: ClaudeAppHost()..claudeAvailable = false,
+      );
+      await tester.tap(find.text('New chat'));
+      await _settle(tester);
+      expect(find.text('Start for Claude app'), findsNothing);
+      await tester.tap(find.text('Codex'));
+      await _settle(tester);
+      expect(chats, ['/home/me/demo|codex']);
     });
 
     testWidgets('cancelling the picker does nothing', (tester) async {
@@ -262,7 +288,7 @@ void main() {
       await _settle(tester);
       await tester.tapAt(const Offset(200, 40)); // scrim
       await _settle(tester);
-      expect(find.text('Chat here in Nexus'), findsNothing);
+      expect(find.text('Choose agent'), findsNothing);
       expect(chats, isEmpty);
       expect(h.host.calls, isNot(contains('terminal.create')));
     });

@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../session/target.dart';
 import '../theme/nexus_theme.dart';
+import '../widgets/app_icon.dart';
 import 'home_art.dart';
 import 'module.dart';
 import 'module_extras.dart';
@@ -143,11 +144,16 @@ class ModuleTile extends StatelessWidget {
     required this.ctx,
     required this.onTap,
     this.checkingLabel = 'Checking…',
+    this.pcIcon,
   });
   final HomeTile tile;
   final ModuleContext ctx;
   final VoidCallback onTap;
   final String checkingLabel;
+
+  /// The PC's own icon for this tool (its default terminal or file manager),
+  /// shown instead of the drawn art when it can be read.
+  final String? pcIcon;
 
   @override
   Widget build(BuildContext context) {
@@ -194,7 +200,18 @@ class ModuleTile extends StatelessWidget {
                 duration: const Duration(milliseconds: 160),
                 opacity: status == TileStatus.offline ? .5 : 1,
                 child: toolGroupOrder[toolGroupOf(module)]!.contains(module.id)
-                    ? HomeShortcutArt(moduleId: module.id, size: 54)
+                    ? (pcIcon == null
+                          ? HomeShortcutArt(moduleId: module.id, size: 54)
+                          : AppIconTile(
+                              key: ValueKey('pc-icon-${module.id}'),
+                              icon: pcIcon,
+                              name: module.title,
+                              size: 54,
+                              fallback: HomeShortcutArt(
+                                moduleId: module.id,
+                                size: 54,
+                              ),
+                            ))
                     : Icon(module.icon, size: 54),
               ),
               const SizedBox(height: 5),

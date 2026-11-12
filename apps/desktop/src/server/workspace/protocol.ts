@@ -56,8 +56,11 @@ export async function workspaceRequest(method:string, p:Record<string,unknown>, 
 }
 export function validateRequest(method:string,p:Record<string,unknown>) {
   if(!p || typeof p!=='object' || Array.isArray(p)) throw new WorkspaceError('INVALID_ARGUMENT','Parameters must be an object.');
-  for(const key of ['path','cwd','agentSessionId','terminalId','agent','requestId','data','text','title','shell','operationId'])
+  for(const key of ['path','cwd','agentSessionId','terminalId','agent','requestId','data','text','title','shell','operationId']) {
+    // webrtc.signal carries its answer / ICE / feedback as an object; signalWebrtc checks each field.
+    if(key==='data' && method==='webrtc.signal') continue;
     if(p[key]!==undefined && typeof p[key]!=='string') throw new WorkspaceError('INVALID_ARGUMENT',`Invalid ${key}.`);
+  }
   if(method==='session.enroll') {
     if(!/^\d{8}$/.test(stringParam(p,'code'))) throw new WorkspaceError('INVALID_ARGUMENT','Pairing code must contain eight digits.');
     const name=stringParam(p,'name'); if(name.length>100) throw new WorkspaceError('INVALID_ARGUMENT','Device name is too long.');

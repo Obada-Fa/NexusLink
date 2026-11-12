@@ -54,12 +54,16 @@ class AgentScreen extends ConsumerStatefulWidget {
   final ChatSummary? libraryChat;
   final bool startNew;
   final String? initialFolder;
+
+  /// With [startNew]: the agent already chosen (skips the agent sheet).
+  final String? initialAgent;
   final String? initialTaskId;
   const AgentScreen({
     super.key,
     this.libraryChat,
     this.startNew = false,
     this.initialFolder,
+    this.initialAgent,
     this.initialTaskId,
   });
 
@@ -168,6 +172,15 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
           !_savedCopy &&
           _client?.status == RpcStatus.connected &&
           _deliveryOperation == null);
+
+  /// A chat Nexus started that is only blocked because its turn is
+  /// running. The stop button already says so; a read-only notice and a
+  /// "start new chat" link would just take room from the conversation.
+  bool get _ownTurnRunning =>
+      _isLibrary &&
+      !_savedCopy &&
+      _chatSummary.json['managed'] == true &&
+      (_chatSummary.json['capabilities'] as Map?)?['safety'] == 'busy';
 
   RpcClient? get _client => ref.read(activeClientProvider);
 
@@ -352,7 +365,14 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
       if (_isLibrary) await _loadLibrary();
       if (widget.startNew && !_startedNew) {
         _startedNew = true;
-        if (mounted) await _newTaskFlow(cwd: widget.initialFolder);
+        final chosen = _agents
+            .where((a) => a.available && a.id == widget.initialAgent)
+            .firstOrNull;
+        if (mounted && chosen != null && widget.initialFolder != null) {
+          await _newChat(chosen, cwd: widget.initialFolder);
+        } else if (mounted) {
+          await _newTaskFlow(cwd: widget.initialFolder);
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -3531,49 +3551,32 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     return Column(
       children: [
         if (ChatLiveHeader.shows(live)) ChatLiveHeader(live: live!),
-        if (_hasOlder)
-          TextButton(
-            onPressed: _older,
-            child: const Text('Load earlier messages'),
-          ),
-        if (_newActivity)
-          TextButton(
-            onPressed: () => _scrollToEnd(force: true),
-            child: const Text('Jump to latest ↓'),
-          ),
         Expanded(
-          child: Container(
-            color: _chatBackgroundColor(_active?.agent),
-            child: ListenableBuilder(
-              listenable: _transcriptTick,
-              builder: (context, _) {
-                // Main chat = events without agentId; sub-agents live in the
-                // strip and the agent view.
-                _display = mainTimeline(_transcript.display);
-                final agents = _subagents;
-                final display = splitSpawnCalls(
-                  groupAgentDisplay(_display),
-                  (ref) => agents.bySpawnRef(ref) != null,
-                );
-                return ListView.builder(
-                  controller: _scroll,
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-                  itemCount: display.length + (_busy ? 1 : 0),
-                  itemBuilder: (_, i) {
-                    if (i >= display.length) {
-                      return _workingRow();
-                    }
-                    final item = display[i];
-                    if (item.tools != null) return _toolGroup(item.tools!);
-                    return _bubble(item.event!);
-                  },
-                );
-              },
-            ),
+          child: Stack(
+            children: [
+              Positioned.fill(child: _chatList()),
+              if (_newActivity)
+                Positioned(
+                  bottom: 8,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: ActionChip(
+                      key: const ValueKey('jump-to-latest'),
+                      avatar: const Icon(Icons.arrow_downward, size: 16),
+                      label: const Text('Jump to latest'),
+                      onPressed: () => _scrollToEnd(force: true),
+                    ),
+                  ),
+                ),
+            ],
           ),
         ),
+
         if (_isLibrary &&
-            (_savedCopy || _historyNotice != null || !_replyAllowed))
+            (_savedCopy ||
+                _historyNotice != null ||
+                (!_replyAllowed && !_ownTurnRunning)))
           Padding(
             padding: const EdgeInsets.all(12),
             child: Text(
@@ -3589,7 +3592,10 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
             onPressed: _checkDelivery,
             child: const Text('Delivery uncertain · Check delivery'),
           ),
-        if (_isLibrary && !widget.libraryChat!.canReply && !_savedCopy)
+        if (_isLibrary &&
+            !_chatSummary.canReply &&
+            !_savedCopy &&
+            !_ownTurnRunning)
           TextButton(
             onPressed: () => Navigator.of(context).push(
               MaterialPageRoute<void>(
@@ -3609,6 +3615,50 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         ),
         _composer(),
       ],
+    );
+  }
+
+  /// The message list. "Load earlier" is its first row, so it scrolls away
+  /// instead of taking height from the conversation.
+  Widget _chatList() {
+    return Container(
+        color: _chatBackgroundColor(_active?.agent),
+        child: ListenableBuilder(
+          listenable: _transcriptTick,
+          builder: (context, _) {
+            // Main chat = events without agentId; sub-agents live in the
+            // strip and the agent view.
+            _display = mainTimeline(_transcript.display);
+            final agents = _subagents;
+            final display = splitSpawnCalls(
+              groupAgentDisplay(_display),
+              (ref) => agents.bySpawnRef(ref) != null,
+            );
+            final lead = _hasOlder ? 1 : 0;
+            return ListView.builder(
+              controller: _scroll,
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+              itemCount: lead + display.length + (_busy ? 1 : 0),
+              itemBuilder: (_, index) {
+                if (index < lead) {
+                  return Center(
+                    child: TextButton(
+                      onPressed: _older,
+                      child: const Text('Load earlier messages'),
+                    ),
+                  );
+                }
+                final i = index - lead;
+                if (i >= display.length) {
+                  return _workingRow();
+                }
+                final item = display[i];
+                if (item.tools != null) return _toolGroup(item.tools!);
+                return _bubble(item.event!);
+              },
+            );
+          },
+        ),
     );
   }
 

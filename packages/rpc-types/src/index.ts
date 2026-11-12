@@ -491,6 +491,8 @@ export interface AppInfo {
   icon?: string
   /** StartupWMClass or best-guess class used to match a running window */
   wmClass?: string
+  /** Set on the PC's default terminal and file manager. */
+  role?: 'terminal' | 'files'
 }
 
 /**

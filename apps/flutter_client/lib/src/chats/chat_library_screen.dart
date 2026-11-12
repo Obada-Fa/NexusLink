@@ -299,7 +299,7 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
                               ? 'All apps'
                               : {
                                   'codex': 'Codex',
-                                  'claude': 'Code Agent',
+                                  'claude': 'Claude',
                                   'cursor': 'Cursor',
                                   'opencode': 'OpenCode',
                                   'antigravity': 'Antigravity',
@@ -491,9 +491,13 @@ class _ChatLibraryScreenState extends ConsumerState<ChatLibraryScreen>
       context: context,
       ref: ref,
       folder: folder ?? widget.folder?.path,
-      openNexusChat: (cwd) => Navigator.of(context).push(
+      openNexusChat: (cwd, agent) => Navigator.of(context).push(
         MaterialPageRoute<void>(
-          builder: (_) => AgentScreen(startNew: true, initialFolder: cwd),
+          builder: (_) => AgentScreen(
+            startNew: true,
+            initialFolder: cwd,
+            initialAgent: agent,
+          ),
         ),
       ),
     ),

@@ -1,27 +1,31 @@
 // Agents → New chat: pick or create a folder (the existing picker), then
-// choose between a chat here in Nexus (unchanged) and a session started on
-// the PC for the Claude app.
+// choose the agent. Claude's row also offers starting the session on the PC
+// for the Claude app; no other agent sees that option.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../rpc/models.dart';
 import '../screens/cwd_picker.dart';
 import '../state/connection.dart';
 import '../theme/nexus_theme.dart';
+import '../widgets/agent_activity_icon.dart';
 import 'claude_app_session_screen.dart';
 import 'claude_app_sessions.dart';
 
-/// Runs the New chat flow. [openNexusChat] opens today's Nexus chat for a
-/// folder (null: let the chat screen ask, as before).
+/// Opens a Nexus chat in [folder] with [agent] (null: the chat screen asks).
+typedef OpenNexusChat = void Function(String? folder, String? agent);
+
+/// Runs the New chat flow: folder, then agent.
 Future<void> startNewChatFlow({
   required BuildContext context,
   required WidgetRef ref,
-  required void Function(String? folder) openNexusChat,
+  required OpenNexusChat openNexusChat,
   String? folder,
 }) async {
   final client = ref.read(activeClientProvider);
   if (client == null) {
-    openNexusChat(folder);
+    openNexusChat(folder, null);
     return;
   }
   final cwd =
@@ -41,13 +45,19 @@ Future<void> startNewChatFlow({
         builder: (_) => ClaudeAppSessionScreen(session: choice),
       ),
     );
-  } else {
-    openNexusChat(cwd);
+  } else if (choice is NexusChatChoice) {
+    openNexusChat(cwd, choice.agent);
   }
 }
 
-/// Pops with `'nexus'` for a Nexus chat, or with the started
-/// [ClaudeAppSession].
+/// A Nexus chat with [agent] (null when the agent list could not be read;
+/// the chat screen then asks).
+class NexusChatChoice {
+  const NexusChatChoice(this.agent);
+  final String? agent;
+}
+
+/// Pops with a [NexusChatChoice], or with the started [ClaudeAppSession].
 class NewChatChoiceSheet extends ConsumerStatefulWidget {
   const NewChatChoiceSheet({super.key, required this.cwd});
   final String cwd;
@@ -61,11 +71,97 @@ class _NewChatChoiceSheetState extends ConsumerState<NewChatChoiceSheet> {
   );
   bool _naming = false, _starting = false;
   String? _error;
+  List<AgentInfo>? _agents;
+  bool _agentsFailed = false;
 
   @override
   void initState() {
     super.initState();
     _name.addListener(() => setState(() {}));
+    _loadAgents();
+  }
+
+  Future<void> _loadAgents() async {
+    try {
+      final raw =
+          await ref.read(activeClientProvider)!.request('agent.list')
+              as List<dynamic>;
+      final agents = raw
+          .map((e) => AgentInfo.fromJson(Map<String, dynamic>.from(e as Map)))
+          .where((a) => a.id != 'mock')
+          .toList();
+      if (mounted) setState(() => _agents = agents);
+    } catch (_) {
+      if (mounted) setState(() => _agentsFailed = true);
+    }
+  }
+
+  List<Widget> _agentRows(bool windows) {
+    if (_agentsFailed) {
+      return [
+        _Option(
+          key: const ValueKey('choice-nexus-chat'),
+          icon: Icons.chat_bubble_outline,
+          title: 'Chat here in Nexus',
+          subtitle: 'Couldn’t list the agents; you can pick one next.',
+          onTap: () => Navigator.pop(context, const NexusChatChoice(null)),
+        ),
+      ];
+    }
+    final agents = _agents;
+    if (agents == null) {
+      return const [
+        Padding(
+          padding: EdgeInsets.all(24),
+          child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+        ),
+      ];
+    }
+    if (!agents.any((a) => a.available)) {
+      return const [
+        Text(
+          'No agents available. Install an agent CLI on your PC, then try '
+          'New chat again.',
+          style: TextStyle(color: NX.textDim),
+        ),
+      ];
+    }
+    return [
+      for (final a in agents) ...[
+        _Option(
+          key: ValueKey('choice-agent-${a.id}'),
+          leading: AgentMark(
+            agentId: a.id,
+            icon: a.icon,
+            color: agentMarkColor(a.id, available: a.available),
+          ),
+          title: a.name,
+          subtitle: a.available
+              ? 'Chat here in Nexus.'
+              : 'Not installed on the PC.',
+          onTap: a.available
+              ? () => Navigator.pop(context, NexusChatChoice(a.id))
+              : null,
+        ),
+        if (a.id == 'claude' && a.available) ...[
+          const SizedBox(height: 6),
+          Padding(
+            padding: const EdgeInsets.only(left: 28),
+            child: _Option(
+              key: const ValueKey('choice-claude-app'),
+              icon: Icons.open_in_new,
+              title: 'Start for Claude app',
+              subtitle: windows
+                  ? 'Needs a Linux or macOS PC.'
+                  : 'Run it on the PC and follow it in the Claude app; it '
+                        'ends if the PC host restarts.',
+              onTap: windows ? null : () => setState(() => _naming = true),
+            ),
+          ),
+        ],
+        const SizedBox(height: 10),
+      ],
+    ];
   }
 
   @override
@@ -109,7 +205,7 @@ class _NewChatChoiceSheetState extends ConsumerState<NewChatChoiceSheet> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              _naming ? 'Start for Claude app' : 'New chat',
+              _naming ? 'Start for Claude app' : 'Choose agent',
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 2),
@@ -129,27 +225,9 @@ class _NewChatChoiceSheetState extends ConsumerState<NewChatChoiceSheet> {
               ],
             ),
             const SizedBox(height: 14),
-            if (!_naming) ...[
-              _Option(
-                key: const ValueKey('choice-nexus-chat'),
-                icon: Icons.chat_bubble_outline,
-                title: 'Chat here in Nexus',
-                subtitle: 'Chat with a code agent in this app.',
-                onTap: () => Navigator.pop(context, 'nexus'),
-              ),
-              const SizedBox(height: 10),
-              _Option(
-                key: const ValueKey('choice-claude-app'),
-                icon: Icons.open_in_new,
-                title: 'Start for Claude app',
-                subtitle: windows
-                    ? 'Needs a Linux or macOS PC.'
-                    : 'Runs Claude Code on your PC in this folder so you can '
-                          'follow it in the Claude app; it ends if the PC '
-                          'host restarts.',
-                onTap: windows ? null : () => setState(() => _naming = true),
-              ),
-            ] else ...[
+            if (!_naming)
+              ..._agentRows(windows)
+            else ...[
               TextField(
                 key: const ValueKey('claude-app-name'),
                 controller: _name,
@@ -212,12 +290,14 @@ class _NewChatChoiceSheetState extends ConsumerState<NewChatChoiceSheet> {
 class _Option extends StatelessWidget {
   const _Option({
     super.key,
-    required this.icon,
+    this.icon,
+    this.leading,
     required this.title,
     required this.subtitle,
     this.onTap,
   });
-  final IconData icon;
+  final IconData? icon;
+  final Widget? leading;
   final String title, subtitle;
   final VoidCallback? onTap;
 
@@ -237,7 +317,8 @@ class _Option extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
           child: Row(
             children: [
-              Icon(icon, color: onTap == null ? NX.textFaint : NX.accent),
+              leading ??
+                  Icon(icon, color: onTap == null ? NX.textFaint : NX.accent),
               const SizedBox(width: 14),
               Expanded(
                 child: Column(

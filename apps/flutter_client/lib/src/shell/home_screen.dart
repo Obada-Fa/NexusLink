@@ -9,9 +9,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../monitor/approvals.dart';
+import '../rpc/models.dart';
 import '../rpc/rpc_client.dart';
 import '../session/target.dart';
 import '../state/connection.dart';
+import '../state/launcher.dart';
 import '../state/last_host.dart';
 import '../theme/nexus_theme.dart';
 import '../theme/nx_widgets.dart';
@@ -568,6 +570,12 @@ class _HomeView extends ConsumerWidget {
     final connecting = ref.watch(nexusLinkConnectingProvider);
     final conn = ref.watch(connectionProvider);
     final wake = ref.watch(wakeFlowProvider);
+    // The Terminal and Files tiles wear the PC's own app icons when known.
+    final pcIcons = <String, String>{
+      for (final app in ref.watch(appsProvider).value ?? const <AppInfo>[])
+        if ((app.role == 'terminal' || app.role == 'files') && app.icon != null)
+          app.role!: app.icon!,
+    };
     final tiles = homeTiles(
       modules,
       ctx,
@@ -806,6 +814,7 @@ class _HomeView extends ConsumerWidget {
                               ? 'Connecting…'
                               : 'Checking…',
                           onTap: () => onTile(t, ctx),
+                          pcIcon: pcIcons[t.module.id],
                         ),
                     ],
                   ),

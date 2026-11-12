@@ -131,7 +131,7 @@ String agentSourceLabel(String agentId, [String? source]) {
   final given = source?.trim() ?? '';
   if (given.isNotEmpty) return given;
   return switch (agentId) {
-    'claude' => 'Code Agent',
+    'claude' => 'Claude',
     'cursor' => 'Cursor',
     'opencode' => 'OpenCode',
     'antigravity' => 'Antigravity',

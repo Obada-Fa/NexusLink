@@ -41,15 +41,23 @@ class NewChatHost extends RunningHost {
   }
 }
 
-Future<void> openNewChat(WidgetTester tester, NewChatHost pc) async {
+Future<void> openNewChat(
+  WidgetTester tester,
+  NewChatHost pc, {
+  String? agent,
+}) async {
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
         activeClientProvider.overrideWithValue(pc),
         connectionStatusProvider.overrideWithValue(RpcStatus.connected),
       ],
-      child: const MaterialApp(
-        home: AgentScreen(startNew: true, initialFolder: '/chosen/project'),
+      child: MaterialApp(
+        home: AgentScreen(
+          startNew: true,
+          initialFolder: '/chosen/project',
+          initialAgent: agent,
+        ),
       ),
     ),
   );
@@ -83,6 +91,25 @@ void main() {
       await teardown(tester);
     });
   }
+  testWidgets('an agent chosen before opening is not asked again', (
+    tester,
+  ) async {
+    final pc = NewChatHost();
+    await openNewChat(tester, pc, agent: 'cursor');
+    expect(find.text('Choose agent'), findsNothing);
+    expect(pc.created.single['agent'], 'cursor');
+    expect(pc.created.single['cwd'], '/chosen/project');
+    await teardown(tester);
+  });
+  testWidgets('an unavailable chosen agent falls back to asking', (
+    tester,
+  ) async {
+    final pc = NewChatHost();
+    await openNewChat(tester, pc, agent: 'codex');
+    expect(find.text('Choose agent'), findsOneWidget);
+    expect(pc.created, isEmpty);
+    await teardown(tester);
+  });
   testWidgets('dismissing agent choice creates no chat', (tester) async {
     final pc = NewChatHost();
     await openNewChat(tester, pc);

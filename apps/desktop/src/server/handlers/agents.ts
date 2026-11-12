@@ -240,7 +240,7 @@ const AGENT_DEFS: AgentDef[] = [
 
   {
     id: 'claude',
-    name: 'Code Agent',
+    name: 'Claude',
     bin: 'claude',
     capabilities: {
       modes: ['agent', 'plan'],
@@ -338,6 +338,37 @@ export function listAgents(): AgentInfo[] {
           : {}),
       },
     };
+  });
+}
+
+/**
+ * What each Claude shorthand (`opus`, `default`, ...) ran as, from the CLI's
+ * init message. The shorthand follows new releases; this only labels it.
+ */
+const claudeResolvedModels = new Map<string, string>();
+
+export function noteClaudeModel(alias: string | undefined, resolved: unknown): void {
+  if (typeof resolved !== 'string' || !resolved.trim()) return;
+  claudeResolvedModels.set(alias && alias.trim() ? alias : 'default', resolved.trim());
+}
+
+/** `claude-opus-5-5[1m]` → `Opus 5.5 (1M)`; `claude-haiku-4-5-20251001` → `Haiku 4.5`. */
+export function claudeModelLabel(id: string): string {
+  const long = /\[1m\]$/i.test(id);
+  const parts = id.replace(/\[[^\]]*\]$/, '').replace(/^claude-/, '').split('-').filter((p) => !/^\d{8}$/.test(p));
+  const family = parts.find((p) => /^[a-z]+$/i.test(p));
+  const version = parts.filter((p) => /^\d+$/.test(p)).join('.');
+  if (!family) return id;
+  const name = family[0].toUpperCase() + family.slice(1) + (version ? ` ${version}` : '');
+  return long ? `${name} (1M)` : name;
+}
+
+function withClaudeVersions(models: AgentModelOption[]): AgentModelOption[] {
+  return models.map((m) => {
+    const resolved = claudeResolvedModels.get(m.id);
+    if (!resolved) return m;
+    const label = claudeModelLabel(resolved);
+    return { ...m, name: m.id === 'default' ? `Default (${label})` : label };
   });
 }
 
@@ -633,7 +664,8 @@ export function listAgentModels(agentId: string, forceRefresh = false): AgentMod
   const stale = Date.now() - (modelCacheTime.get(agentId) ?? 0) > MODEL_CACHE_TTL_MS;
   if (def.bin && (forceRefresh || stale)) void refreshAgentModels(agentId, forceRefresh);
   if (!modelCache.has(agentId)) modelCache.set(agentId, augmentAgentModels(agentId, def.capabilities.models));
-  return augmentAgentModels(agentId, modelCache.get(agentId)!);
+  const models = augmentAgentModels(agentId, modelCache.get(agentId)!);
+  return agentId === 'claude' ? withClaudeVersions(models) : models;
 }
 
 /** Await the background catalog refresh (tests and diagnostics). */
@@ -3134,6 +3166,8 @@ function claudeSpawnKey(opts?: AdapterPromptOpts): string {
 class ClaudeAdapter implements AgentAdapter {
   private proc: Proc | null = null;
   private spawnKey = '';
+  /** The model shorthand this process was started with. */
+  private modelAlias = 'default';
   private sawResult = false;
   /** Main-agent text was streamed in the current round (sub-agent text does not count). */
   private streamedText = false;
@@ -3169,6 +3203,7 @@ class ClaudeAdapter implements AgentAdapter {
     }
     this.cancel();
     this.spawnKey = key;
+    this.modelAlias = opts?.model || 'default';
     const bin = resolveBin('claude') ?? 'claude';
     this.proc = Bun.spawn(
       spawnArgv(claudeSpawnArgs({
@@ -3214,7 +3249,7 @@ class ClaudeAdapter implements AgentAdapter {
         }
         return;
       }
-      const cleaned = sanitizeCliError(fail.text ?? '', 'Code Agent');
+      const cleaned = sanitizeCliError(fail.text ?? '', 'Claude');
       emit(this.session, withoutDuplicateResult({ kind: 'error', text: cleaned }, this.streamedText));
     }).catch(() => {});
     return this.proc;
@@ -3250,6 +3285,7 @@ class ClaudeAdapter implements AgentAdapter {
       // Every round starts with init, including one the CLI starts by itself.
       this.sawResult = false;
       this.streamedText = false;
+      noteClaudeModel(this.modelAlias, msg.model);
       emit(s, { kind: 'status', text: 'ready' });
     } else if (type === 'control_cancel_request') {
       // Claude withdrew a prompt (turn interrupted or answered elsewhere).
@@ -3354,7 +3390,7 @@ class ClaudeAdapter implements AgentAdapter {
       stdin.flush?.();
     } catch {
       setBusy(this.session, false);
-      emit(this.session, { kind: 'error', text: 'failed to reach the Code Agent process' });
+      emit(this.session, { kind: 'error', text: 'failed to reach the Claude process' });
     }
   }
 
@@ -4147,7 +4183,7 @@ class MockAdapter implements AgentAdapter {
         emit(s, { kind: 'tool-end', refId: 'mock-1', toolOutput: 'demo\n' });
         emit(s, {
           kind: 'text',
-          text: `You said: "${text}"${extras}\n\nThis is the **demo agent** — install Code Agent, Cursor CLI, OpenCode, or Antigravity on the PC to chat with a real agent here.\n\n\`\`\`diff\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,4 @@\n # NexusLink\n+Phone OS for your PC\n\`\`\``,
+          text: `You said: "${text}"${extras}\n\nThis is the **demo agent** — install Claude Code, Cursor CLI, OpenCode, or Antigravity on the PC to chat with a real agent here.\n\n\`\`\`diff\n--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,4 @@\n # NexusLink\n+Phone OS for your PC\n\`\`\``,
         });
         setBusy(s, false);
         emit(s, { kind: 'result', text: '' });

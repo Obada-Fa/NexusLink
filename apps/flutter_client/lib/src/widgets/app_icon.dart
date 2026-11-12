@@ -9,7 +9,16 @@ import 'package:flutter/material.dart';
 final _iconBytesCache = <String, Uint8List>{};
 
 class AppIconTile extends StatelessWidget {
-  const AppIconTile({super.key, this.icon, required this.name, this.size = 52});
+  const AppIconTile({
+    super.key,
+    this.icon,
+    required this.name,
+    this.size = 52,
+    this.fallback,
+  });
+
+  /// Shown instead of the letter tile when [icon] is missing or unreadable.
+  final Widget? fallback;
 
   final String? icon;
   final String name;
@@ -46,11 +55,11 @@ class AppIconTile extends StatelessWidget {
           height: size,
           fit: BoxFit.contain,
           gaplessPlayback: true,
-          errorBuilder: (_, _, _) => _monogram(),
+          errorBuilder: (_, _, _) => fallback ?? _monogram(),
         ),
       );
     }
-    return _monogram();
+    return fallback ?? _monogram();
   }
 
   Widget _monogram() {

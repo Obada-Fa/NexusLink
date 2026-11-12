@@ -71,7 +71,7 @@ void main() {
         'OpenCode · /tmp/proj');
     expect(
       chatListSubtitle(agent: 'claude', cwd: '/home/me', resumable: false),
-      'Code Agent · /home/me · view only',
+      'Claude · /home/me · view only',
     );
     expect(agentSourceLabel('future-bot'), 'Future Bot');
   });

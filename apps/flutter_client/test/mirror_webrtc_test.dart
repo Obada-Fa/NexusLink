@@ -86,4 +86,20 @@ void main() {
       const Duration(seconds: 30),
     );
   });
+
+  test('ICE candidates always get a mid, taken from the offer', () {
+    const offer = 'v=0\r\n'
+        'm=video 9 UDP/TLS/RTP/SAVPF 96\r\n'
+        'a=mid:video0\r\n'
+        'm=audio 9 UDP/TLS/RTP/SAVPF 97\r\n'
+        'a=mid:audio1\r\n';
+    final mids = sdpMids(offer);
+    expect(mids, ['video0', 'audio1']);
+    expect(iceMid(mids, 0), 'video0');
+    expect(iceMid(mids, 1), 'audio1');
+    // Out of range or an offer without mids still yields a non-null value.
+    expect(iceMid(mids, 5), '');
+    expect(iceMid(sdpMids('v=0\r\nm=video 9 X 96\r\n'), 0), '');
+    expect(iceMid(const [], 0), '');
+  });
 }

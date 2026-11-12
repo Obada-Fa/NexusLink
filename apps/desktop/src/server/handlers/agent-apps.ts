@@ -26,7 +26,7 @@ const DEFS: AppDef[] = [
     match: argv => /\/cursor$/i.test(argv[0] || '') && !has(argv, /cursor-agent/) },
   { appId: 'windsurf', name: 'Windsurf', provider: 'windsurf', kind: 'desktop', desktopFiles: ['windsurf.desktop'], match: argv => /\/windsurf$/i.test(argv[0] || '') },
   { appId: 'vscode', name: 'VS Code', provider: 'vscode', kind: 'desktop', desktopFiles: ['code.desktop'], match: argv => /\/(code|code-insiders)$/.test(argv[0] || '') && has(argv, /\/(share|lib)\/code/) },
-  { appId: 'claude-code', name: 'Code Agent', provider: 'claude', kind: 'cli',
+  { appId: 'claude-code', name: 'Claude', provider: 'claude', kind: 'cli',
     match: (argv, comm) => comm === 'claude' || (base(argv[0]) === 'claude') || has(argv, /@anthropic-ai\/claude-code|claude-code\/cli\.js/) },
   { appId: 'codex-cli', name: 'Codex CLI', provider: 'codex', kind: 'cli',
     match: (argv, comm) => (comm === 'codex' || base(argv[0]) === 'codex' || has(argv, /@openai\/codex/)) && !/\/usr\/lib\/chatgpt\//.test(argv[0] || '') },

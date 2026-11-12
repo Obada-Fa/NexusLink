@@ -118,7 +118,7 @@ class Agent:
             # ximagesrc can fall back to the root when the crop is out of bounds.
             f"! video/x-raw,framerate={a.fps}/1,width={width},height={height} "
             f"! queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 leaky=downstream "
-            f"! videoconvertscale ! video/x-raw,format=NV12,width={out_width},height={out_height},pixel-aspect-ratio=1/1 "
+            f"! videoconvertscale ! video/x-raw,format=NV12,colorimetry=bt601,width={out_width},height={out_height},pixel-aspect-ratio=1/1 "
             f"! {a.encoder} name=encoder {props} "
             f"! video/x-h264,profile=constrained-baseline ! h264parse config-interval=-1 "
             f"! rtph264pay pt=96 config-interval=-1 aggregate-mode=zero-latency "

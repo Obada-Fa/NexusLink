@@ -153,7 +153,8 @@ class MirrorWebrtc {
   bool _zoomed = false;
   bool _rendered = false;
   bool _remoteDescriptionSet = false;
-  final _pendingIce = <RTCIceCandidate>[];
+  final _pendingIce = <({String candidate, int index})>[];
+  List<String> _remoteMids = const [];
   final _earlySignals = <Map<String, dynamic>>[];
   Future<void> _signalQueue = Future.value();
   void Function()? _unsubscribe;
@@ -293,6 +294,7 @@ class MirrorWebrtc {
           RTCSessionDescription(data['sdp'] as String, 'offer'),
         );
         if (_closed) return;
+        _remoteMids = sdpMids(data['sdp'] as String);
         _remoteDescriptionSet = true;
         final answer = await peer.createAnswer();
         if (_closed) return;
@@ -307,10 +309,9 @@ class MirrorWebrtc {
         _fail('Could not negotiate H.264 playback');
       }
     } else if (data['kind'] == 'ice' && data['candidate'] is String) {
-      final candidate = RTCIceCandidate(
-        data['candidate'] as String,
-        null,
-        (data['sdpMLineIndex'] as num?)?.toInt() ?? 0,
+      final candidate = (
+        candidate: data['candidate'] as String,
+        index: (data['sdpMLineIndex'] as num?)?.toInt() ?? 0,
       );
       if (_remoteDescriptionSet) {
         await _addIce(peer, candidate);
@@ -322,10 +323,18 @@ class MirrorWebrtc {
 
   Future<void> _addIce(
     RTCPeerConnection peer,
-    RTCIceCandidate candidate,
+    ({String candidate, int index}) candidate,
   ) async {
     try {
-      await peer.addCandidate(candidate);
+      // The host sends only the m-line index. Android's WebRTC aborts the
+      // whole process on a null mid, so it is always filled from the offer.
+      await peer.addCandidate(
+        RTCIceCandidate(
+          candidate.candidate,
+          iceMid(_remoteMids, candidate.index),
+          candidate.index,
+        ),
+      );
     } catch (_) {
       // One unusable candidate can coexist with other working network paths.
     }
@@ -494,3 +503,23 @@ class MirrorWebrtc {
     }
   }
 }
+
+/// The `a=mid:` value of each media section of [sdp], in m-line order. A
+/// section without one gets an empty string.
+List<String> sdpMids(String sdp) {
+  final mids = <String>[];
+  for (final raw in sdp.split('\n')) {
+    final line = raw.trim();
+    if (line.startsWith('m=')) {
+      mids.add('');
+    } else if (line.startsWith('a=mid:') && mids.isNotEmpty) {
+      mids[mids.length - 1] = line.substring(6).trim();
+    }
+  }
+  return mids;
+}
+
+/// The mid for an ICE candidate on m-line [index]. Never null: Android's
+/// WebRTC aborts the process when a candidate's mid is null.
+String iceMid(List<String> mids, int index) =>
+    index >= 0 && index < mids.length ? mids[index] : '';
