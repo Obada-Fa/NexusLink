@@ -348,18 +348,9 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         if (task != null) await _openSession(task);
       }
       if (_isLibrary) await _loadLibrary();
-      if (widget.startNew &&
-          !_startedNew &&
-          _agents.any((agent) => agent.available)) {
+      if (widget.startNew && !_startedNew) {
         _startedNew = true;
-        final prefs = await SharedPreferences.getInstance();
-        final last = prefs.getString('chat-last-source:${client.hostId}');
-        final agent =
-            _agents
-                .where((agent) => agent.available && agent.id == last)
-                .firstOrNull ??
-            _agents.firstWhere((agent) => agent.available);
-        if (mounted) await _newChat(agent, cwd: widget.initialFolder);
+        if (mounted) await _newTaskFlow(cwd: widget.initialFolder);
       }
     } catch (e) {
       if (mounted) {
@@ -3092,18 +3083,26 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
     }
   }
 
-  Future<void> _newTaskFlow() async {
-    var cwd = ref.read(projectProvider)?.path;
+  Future<void> _newTaskFlow({String? cwd}) async {
+    cwd ??= ref.read(projectProvider)?.path;
     cwd ??= await _pickProject();
     if (cwd == null || !mounted) return;
-    ref.read(projectProvider.notifier).select(cwd);
+    final folder = cwd;
+    ref.read(projectProvider.notifier).select(folder);
     final agent = await showModalBottomSheet<AgentInfo>(
       context: context,
       builder: (ctx) => SafeArea(
         child: ListView(
           shrinkWrap: true,
           children: [
-            const ListTile(title: Text('Choose agent')),
+            ListTile(title: const Text('Choose agent'), subtitle: Text(folder)),
+            if (!_agents.any((a) => a.id != 'mock' && a.available))
+              const ListTile(
+                title: Text('No agents available'),
+                subtitle: Text(
+                  'Install an agent CLI on your PC, then try New chat again.',
+                ),
+              ),
             for (final a in _agents.where((a) => a.id != 'mock'))
               ListTile(
                 leading: AgentMark(
@@ -3124,7 +3123,7 @@ class _AgentScreenState extends ConsumerState<AgentScreen>
         ),
       ),
     );
-    if (agent != null) await _newChat(agent, cwd: cwd);
+    if (agent != null && mounted) await _newChat(agent, cwd: folder);
   }
 
   int _priority(AgentSessionInfo s) => s.taskState == 'waiting'

@@ -43,6 +43,11 @@ I’d keep the dark visual identity, the direct access to PC tools, and the pixe
 
 ## Progress log
 
+- 2026-11-12, New chat agent choice:
+  - New chat → Chat here in Nexus now shows **Choose agent** before creating a session, rather than silently selecting the last-used or first available agent. The existing picker shows the selected project folder and the PC's agents, with unavailable CLIs disabled. When none are available it explains how to proceed. Cancelling creates no session; the separate Start for Claude app flow is unchanged.
+  - Verified: Flutter analysis clean; 39 targeted tests passed across new-chat choice, Claude app flow, running state and chat reliability. New regressions select Cursor and Claude despite a saved preference, preserve the folder, cancel without creation and show the unavailable-agent state.
+  - Not verified: a paired-phone walkthrough; no APK built or installed for this change.
+
 - 2026-11-10, Start on PC:
   - Agents → New chat now asks, after the folder picker, **Chat here in Nexus** or **Start for Claude app**. The second runs `claude remote-control --name=<name>` in an ordinary Nexus shell in that folder (`lib/src/claude_app/`), shown under a banner with **Open Claude** and **Stop**. Running sessions are listed under Agents → Live and reconciled against the host's shell list. No host change; names are single-quoted and stripped of control characters.
   - Verified: analysis clean; 534 passed, 4 skipped. Hostile names checked against real bash and the host's PTY path. A real Remote Control session started through the host's terminal handlers reached Connected and stopped cleanly.
