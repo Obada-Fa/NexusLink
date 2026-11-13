@@ -2,6 +2,7 @@ import { sessionActivity } from '../workspace/session-activity';
 import { persistAgent, loadedAgentRows } from '../workspace/agent-store';
 import { CodexAppServer } from '../../../../../packages/chat-core/src/providers/codex';
 import { clip, describeTool } from '../../../../../packages/chat-core/src/providers/live';
+import { roots as providerRoots } from '../../../../../packages/chat-core/src/paths';
 import type { ChatLive } from '../../../../../packages/rpc-types/src/chat';
 // Agent gateway: run AI coding agents (Claude Code, Cursor CLI, OpenCode,
 // Antigravity) on the host and expose them to the phone as chat sessions with a
@@ -883,6 +884,8 @@ export function claudeSpawnArgs(opts: {
   mode?: AgentMode;
   thinking?: string;
   resumeId?: string | null;
+  /** Continue a copy of the resumed session (it belongs to another app). */
+  forkSession?: boolean;
   permissionMode?: AgentSessionInfo['permissionMode'];
 }): string[] {
   const argv = [
@@ -896,7 +899,10 @@ export function claudeSpawnArgs(opts: {
     '--permission-prompt-tool', 'stdio',
   ];
   if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
-  if (opts.resumeId) argv.push('--resume', opts.resumeId);
+  if (opts.resumeId) {
+    argv.push('--resume', opts.resumeId);
+    if (opts.forkSession) argv.push('--fork-session');
+  }
   if (isModelEffortSupported('claude', opts.model)) {
     if ((opts.thinking ?? '').toLowerCase() === ULTRACODE_THINKING) {
       // In --print mode (CLI 2.1.319) this sends the same request as
@@ -1156,6 +1162,8 @@ function loadAgentSessionsFromDisk(): void {
       agentSessions.set(info.agentSessionId, session);
     }
   } catch (_) {}
+  // Restored sessions are never busy; replace any count the previous host left.
+  writeBusyTurnsMarker();
 }
 
 /**
@@ -1358,7 +1366,23 @@ export const agentWatchdogTestHooks = {
 function setBusy(session: AgentSession, busy: boolean): void {
   session.info.busy = busy;
   if (busy) silentArm(session); else silentDisarm(session.info.agentSessionId);
+  writeBusyTurnsMarker();
   broadcast({ type: 'agent-session-update', session: { ...session.info } });
+}
+
+/** Where scripts/deploy-host.sh reads how many agent turns are running. */
+export function busyTurnsMarkerPath(): string {
+  return join(process.env.NEXUSLINK_DATA_DIR || join(homedir(), '.cache', 'nexuslink'), 'busy-turns.json');
+}
+
+/** Record the running-turn count so a deferred restart can wait for zero. */
+export function writeBusyTurnsMarker(): void {
+  const busy = [...agentSessions.values()].filter((s) => s.info.busy).length;
+  try {
+    const path = busyTurnsMarkerPath();
+    mkdirSync(join(path, '..'), { recursive: true });
+    writeFileSync(path, JSON.stringify({ busy, pid: process.pid, ts: Date.now() }));
+  } catch { /* best effort */ }
 }
 
 /** Expand ~ and require an existing directory. Any path is allowed for now. */
@@ -2921,7 +2945,30 @@ export function parseAgyStreamEvent(msg: Record<string, unknown>): AgentDelta[] 
 }
 
 function hostEnv(extra?: Record<string, string>): Record<string, string> {
-  return { ...(process.env as Record<string, string>), ...extra };
+  // NEXUSLINK_AGENT_TURN lets scripts/deploy-host.sh see that it runs inside a
+  // Nexus agent turn and defer the host restart that would kill this turn.
+  return { ...(process.env as Record<string, string>), NEXUSLINK_AGENT_TURN: '1', ...extra };
+}
+
+/**
+ * True when a non-archived Claude Desktop "Code" session is bound to this CLI
+ * session id (~/.config/Claude/claude-code-sessions/<account>/<org>/local_*.json).
+ */
+export function claudeDesktopOwnsSession(cliSessionId: string, base = join(providerRoots().claudeDesktop, 'claude-code-sessions')): boolean {
+  if (!cliSessionId) return false;
+  const dirs = (path: string): string[] => { try { return readdirSync(path); } catch { return []; } };
+  for (const account of dirs(base)) for (const org of dirs(join(base, account))) {
+    for (const name of dirs(join(base, account, org))) {
+      if (!/^local_.*\.json$/.test(name)) continue;
+      try {
+        const text = readFileSync(join(base, account, org, name), 'utf8');
+        if (!text.includes(cliSessionId)) continue;
+        const d = JSON.parse(text) as { cliSessionId?: unknown; isArchived?: unknown };
+        if (d.cliSessionId === cliSessionId && d.isArchived !== true) return true;
+      } catch { /* unreadable or mid-write */ }
+    }
+  }
+  return false;
 }
 
 function spawnJsonCli(
@@ -3205,6 +3252,17 @@ class ClaudeAdapter implements AgentAdapter {
     this.spawnKey = key;
     this.modelAlias = opts?.model || 'default';
     const bin = resolveBin('claude') ?? 'claude';
+    // Claude Desktop keeps its own process on its chats and never reloads
+    // turns another process adds, so writing into the same session would
+    // split its history. Continue a copy instead; the copy's new id comes
+    // back in the init event and later turns resume that.
+    const forkSession = !!this.resumeId && claudeDesktopOwnsSession(this.resumeId);
+    if (forkSession) {
+      emit(this.session, {
+        kind: 'status',
+        text: 'This chat is open in the Claude desktop app. Nexus continues it as a separate copy, so the desktop app will not show these messages and its own history stays as it was.',
+      });
+    }
     this.proc = Bun.spawn(
       spawnArgv(claudeSpawnArgs({
         bin,
@@ -3212,6 +3270,7 @@ class ClaudeAdapter implements AgentAdapter {
         mode: opts?.mode,
         thinking: opts?.thinking,
         resumeId: this.resumeId,
+        forkSession,
         permissionMode: opts?.permissionMode,
       })),
       {
@@ -3219,7 +3278,7 @@ class ClaudeAdapter implements AgentAdapter {
         stdin: 'pipe',
         stdout: 'pipe',
         stderr: 'pipe',
-        env: process.env as Record<string, string>,
+        env: hostEnv(),
       } as unknown as SpawnOpts,
     );
     const stderrP = collectText(this.proc.stderr);
