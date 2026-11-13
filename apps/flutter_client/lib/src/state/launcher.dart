@@ -17,13 +17,17 @@ final appsProvider =
     );
 
 class AppsNotifier extends Notifier<AsyncValue<List<AppInfo>>> {
-  static List<AppInfo>? _cache;
+  static final _cacheByHost = <String, List<AppInfo>>{};
+  List<AppInfo>? _cache;
+  int _generation = 0;
   bool _disposed = false;
   void Function()? _unsub;
 
   @override
   AsyncValue<List<AppInfo>> build() {
     _disposed = false;
+    final generation = ++_generation;
+    _unsub?.call();
     final client = ref.watch(activeClientProvider);
     final status = ref.watch(connectionStatusProvider);
     ref.onDispose(() {
@@ -31,18 +35,19 @@ class AppsNotifier extends Notifier<AsyncValue<List<AppInfo>>> {
       _unsub?.call();
     });
 
-    if (client == null) {
-      return AsyncValue.data(_cache ?? const []);
-    }
+    _cache = client == null ? null : _cacheByHost[client.wsUrl];
+    if (client == null) return const AsyncValue.data([]);
 
     if (status == RpcStatus.connected) {
       _unsub?.call();
       _unsub = client.subscribe('apps-update', (msg) {
+        if (_disposed || generation != _generation) return;
         final raw = msg['apps'];
         if (raw is List) {
           final list = raw
               .map((e) => AppInfo.fromJson(e as Map<String, dynamic>))
               .toList();
+          _cacheByHost[client.wsUrl] = list;
           _cache = list;
           if (!_disposed) state = AsyncValue.data(list);
         }
@@ -62,6 +67,7 @@ class AppsNotifier extends Notifier<AsyncValue<List<AppInfo>>> {
     final client = ref.read(activeClientProvider);
     final status = ref.read(connectionStatusProvider);
     if (client == null || status != RpcStatus.connected) return;
+    final generation = _generation;
     try {
       final raw = await client.requestList(
         'apps.list',
@@ -71,9 +77,12 @@ class AppsNotifier extends Notifier<AsyncValue<List<AppInfo>>> {
       final list = raw
           .map((e) => AppInfo.fromJson(e as Map<String, dynamic>))
           .toList();
+      if (_disposed || generation != _generation) return;
+      _cacheByHost[client.wsUrl] = list;
       _cache = list;
       if (!_disposed) state = AsyncValue.data(list);
     } catch (e, st) {
+      if (_disposed || generation != _generation) return;
       if (!_disposed) {
         if (_cache != null) {
           state = AsyncValue.data(_cache!);
@@ -95,6 +104,10 @@ final appSessionsProvider =
     >(AppSessionsNotifier.new);
 
 class AppSessionsNotifier extends Notifier<AsyncValue<List<AppSessionInfo>>> {
+  // Survives rebuilds; build() can't read `state`, which throws on first build.
+  List<AppSessionInfo>? _last;
+  String? _lastHost;
+  int _generation = 0;
   Timer? _timer;
   bool _disposed = false;
   void Function()? _unsub;
@@ -102,6 +115,8 @@ class AppSessionsNotifier extends Notifier<AsyncValue<List<AppSessionInfo>>> {
   @override
   AsyncValue<List<AppSessionInfo>> build() {
     _disposed = false;
+    final generation = ++_generation;
+    _unsub?.call();
     final client = ref.watch(activeClientProvider);
     final status = ref.watch(connectionStatusProvider);
     ref.onDispose(() {
@@ -110,6 +125,9 @@ class AppSessionsNotifier extends Notifier<AsyncValue<List<AppSessionInfo>>> {
       _unsub?.call();
     });
 
+    _timer?.cancel();
+    if (client?.wsUrl != _lastHost) _last = null;
+    _lastHost = client?.wsUrl;
     if (client == null) return const AsyncValue.data([]);
 
     if (status == RpcStatus.connected) {
@@ -118,25 +136,31 @@ class AppSessionsNotifier extends Notifier<AsyncValue<List<AppSessionInfo>>> {
         _timer = Timer.periodic(const Duration(seconds: 5), (_) => refresh());
       }
       _unsub?.call();
-      _unsub = client.subscribe('app-session-update', (_) => refresh());
+      _unsub = client.subscribe('app-session-update', (_) {
+        if (!_disposed && generation == _generation) refresh();
+      });
       Future.microtask(refresh);
     }
 
-    return AsyncValue.data(state.value ?? const []);
+    return AsyncValue.data(_last ?? const []);
   }
 
   Future<void> refresh() async {
     final client = ref.read(activeClientProvider);
     final status = ref.read(connectionStatusProvider);
     if (client == null || status != RpcStatus.connected) return;
+    final generation = _generation;
     try {
       final raw = await client.requestList('appSession.list');
       final list = raw
           .map((e) => AppSessionInfo.fromJson(e as Map<String, dynamic>))
           .where((s) => s.status == 'running')
           .toList();
+      if (_disposed || generation != _generation) return;
+      _last = list;
       if (!_disposed) state = AsyncValue.data(list);
     } catch (e, st) {
+      if (_disposed || generation != _generation) return;
       if (!_disposed && state is! AsyncData) state = AsyncValue.error(e, st);
     }
   }
@@ -149,6 +173,10 @@ final windowsProvider =
     );
 
 class WindowsNotifier extends Notifier<AsyncValue<List<WindowInfo>>> {
+  // Survives rebuilds; build() can't read `state`, which throws on first build.
+  List<WindowInfo>? _last;
+  String? _lastHost;
+  int _generation = 0;
   Timer? _timer;
   bool _disposed = false;
   void Function()? _unsub;
@@ -156,6 +184,8 @@ class WindowsNotifier extends Notifier<AsyncValue<List<WindowInfo>>> {
   @override
   AsyncValue<List<WindowInfo>> build() {
     _disposed = false;
+    final generation = ++_generation;
+    _unsub?.call();
     final client = ref.watch(activeClientProvider);
     final status = ref.watch(connectionStatusProvider);
     ref.onDispose(() {
@@ -164,6 +194,9 @@ class WindowsNotifier extends Notifier<AsyncValue<List<WindowInfo>>> {
       _unsub?.call();
     });
 
+    _timer?.cancel();
+    if (client?.wsUrl != _lastHost) _last = null;
+    _lastHost = client?.wsUrl;
     if (client == null) return const AsyncValue.data([]);
 
     if (status == RpcStatus.connected) {
@@ -173,31 +206,35 @@ class WindowsNotifier extends Notifier<AsyncValue<List<WindowInfo>>> {
       }
       _unsub?.call();
       _unsub = client.subscribe('windows-update', (msg) {
-        if (!_disposed && msg['windows'] is List) {
-          state = AsyncValue.data(
-            (msg['windows'] as List)
-                .map((e) => WindowInfo.fromJson(Map<String, dynamic>.from(e)))
-                .toList(),
-          );
+        if (!_disposed && generation == _generation && msg['windows'] is List) {
+          final list = (msg['windows'] as List)
+              .map((e) => WindowInfo.fromJson(Map<String, dynamic>.from(e)))
+              .toList();
+          _last = list;
+          state = AsyncValue.data(list);
         }
       });
       Future.microtask(refresh);
     }
 
-    return AsyncValue.data(state.value ?? const []);
+    return AsyncValue.data(_last ?? const []);
   }
 
   Future<void> refresh() async {
     final client = ref.read(activeClientProvider);
     final status = ref.read(connectionStatusProvider);
     if (client == null || status != RpcStatus.connected) return;
+    final generation = _generation;
     try {
       final raw = await client.requestList('window.list');
       final list = raw
           .map((e) => WindowInfo.fromJson(e as Map<String, dynamic>))
           .toList();
+      if (_disposed || generation != _generation) return;
+      _last = list;
       if (!_disposed) state = AsyncValue.data(list);
     } catch (e, st) {
+      if (_disposed || generation != _generation) return;
       if (!_disposed && state is! AsyncData) state = AsyncValue.error(e, st);
     }
   }

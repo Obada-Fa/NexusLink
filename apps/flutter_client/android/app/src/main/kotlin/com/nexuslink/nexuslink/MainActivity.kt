@@ -44,6 +44,8 @@ class MainActivity : FlutterActivity() {
                     "credential.get" -> result.success(Credentials.get(this,text("host")))
                     "credential.set" -> { Credentials.put(this,text("host"),text("value"));result.success(null) }
                     "credential.remove" -> { Credentials.remove(this,text("host"));result.success(null) }
+                    // Opens another installed app by package id; false when it is not installed.
+                    "app.launch" -> { val launch=packageManager.getLaunchIntentForPackage(text("package")); if(launch==null) result.success(false) else { startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));result.success(true) } }
                     "download.start" -> {
                         if(Build.VERSION.SDK_INT<29 && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)!=PackageManager.PERMISSION_GRANTED) {
                             permissionResult=result;permissionArgs=args;requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),45)
@@ -102,8 +104,8 @@ class MainActivity : FlutterActivity() {
                             manager.createNotificationChannel(android.app.NotificationChannel("task_attention","Task updates",android.app.NotificationManager.IMPORTANCE_HIGH))
                         val allowed=(Build.VERSION.SDK_INT<33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED) && manager.areNotificationsEnabled()
                         if(allowed)manager.notify("watch-test",9003,NotificationCompat.Builder(this,"task_attention")
-                            .setSmallIcon(R.mipmap.ic_launcher).setContentTitle("NexusLink watch test")
-                            .setContentText("Check whether this appears on your TicWatch.")
+                            .setSmallIcon(R.mipmap.ic_launcher).setContentTitle("Nexus watch test")
+                            .setContentText("Check whether this appears on your watch.")
                             .setContentIntent(android.app.PendingIntent.getActivity(this,9003,Intent(this,MainActivity::class.java),android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE))
                             .setAutoCancel(true).build())
                         result.success(mapOf("posted" to allowed))
@@ -114,15 +116,49 @@ class MainActivity : FlutterActivity() {
                         if(Build.VERSION.SDK_INT>=26)startForegroundService(intent) else startService(intent)
                         result.success(null)
                     }
-                    "live.stop" -> {stopService(Intent(this,LiveActivityService::class.java));result.success(null)}
-                    "live.pendingTask" -> {val target=intent.getStringExtra("host");val id=intent.getStringExtra("taskId");intent.removeExtra("taskId");intent.removeExtra("host");result.success(if(target==null)null else mapOf("taskId" to id,"host" to target))}
+                    "live.stop" -> {
+                        // An explicit stop: do not restart after reboot. Alerts stay unless asked.
+                        getSharedPreferences("live",0).edit().putBoolean("requested",false).apply()
+                        LiveActivityService.clearAlertsOnStop=args["clearAlerts"]==true
+                        stopService(Intent(this,LiveActivityService::class.java))
+                        result.success(null)
+                    }
+                    "live.pendingTask" -> result.success(takeTaskLink(intent))
                     else -> result.notImplemented()
                 }
             } catch(e:Exception) { result.error("ANDROID",e.message,null) }
         }
     }
-    override fun onNewIntent(intent:Intent) {super.onNewIntent(intent);setIntent(intent);if(::channel.isInitialized)channel.invokeMethod("openTask",mapOf("taskId" to intent.getStringExtra("taskId"),"host" to intent.getStringExtra("host")))}
-    override fun onResume(){super.onResume();LiveActivityService.visible=true;LiveActivityService.instance?.updateOverlay()}
+    override fun onNewIntent(intent:Intent) {
+        super.onNewIntent(intent);setIntent(intent)
+        // Warm start. Only task links (they name their PC) are forwarded; once
+        // delivered they are removed so live.pendingTask can't replay them.
+        if(::channel.isInitialized)takeTaskLink(intent)?.let{channel.invokeMethod("openTask",it)}
+    }
+    /** A tapped task link: taskId, host (the PC), approval and, from newer notifications,
+     *  requestId (the exact approval request). Older intents simply lack requestId. Consumed once. */
+    private fun takeTaskLink(intent:Intent):Map<String,Any?>? {
+        val host=intent.getStringExtra("host")
+        val link=if(host.isNullOrEmpty())null else mapOf(
+            "taskId" to intent.getStringExtra("taskId"),
+            "host" to host,
+            "approval" to intent.getBooleanExtra("approval",false),
+            "requestId" to intent.getStringExtra("requestId"))
+        for(key in listOf("taskId","host","approval","requestId"))intent.removeExtra(key)
+        return link
+    }
+    override fun onResume(){super.onResume();LiveActivityService.visible=true;LiveActivityService.instance?.updateOverlay();resumeMonitoring()}
+    /** Monitoring the user left on but Android stopped (or refused to restart in the background) resumes when the app is opened. */
+    private fun resumeMonitoring(){
+        val live=getSharedPreferences("live",0)
+        val host=live.getString("host","").orEmpty()
+        if(LiveActivityService.running || !live.getBoolean("requested",false) || host.isEmpty())return
+        if(Credentials.get(this,host)==null)return
+        try{
+            val intent=Intent(this,LiveActivityService::class.java).putExtra("host",host)
+            if(Build.VERSION.SDK_INT>=26)startForegroundService(intent) else startService(intent)
+        }catch(e:Exception){LiveActivityService.lastError="Could not resume monitoring: ${e.message}"}
+    }
     override fun onPause(){super.onPause();LiveActivityService.visible=false;LiveActivityService.instance?.updateOverlay()}
     private fun enqueue(args:Map<String,Any?>,result:MethodChannel.Result) {
         val name=(args["name"] as String).replace(Regex("[\\\\/\\u0000-\\u001f]"),"_")
@@ -132,7 +168,7 @@ class MainActivity : FlutterActivity() {
         while(File(base,chosen).exists() || reserved.contains(chosen)) {val dot=name.lastIndexOf('.');chosen=if(dot>0)name.substring(0,dot)+" (${index++})"+name.substring(dot) else "$name (${index++})"}
         val request=DownloadManager.Request(Uri.parse(args["url"] as String))
             .addRequestHeader("Authorization","Bearer ${args["token"]}")
-            .setTitle(chosen).setDescription("NexusLink · ${args["host"]}")
+            .setTitle(chosen).setDescription("Nexus · ${args["host"]}")
             .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,"NexusLink/$chosen")
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
         val id=downloads.enqueue(request)

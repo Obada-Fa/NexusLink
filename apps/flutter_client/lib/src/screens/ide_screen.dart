@@ -51,7 +51,8 @@ class _IdeScreenState extends ConsumerState<IdeScreen> {
         return;
       }
       final host = Uri.parse(httpBase).host;
-      final url = 'http://$host:${(st['port'] as num).toInt()}';
+      // The host's token gate hands out a one-time `/?tkn=…` path; without it the IDE answers 401.
+      final url = 'http://$host:${(st['port'] as num).toInt()}${st['path'] as String? ?? ''}';
       final web = WebViewController()
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
         ..loadRequest(Uri.parse(url));

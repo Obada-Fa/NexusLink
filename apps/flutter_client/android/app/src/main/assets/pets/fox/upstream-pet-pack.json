@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "id": "virtual-pet-desktop.fox",
+  "name": "Red Fox",
+  "version": "1.0.0",
+  "species": "fox",
+  "description": "A curious red fox with side, front, back, and diagonal movement.",
+  "authors": [{ "name": "Virtual Pet Desktop contributors" }],
+  "atlas": {
+    "file": "assets/fox-atlas.png",
+    "columns": 4,
+    "rows": 8,
+    "frameWidth": 224,
+    "frameHeight": 224
+  },
+  "animations": {
+    "idle": { "row": 0, "frames": [0, 1, 2, 3], "frameDurationMs": 420, "loop": true },
+    "walk": { "row": 1, "frames": [0, 1, 2, 3], "frameDurationMs": 120, "loop": true },
+    "run": { "row": 2, "frames": [0, 1, 2, 3], "frameDurationMs": 85, "loop": true },
+    "bark": { "row": 3, "frames": [0, 1, 2, 3], "frameDurationMs": 120, "loop": false },
+    "play": { "row": 4, "frames": [0, 1, 2, 3], "frameDurationMs": 140, "loop": true },
+    "sleep": { "row": 5, "frames": [0, 1, 2, 3], "frameDurationMs": 520, "loop": true },
+    "attention": { "row": 6, "frames": [0, 1, 2, 3], "frameDurationMs": 250, "loop": true },
+    "sniff": { "row": 7, "frames": [0, 1, 2, 3], "frameDurationMs": 180, "loop": true }
+  },
+  "directional": {
+    "vertical": {
+      "atlas": {
+        "file": "assets/fox-directional-atlas.png",
+        "columns": 4,
+        "rows": 4,
+        "frameWidth": 224,
+        "frameHeight": 224
+      },
+      "animations": {
+        "down": {
+          "walk": { "row": 0, "frames": [0, 1, 2, 3], "frameDurationMs": 120, "loop": true },
+          "run": { "row": 1, "frames": [0, 1, 2, 3], "frameDurationMs": 85, "loop": true }
+        },
+        "up": {
+          "walk": { "row": 2, "frames": [0, 1, 2, 3], "frameDurationMs": 120, "loop": true },
+          "run": { "row": 3, "frames": [0, 1, 2, 3], "frameDurationMs": 85, "loop": true }
+        }
+      }
+    },
+    "diagonal": {
+      "atlas": {
+        "file": "assets/fox-diagonal-atlas.png",
+        "columns": 4,
+        "rows": 4,
+        "frameWidth": 224,
+        "frameHeight": 224
+      },
+      "animations": {
+        "down": {
+          "walk": { "row": 0, "frames": [0, 1, 2, 3], "frameDurationMs": 120, "loop": true },
+          "run": { "row": 1, "frames": [0, 1, 2, 3], "frameDurationMs": 85, "loop": true }
+        },
+        "up": {
+          "walk": { "row": 2, "frames": [0, 1, 2, 3], "frameDurationMs": 120, "loop": true },
+          "run": { "row": 3, "frames": [0, 1, 2, 3], "frameDurationMs": 85, "loop": true }
+        }
+      }
+    }
+  },
+  "sounds": {},
+  "license": {
+    "spdx": "MIT",
+    "assets": [
+      {
+        "path": "assets/fox-atlas.png",
+        "creator": "Virtual Pet Desktop contributors using OpenAI image generation",
+        "source": "https://github.com/sheelarajeshkumar/virtual-pet-desktop",
+        "spdx": "MIT",
+        "modifications": "Generated as a transparent 4x8 behavior atlas and resized to 896x1792."
+      },
+      {
+        "path": "assets/fox-directional-atlas.png",
+        "creator": "Virtual Pet Desktop contributors using OpenAI image generation",
+        "source": "https://github.com/sheelarajeshkumar/virtual-pet-desktop",
+        "spdx": "MIT",
+        "modifications": "Generated as a transparent 4x4 front/back walk/run atlas and resized to 896x896."
+      },
+      {
+        "path": "assets/fox-diagonal-atlas.png",
+        "creator": "Virtual Pet Desktop contributors using OpenAI image generation",
+        "source": "https://github.com/sheelarajeshkumar/virtual-pet-desktop",
+        "spdx": "MIT",
+        "modifications": "Generated from the shipped fox references as a 4x4 three-quarter walk/run atlas, cleaned to true alpha, and resized to 896x896."
+      }
+    ]
+  }
+}

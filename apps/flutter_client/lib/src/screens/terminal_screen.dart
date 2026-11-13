@@ -4,8 +4,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xterm/xterm.dart';
 
+import '../state/last_cwd.dart';
 import '../state/connection.dart';
 import '../workspace/terminal_repository.dart';
+import '../shell/resume_store.dart';
 import '../workspace/project.dart';
 import 'terminal_input_controller.dart';
 
@@ -81,26 +83,44 @@ class TerminalPrimaryControls extends StatelessWidget {
         ),
       );
 
+  /// Esc and Tab join the main row when every key still gets 48 dp
+  /// (8 keys plus padding); on narrower phones they stay under More.
+  static const minWidthForEscTab = 8 * 48.0 + 16;
+
   @override
   Widget build(BuildContext context) => Focus(
     canRequestFocus: false,
     descendantsAreFocusable: false,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      child: Row(
-        children: [
-          _arrow(TerminalKey.arrowLeft, Icons.arrow_back, 'Left'),
-          _arrow(TerminalKey.arrowUp, Icons.arrow_upward, 'Up'),
-          _arrow(TerminalKey.arrowDown, Icons.arrow_downward, 'Down'),
-          _arrow(TerminalKey.arrowRight, Icons.arrow_forward, 'Right'),
+    child: LayoutBuilder(
+      builder: (context, c) => _row(c.maxWidth >= minWidthForEscTab),
+    ),
+  );
+
+  Widget _row(bool escTab) => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 8),
+    child: Row(
+      children: [
+        if (escTab) ...[
           _control(
-            'Ctrl',
-            input.available ? input.toggleCtrl : null,
-            active: input.ctrl,
+            'Esc',
+            input.available ? () => input.sendKey(TerminalKey.escape) : null,
           ),
-          _control('More', onMore, active: more),
+          _control(
+            'Tab',
+            input.available ? () => input.sendKey(TerminalKey.tab) : null,
+          ),
         ],
-      ),
+        _arrow(TerminalKey.arrowLeft, Icons.arrow_back, 'Left'),
+        _arrow(TerminalKey.arrowUp, Icons.arrow_upward, 'Up'),
+        _arrow(TerminalKey.arrowDown, Icons.arrow_downward, 'Down'),
+        _arrow(TerminalKey.arrowRight, Icons.arrow_forward, 'Right'),
+        _control(
+          'Ctrl',
+          input.available ? input.toggleCtrl : null,
+          active: input.ctrl,
+        ),
+        _control('More', onMore, active: more),
+      ],
     ),
   );
 }
@@ -165,6 +185,7 @@ class TerminalScreen extends ConsumerStatefulWidget {
 
 class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   String? _selected;
+  String? _selectedCwd;
   String _sessionKey = 'global:0';
   String? _loadedHost;
 
@@ -173,9 +194,29 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     if (host == null || host == _loadedHost) return;
     _loadedHost = host;
     final prefs = await SharedPreferences.getInstance();
-    if (mounted && _loadedHost == host) {
-      setState(() => _selected = prefs.getString('terminal:selected:$host'));
-    }
+    if (!mounted || _loadedHost != host) return;
+    final id = prefs.getString('terminal:selected:$host');
+    final savedCwd = prefs.getString('terminal:selected-cwd:$host');
+    // Opened for a specific folder ("Open terminal here"): only reattach to
+    // the last shell when it lives in that folder, never to another
+    // project's shell under this folder's header.
+    final wanted = widget.initialCwd;
+    if (id == null || (wanted != null && savedCwd != wanted)) return;
+    setState(() {
+      _selected = id;
+      _selectedCwd = savedCwd;
+    });
+  }
+
+  void _remember(String host, String id, String? cwd) {
+    SharedPreferences.getInstance().then((prefs) {
+      prefs.setString('terminal:selected:$host', id);
+      if (cwd == null) {
+        prefs.remove('terminal:selected-cwd:$host');
+      } else {
+        prefs.setString('terminal:selected-cwd:$host', cwd);
+      }
+    });
   }
 
   void _select(String? id, {bool fresh = false}) {
@@ -184,14 +225,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       _selected = id;
       if (fresh) _sessionKey = 'global:${newTerminalOperationId()}';
     });
-    if (host != null) {
+    if (host == null) return;
+    if (id == null) {
       SharedPreferences.getInstance().then((prefs) {
-        if (id == null) {
-          prefs.remove('terminal:selected:$host');
-        } else {
-          prefs.setString('terminal:selected:$host', id);
-        }
+        prefs.remove('terminal:selected:$host');
+        prefs.remove('terminal:selected-cwd:$host');
       });
+    } else {
+      _remember(host, id, _selectedCwd);
     }
   }
 
@@ -215,7 +256,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
                   subtitle: Text(
                     '${row['state']} · ${row['taskId'] ?? 'Shell'}',
                   ),
-                  onTap: () => Navigator.pop(ctx, row['terminalId'] as String),
+                  selected: row['terminalId'] == _selected,
+                  onTap: () {
+                    _selectedCwd = row['cwd'] as String?;
+                    Navigator.pop(ctx, row['terminalId'] as String);
+                  },
                 ),
               ListTile(
                 leading: const Icon(Icons.add),
@@ -227,6 +272,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
         ),
       );
       if (selected != null && mounted) {
+        if (selected == 'new') _selectedCwd = null;
         _select(selected == 'new' ? null : selected, fresh: selected == 'new');
       }
     } catch (e) {
@@ -243,16 +289,53 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     ref.listen(activeClientProvider, (_, next) => _loadSelection());
     if (_loadedHost == null) _loadSelection();
     final project = ref.watch(projectProvider);
+    final cwd = _selectedCwd ?? widget.initialCwd ?? project?.path;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Terminal'),
-        actions: [
-          IconButton(
-            tooltip: 'Shell sessions',
-            onPressed: _choose,
-            icon: const Icon(Icons.view_list),
+        // The shell's folder is the session switcher.
+        title: Semantics(
+          button: true,
+          label: 'Shell in ${cwd ?? 'home folder'}. Switch shell',
+          excludeSemantics: true,
+          child: InkWell(
+            key: const ValueKey('terminal-switcher'),
+            onTap: _choose,
+            borderRadius: BorderRadius.circular(8),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          cwd == null
+                              ? 'Shell'
+                              : 'Shell · ${folderDisplayName(cwd)}',
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 16),
+                        ),
+                        if (cwd != null)
+                          Text(
+                            cwd,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 11.5,
+                              color: Colors.white54,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const Icon(Icons.unfold_more_rounded, size: 18),
+                ],
+              ),
+            ),
           ),
-        ],
+        ),
       ),
       body: EmbeddedTerminal(
         key: ValueKey('${_selected ?? widget.terminalId}:$_sessionKey'),
@@ -262,9 +345,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
         onTerminalId: (id) {
           final host = ref.read(activeClientProvider)?.hostId;
           if (host == null) return;
-          SharedPreferences.getInstance().then(
-            (prefs) => prefs.setString('terminal:selected:$host', id),
-          );
+          _remember(host, id, cwd);
+          noteResume(ref, 'terminal', terminalId: id, path: cwd);
         },
       ),
     );
@@ -289,6 +371,7 @@ class _EmbeddedTerminalState extends ConsumerState<EmbeddedTerminal>
     with WidgetsBindingObserver {
   RemoteTerminal? _remote;
   TerminalInputController? _input;
+  final _terminalViewKey = GlobalKey<TerminalViewState>();
   bool _more = false, _swipe = false;
   String? _reportedTerminalId;
   double _fontSize = 14;
@@ -344,6 +427,16 @@ class _EmbeddedTerminalState extends ConsumerState<EmbeddedTerminal>
     super.dispose();
   }
 
+  void _showKeyboard() {
+    if (!mounted ||
+        _remote?.ready != true ||
+        !TickerMode.valuesOf(context).enabled ||
+        ModalRoute.of(context)?.isCurrent == false) {
+      return;
+    }
+    _terminalViewKey.currentState?.requestKeyboard();
+  }
+
   void _tap(ExtraKey key) {
     final input = _input;
     if (input == null) return;
@@ -374,7 +467,16 @@ class _EmbeddedTerminalState extends ConsumerState<EmbeddedTerminal>
         final available = remote.ready && TickerMode.valuesOf(context).enabled;
         if (input.available != available) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted) input.setAvailable(available);
+            if (!mounted || !identical(input, _input)) return;
+            final enabled =
+                remote.ready && TickerMode.valuesOf(context).enabled;
+            input.setAvailable(enabled);
+            if (enabled) {
+              _showKeyboard();
+            } else {
+              input.focusNode.unfocus();
+              _terminalViewKey.currentState?.closeKeyboard();
+            }
           });
         }
         if (remote.ready &&
@@ -402,6 +504,11 @@ class _EmbeddedTerminalState extends ConsumerState<EmbeddedTerminal>
                     ),
                   ),
                   IconButton(
+                    tooltip: 'Show keyboard',
+                    onPressed: available ? _showKeyboard : null,
+                    icon: const Icon(Icons.keyboard),
+                  ),
+                  IconButton(
                     tooltip: 'Font size',
                     onPressed: () => setState(
                       () => _fontSize = _fontSize >= 20 ? 12 : _fontSize + 1,
@@ -422,33 +529,44 @@ class _EmbeddedTerminalState extends ConsumerState<EmbeddedTerminal>
                         : null,
                     icon: const Icon(Icons.content_paste),
                   ),
-                  IconButton(
-                    tooltip: 'End shell',
-                    onPressed: remote.ready
-                        ? () async {
-                            final yes = await showDialog<bool>(
-                              context: context,
-                              builder: (ctx) => AlertDialog(
-                                title: const Text('End this shell?'),
-                                content: const Text(
-                                  'Commands running in this shell will stop.',
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () => Navigator.pop(ctx, false),
-                                    child: const Text('Keep running'),
-                                  ),
-                                  TextButton(
-                                    onPressed: () => Navigator.pop(ctx, true),
-                                    child: const Text('End shell'),
-                                  ),
-                                ],
-                              ),
-                            );
-                            if (yes == true) await remote.terminate();
-                          }
-                        : null,
-                    icon: const Icon(Icons.stop_circle_outlined),
+                  PopupMenuButton<String>(
+                    key: const ValueKey('shell-options'),
+                    tooltip: 'Shell options',
+                    enabled: remote.ready,
+                    icon: const Icon(Icons.more_vert),
+                    onSelected: (value) async {
+                      if (value != 'end') return;
+                      final yes = await showDialog<bool>(
+                        context: context,
+                        builder: (ctx) => AlertDialog(
+                          title: const Text('End this shell?'),
+                          content: const Text(
+                            'Commands running in this shell will stop. Back '
+                            'leaves a shell running; this ends it.',
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(ctx, false),
+                              child: const Text('Keep running'),
+                            ),
+                            TextButton(
+                              onPressed: () => Navigator.pop(ctx, true),
+                              child: const Text('End shell'),
+                            ),
+                          ],
+                        ),
+                      );
+                      if (yes == true) await remote.terminate();
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(
+                        value: 'end',
+                        child: ListTile(
+                          leading: Icon(Icons.stop_circle_outlined),
+                          title: Text('End shell…'),
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -473,6 +591,8 @@ class _EmbeddedTerminalState extends ConsumerState<EmbeddedTerminal>
                 absorbing: !remote.ready,
                 child: TerminalView(
                   remote.terminal,
+                  key: _terminalViewKey,
+                  readOnly: !available,
                   focusNode: input.focusNode,
                   textStyle: TerminalStyle(fontSize: _fontSize),
                   autofocus: false,

@@ -1,6 +1,8 @@
 import type { WorkspaceRpc } from './workspace';
 import type { ChatRpc } from './chat';
 export * from './chat';
+export * from './monitor';
+export * from './approvals';
 export * from './workspace';
 export type RpcMethod = keyof WorkspaceRpc | keyof ChatRpc
   | 'fs.list'
@@ -22,6 +24,7 @@ export type RpcMethod = keyof WorkspaceRpc | keyof ChatRpc
   | 'screen.stopCapture'
   | 'screen.getMetadata'
   | 'screen.reportStats'
+  | 'screen.setQuality'
   | 'input.mouseMove'
   | 'input.mouseClick'
   | 'input.buttonDown'
@@ -58,6 +61,7 @@ export type RpcMethod = keyof WorkspaceRpc | keyof ChatRpc
   | 'agent.prompt'
   | 'agent.permission'
   | 'agent.setApprovalMode'
+  | 'agent.setPermissionMode'
   | 'agent.cancel'
   | 'agent.close'
   | 'agent.history'
@@ -97,7 +101,7 @@ export type Params<M extends RpcMethod> =
     : M extends 'fs.write'
     ? { path: string; content: string }
     : M extends 'fs.delete'
-    ? { path: string }
+    ? { path: string; recursive?: boolean }
     : M extends 'fs.move'
     ? { from: string; to: string }
     : M extends 'fs.mkdir'
@@ -107,9 +111,9 @@ export type Params<M extends RpcMethod> =
     : M extends 'fs.gitStatus'
     ? { cwd: string }
     : M extends 'process.list'
-    ? {}
+    ? { limit?: number }
     : M extends 'process.kill'
-    ? { pid: number }
+    ? { pid: number; force?: boolean }
     : M extends 'process.spawn'
     ? { command: string; args?: string[] }
     : M extends 'terminal.create'
@@ -121,13 +125,15 @@ export type Params<M extends RpcMethod> =
     : M extends 'terminal.kill'
     ? { terminalId: string }
     : M extends 'screen.startCapture'
-    ? { quality: 'low' | 'medium' | 'high' | 'full'; fps: number; windowId?: string; sessionId?: string }
+    ? { quality: 'low' | 'medium' | 'high' | 'full'; fps: number; windowId?: string; sessionId?: string; monitor?: string }
     : M extends 'screen.stopCapture'
     ? { streamId: string }
     : M extends 'screen.getMetadata'
     ? {}
     : M extends 'screen.reportStats'
     ? { streamId: string; fps: number; frameAgeMs: number }
+    : M extends 'screen.setQuality'
+    ? { streamId: string; quality: 'low' | 'medium' | 'high' | 'full' }
     : M extends 'input.mouseMove'
     ? { dx: number; dy: number; sessionId?: string }
     : M extends 'input.mouseClick'
@@ -167,9 +173,9 @@ export type Params<M extends RpcMethod> =
     : M extends 'appSession.close'
     ? { sessionId: string }
     : M extends 'webrtc.start'
-    ? { sessionId?: string; fps?: number }
+    ? { streamId?: string; sessionId?: string; fps?: number }
     : M extends 'webrtc.signal'
-    ? { webrtcId: string; data: WebRtcSignal }
+    ? { webrtcId: string; data: WebRtcClientSignal }
     : M extends 'webrtc.stop'
     ? { webrtcId: string }
     : M extends 'clipboard.get'
@@ -205,6 +211,8 @@ export type Params<M extends RpcMethod> =
     ? { agentSessionId: string; requestId: string; allow: boolean }
     : M extends 'agent.setApprovalMode'
     ? { agent: string; mode: AgentApprovalMode }
+    : M extends 'agent.setPermissionMode'
+    ? { agentSessionId: string; mode: 'ask' | 'full-access' }
     : M extends 'agent.cancel'
     ? { agentSessionId: string }
     : M extends 'agent.close'
@@ -247,9 +255,9 @@ export type Result<M extends RpcMethod> =
     : M extends 'fs.write'
     ? void
     : M extends 'fs.delete'
-    ? void
+    ? { ok: boolean; path: string; trashed: boolean }
     : M extends 'fs.move'
-    ? void
+    ? { path: string }
     : M extends 'fs.mkdir'
     ? { path: string; name: string }
     : M extends 'fs.listProjects'
@@ -259,7 +267,7 @@ export type Result<M extends RpcMethod> =
     : M extends 'process.list'
     ? ProcessEntry[]
     : M extends 'process.kill'
-    ? void
+    ? { ok: boolean; message: string; signal?: string; exited?: boolean }
     : M extends 'process.spawn'
     ? { pid: number }
     : M extends 'terminal.create'
@@ -277,6 +285,8 @@ export type Result<M extends RpcMethod> =
     : M extends 'screen.getMetadata'
     ? ScreenMetadata
     : M extends 'screen.reportStats'
+    ? void
+    : M extends 'screen.setQuality'
     ? void
     : M extends 'input.mouseMove'
     ? { ok: boolean }
@@ -317,7 +327,7 @@ export type Result<M extends RpcMethod> =
     : M extends 'appSession.close'
     ? { ok: boolean }
     : M extends 'webrtc.start'
-    ? { webrtcId?: string; available: boolean; reason?: string }
+    ? { webrtcId?: string; available: boolean; reason?: string; codec?: 'H264' }
     : M extends 'webrtc.signal'
     ? void
     : M extends 'webrtc.stop'
@@ -348,6 +358,8 @@ export type Result<M extends RpcMethod> =
     ? { ok: boolean; reason?: string }
     : M extends 'agent.setApprovalMode'
     ? { ok: boolean; mode?: AgentApprovalMode }
+    : M extends 'agent.setPermissionMode'
+    ? { ok: boolean; reason?: string; session?: AgentSessionInfo }
     : M extends 'agent.cancel'
     ? { ok: boolean }
     : M extends 'agent.close'
@@ -479,6 +491,8 @@ export interface AppInfo {
   icon?: string
   /** StartupWMClass or best-guess class used to match a running window */
   wmClass?: string
+  /** Set on the PC's default terminal and file manager. */
+  role?: 'terminal' | 'files'
 }
 
 /**
@@ -500,10 +514,18 @@ export interface AppSessionInfo {
   status: 'starting' | 'running' | 'exited'
 }
 
-/** SDP / ICE payload relayed verbatim between the host encoder and the phone. */
+/** Signaling from the encoder to the receiver. */
 export type WebRtcSignal =
-  | { kind: 'offer' | 'answer'; sdp: string }
+  | { kind: 'offer'; sdp: string }
   | { kind: 'ice'; candidate: string; sdpMLineIndex: number }
+  | { kind: 'error'; reason: string; code: 'failed' | 'region-changed' | 'capture-ended' }
+
+export type WebRtcClientSignal =
+  | { kind: 'answer'; sdp: string }
+  | { kind: 'ice'; candidate: string; sdpMLineIndex: number }
+  | { kind: 'playing' | 'keyframe' }
+  | { kind: 'zoom'; zoomed: boolean }
+  | { kind: 'stats'; fps: number; loss: number; jitterMs: number; rttMs?: number }
 
 /** Composer mode — same idea as Cursor Agent / Plan / Ask. */
 export type AgentMode = 'agent' | 'plan' | 'ask'
@@ -512,6 +534,12 @@ export interface AgentModelOption {
   id: string
   name: string
   supportsEffort?: boolean
+  /**
+   * Thinking levels for this model when they differ from the agent's
+   * `capabilities.thinkingLevels`. Code Agent (claude) models that support
+   * effort list ['low','medium','high','ultracode']. Older phones ignore it.
+   */
+  thinkingLevels?: string[]
 }
 
 /** What the phone composer should offer for this CLI. */
@@ -551,6 +579,11 @@ export interface AgentInfo {
 }
 
 export interface AgentSessionInfo {
+  /** Explicit permission override for this Nexus-driven agent chat. */
+  permissionMode?: 'ask' | 'full-access'
+  /** Latest observed activity, not an estimate of task completion. */
+  activity?: 'working' | 'editing' | 'reading' | 'running-command' | 'thinking' | 'responding'
+  activityAt?: number
   imported?: boolean
   taskState?: 'idle'|'running'|'waiting'|'completed'|'failed'|'canceled'|'interrupted'
   turnId?: string
@@ -566,7 +599,17 @@ export interface AgentSessionInfo {
   status: 'running' | 'exited'
   hostChatId?: string
   icon?: string
+  /**
+   * Sub-agents of this session that are running now (all depths). Only the
+   * claude provider sets it. Can be > 0 while `busy` is false: background
+   * agents keep working after the main turn's `result`. See
+   * docs/AGENT-SUBAGENT-EVENTS.md.
+   */
+  runningAgents?: number
 }
+
+/** Lifecycle state carried by agent-start / agent-update / agent-end events. */
+export type AgentSubagentStatus = 'running' | 'completed' | 'failed' | 'stopped'
 
 /** A conversation that already exists on the PC (CLI or IDE), not started from the phone. */
 export interface AgentHostChat {
@@ -597,14 +640,40 @@ export interface AgentEvent {
     | 'result'
     | 'error'
     | 'status'
+    | 'agent-start'
+    | 'agent-update'
+    | 'agent-end'
   text?: string
   toolName?: string
   toolInput?: string
   toolOutput?: string
-  /** Correlates tool-start/tool-end pairs and permission requests. */
+  /**
+   * Correlates tool-start/tool-end pairs and permission requests. On
+   * agent-start/update/end it is the tool_use id of the spawning Agent call.
+   */
   refId?: string
   /** Filenames of photos attached to a user message. */
   images?: string[]
+  /**
+   * Sub-agent that produced this event. Absent means the main agent. Set on
+   * text, thinking, tool-start, tool-end and permission-request events that
+   * belong to a sub-agent, and always on agent-start/update/end.
+   */
+  agentId?: string
+  /** agent-* only: short description given when the agent was spawned. */
+  agentName?: string
+  /** agent-* only: sub-agent type (e.g. "general-purpose", "Explore"). */
+  agentType?: string
+  /** agent-* only: 1 = spawned by the main agent, 2 = by a depth-1 agent, … */
+  agentDepth?: number
+  /** agent-* only: agentId of the spawning sub-agent when agentDepth > 1. */
+  agentParentId?: string
+  /** agent-* only: true when the agent runs in the background. */
+  agentBackground?: boolean
+  /** agent-* only: lifecycle state; agent-end never carries 'running'. */
+  agentStatus?: AgentSubagentStatus
+  /** agent-start only: the task prompt given to the sub-agent (clipped). */
+  agentPrompt?: string
 }
 
 export type WsMessage =
@@ -617,6 +686,8 @@ export type WsMessage =
   | { type: 'terminal-gap'; terminalId:string;oldestSeq:number }
   | { type: 'terminal-exit';terminalId:string;exitCode:number|null;error?:string }
   | { type: 'perf-update'; data: PerfSnapshot }
+  | { type: 'monitor-update'; snapshot: import('./monitor').MonitorSnapshot }
+  | { type: 'approvals-changed'; items: import('./approvals').ExternalApproval[] }
   | { type: 'webrtc-signal'; webrtcId: string; data: WebRtcSignal }
   | { type: 'app-session-update'; session: AppSessionInfo }
   | { type: 'app-session-ready'; sessionId: string }

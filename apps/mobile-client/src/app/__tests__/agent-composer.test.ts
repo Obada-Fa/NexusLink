@@ -10,7 +10,7 @@ import {
 } from '@/lib/agent-composer';
 
 describe('composer caps for every agent', () => {
-  it('gives Claude, OpenCode, Antigravity, and Cursor plan + thinking + models', () => {
+  it('gives Code Agent, OpenCode, Antigravity, and Cursor plan + thinking + models', () => {
     for (const id of ['cursor', 'claude', 'opencode', 'antigravity', 'mock'] as const) {
       const caps = fallbackCaps(id);
       expect(caps.modes.length).toBeGreaterThan(1);

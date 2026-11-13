@@ -40,7 +40,10 @@ describe('paired devices and file transfers', () => {
     const range=await handleFileDownload(url,new Request(url,{headers:{...headers,range:'bytes=2-5','if-range':head.headers.get('etag')!}}));
     expect(range.status).toBe(206);expect(await range.text()).toBe('2345');
     await writeFile(path,'changed contents');
-    expect((await handleFileDownload(url,new Request(url,{headers:{...headers,range:'bytes=5-','if-range':head.headers.get('etag')!}}))).status).toBe(412);
+    // If-Range mismatch → whole new file (RFC 9110); If-Match mismatch (Android DownloadManager resume) → 412.
+    const stale=await handleFileDownload(url,new Request(url,{headers:{...headers,range:'bytes=5-','if-range':head.headers.get('etag')!}}));
+    expect(stale.status).toBe(200); expect(await stale.text()).toBe('changed contents');
+    expect((await handleFileDownload(url,new Request(url,{headers:{...headers,range:'bytes=5-','if-match':head.headers.get('etag')!}}))).status).toBe(412);
     expect((await handleFileUpload(url,new Request(url,{method:'POST',headers,body:'overwrite'}))).status).toBe(401);
     revokeDevice(device.deviceId); expect((await handleFileDownload(url,new Request(url,{headers}))).status).toBe(401);
   });

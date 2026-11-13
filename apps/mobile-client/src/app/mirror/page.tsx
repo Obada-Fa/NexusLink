@@ -9,6 +9,7 @@ import { useRouter } from 'next/navigation';
 import { useConnectionStore } from '@/store/connection';
 import ConnectionProvider from '@/components/ConnectionProvider';
 import GestureOverlay, { type HostRegion } from '@/components/GestureOverlay';
+import { readMirrorTarget, type MirrorTarget } from '@/lib/mirror-target';
 
 type Phase = 'connecting' | 'launching' | 'adopting' | 'streaming' | 'error';
 
@@ -16,33 +17,9 @@ type Phase = 'connecting' | 'launching' | 'adopting' | 'streaming' | 'error';
 const FRAME_MAGIC = 0x4e4c4631;
 const FRAME_HEADER_BYTES = 16;
 
-interface MirrorTarget {
-  windowId?: string;
-  appId?: string;
-  wmClass?: string;
-  title?: string;
-  /** Launch this app into a NEW virtual session sized to the phone. */
-  virtualAppId?: string;
-  /** Re-attach to an existing virtual session. */
-  sessionId?: string;
-}
-
 /** "org.gnome.Calculator" → "orggnomecalculator" — dashes/dots vary in the wild. */
 function normClass(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-function parseTarget(): MirrorTarget {
-  if (typeof window === 'undefined') return {};
-  const p = new URLSearchParams(window.location.search);
-  return {
-    windowId: p.get('w') ?? undefined,
-    appId: p.get('app') ?? undefined,
-    wmClass: p.get('cls') ?? undefined,
-    title: p.get('title') ?? undefined,
-    virtualAppId: p.get('vapp') ?? undefined,
-    sessionId: p.get('s') ?? undefined,
-  };
 }
 
 function MirrorView() {
@@ -58,6 +35,8 @@ function MirrorView() {
   const [region, setRegion] = useState<HostRegion | null>(null);
   const [fps, setFps] = useState(0);
   const [kbOpen, setKbOpen] = useState(false);
+  const [quality, setQuality] = useState<'full' | 'high' | 'medium' | 'low'>('full');
+  const [qualityError, setQualityError] = useState('');
 
   const streamIdRef = useRef<string | null>(null);
   const windowIdRef = useRef<string | null>(null);
@@ -71,42 +50,59 @@ function MirrorView() {
   const startedRef = useRef(false);
   const kbRef = useRef<HTMLInputElement | null>(null);
   const lastUrlRef = useRef<string | null>(null);
+  const pendingFrameRef = useRef<ArrayBuffer | null>(null);
+  const decodingRef = useRef(false);
 
   const renderFrameBuffer = useCallback((buf: ArrayBuffer) => {
-    frameCountRef.current++;
-    const slice = new Uint8Array(buf, FRAME_HEADER_BYTES);
-    const blob = new Blob([slice], { type: 'image/jpeg' });
-
-    if (typeof createImageBitmap !== 'undefined' && canvasRef.current) {
-      createImageBitmap(blob).then((bmp) => {
-        const canvas = canvasRef.current;
-        if (!canvas) {
-          bmp.close();
-          return;
-        }
-        if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
-          canvas.width = bmp.width;
-          canvas.height = bmp.height;
-        }
-        const ctx = canvas.getContext('2d', { alpha: false });
-        if (ctx) {
-          ctx.drawImage(bmp, 0, 0);
-        }
-        bmp.close();
-      }).catch(() => {});
+    if (typeof createImageBitmap !== 'undefined') {
+      // Only decode one frame at a time. Replace queued frames with the latest
+      // one so a slow device cannot build a backlog or paint out of order.
+      pendingFrameRef.current = buf;
+      if (decodingRef.current) return;
+      decodingRef.current = true;
+      void (async () => {
+        try {
+          while (pendingFrameRef.current) {
+            const next = pendingFrameRef.current;
+            pendingFrameRef.current = null;
+            const blob = new Blob([new Uint8Array(next, FRAME_HEADER_BYTES)], { type: 'image/jpeg' });
+            const bmp = await createImageBitmap(blob);
+            try {
+              const canvas = canvasRef.current;
+              if (!canvas) continue;
+              if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+                canvas.width = bmp.width;
+                canvas.height = bmp.height;
+              }
+              canvas.getContext('2d', { alpha: false })?.drawImage(bmp, 0, 0);
+              frameCountRef.current++;
+            } finally { bmp.close(); }
+          }
+        } catch { /* A damaged frame must not stop the next decode. */ }
+        finally { decodingRef.current = false; }
+      })();
       return;
     }
+    const slice = new Uint8Array(buf, FRAME_HEADER_BYTES);
+    const blob = new Blob([slice], { type: 'image/jpeg' });
 
     if (imgRef.current) {
       const url = URL.createObjectURL(blob);
       imgRef.current.src = url;
+      imgRef.current.style.display = 'block';
+      if (canvasRef.current) canvasRef.current.style.display = 'none';
+      frameCountRef.current++;
       if (lastUrlRef.current) URL.revokeObjectURL(lastUrlRef.current);
       lastUrlRef.current = url;
     }
   }, []);
 
   useEffect(() => {
-    setTarget(parseTarget());
+    try { setTarget(readMirrorTarget()); }
+    catch (error) {
+      setErrorMsg(error instanceof Error ? error.message : 'Could not open this view.');
+      setPhase('error');
+    }
   }, []);
 
   // ---- session bring-up: (launch →) adopt → capture ------------------------
@@ -172,7 +168,7 @@ function MirrorView() {
           if (target.virtualAppId) await new Promise((r) => setTimeout(r, 400));
 
           const cap = (await client.request('screen.startCapture', {
-            quality: 'medium',
+            quality: 'full',
             fps: 24,
             sessionId: session.sessionId,
           })) as { streamId: string; streamKey: number; region?: HostRegion };
@@ -241,7 +237,7 @@ function MirrorView() {
         if (cancelled) return;
 
         // Adopt: shape the window like a phone screen and focus it.
-        let captureParams: Record<string, unknown> = { quality: 'medium', fps: 24 };
+        let captureParams: Record<string, unknown> = { quality: 'full', fps: 24 };
         if (windowId) {
           setPhase('adopting');
           windowIdRef.current = windowId;
@@ -394,6 +390,23 @@ function MirrorView() {
           <span style={styles.betaBadge}>BETA</span>
           {phase === 'streaming' && fps > 0 ? ` · ${fps}fps` : ''}
         </span>
+        {phase === 'streaming' && (
+          <select aria-label="Stream quality" value={quality} style={styles.qualitySelect}
+            onChange={async (event) => {
+              const next = event.target.value as typeof quality;
+              if (!client || !streamIdRef.current) return;
+              try {
+                await client.request('screen.setQuality', { streamId: streamIdRef.current, quality: next });
+                setQuality(next);
+                setQualityError('');
+              } catch { setQualityError('Could not change quality. Try again.'); }
+            }}>
+            <option value="full">Native</option>
+            <option value="high">High</option>
+            <option value="medium">Balanced</option>
+            <option value="low">Low data</option>
+          </select>
+        )}
         <button
           onClick={() => setKbOpen((v) => !v)}
           style={{ ...styles.barBtn, color: kbOpen ? '#2a6aff' : '#888' }}
@@ -415,6 +428,7 @@ function MirrorView() {
           />
         )}
       </header>
+      {qualityError && <p role="alert" style={{ position: 'absolute', top: 48, zIndex: 3, color: '#ffc473', background: '#17191c', padding: 12 }}>{qualityError}</p>}
 
       <div style={styles.stage}>
         {phase === 'streaming' ? (
@@ -423,7 +437,7 @@ function MirrorView() {
               ref={canvasRef}
               style={{
                 ...styles.frame,
-                objectFit: sessionId ? 'fill' : 'contain',
+                objectFit: 'contain',
               }}
             />
             {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -432,7 +446,7 @@ function MirrorView() {
               alt=""
               style={{
                 ...styles.frame,
-                objectFit: sessionId ? 'fill' : 'contain',
+                objectFit: 'contain',
                 display: 'none',
               }}
               draggable={false}
@@ -498,6 +512,7 @@ export default function MirrorPage() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  qualitySelect: { pointerEvents: 'auto', minHeight: 44, maxWidth: 108, borderRadius: 8, border: '1px solid #343a40', background: '#17191c', color: '#e5e8eb', padding: '0 6px', fontSize: 12 },
   wrapper: {
     position: 'relative',
     height: '100dvh',
@@ -507,6 +522,9 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: 'hidden',
   },
   topBar: {
+    // Stream information stays visible while input reaches the viewport below.
+    // Only actual controls opt back into hit testing.
+    pointerEvents: 'none',
     position: 'absolute',
     top: 0,
     left: 0,
@@ -519,6 +537,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'rgba(10,10,15,0.55)',
   },
   barBtn: {
+    pointerEvents: 'auto',
     width: 34,
     height: 30,
     borderRadius: 8,

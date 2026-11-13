@@ -21,7 +21,7 @@ class NotificationActionReceiver:BroadcastReceiver() {
         val notificationManager=context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         fun report(state:String) {
             notificationManager.notify(tag,9002,NotificationCompat.Builder(context,"task_attention")
-                .setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("NexusLink action")
+                .setSmallIcon(android.R.drawable.stat_notify_sync).setContentTitle("Nexus action")
                 .setContentText(state).setOnlyAlertOnce(true).setAutoCancel(true).build())
         }
         if(!prefs.getBoolean("requested",false)){report("Rejected: live activity has stopped");return}

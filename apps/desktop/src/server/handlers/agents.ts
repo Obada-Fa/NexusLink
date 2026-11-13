@@ -1,5 +1,9 @@
+import { sessionActivity } from '../workspace/session-activity';
 import { persistAgent, loadedAgentRows } from '../workspace/agent-store';
 import { CodexAppServer } from '../../../../../packages/chat-core/src/providers/codex';
+import { clip, describeTool } from '../../../../../packages/chat-core/src/providers/live';
+import { roots as providerRoots } from '../../../../../packages/chat-core/src/paths';
+import type { ChatLive } from '../../../../../packages/rpc-types/src/chat';
 // Agent gateway: run AI coding agents (Claude Code, Cursor CLI, OpenCode,
 // Antigravity) on the host and expose them to the phone as chat sessions with a
 // normalized event stream — the phone renders a native chat UI, never a terminal.
@@ -63,6 +67,7 @@ export interface AgentPromptOpts {
 }
 
 interface AdapterPromptOpts {
+  permissionMode?: AgentSessionInfo['permissionMode'];
   model?: string;
   mode?: AgentMode;
   thinking?: string;
@@ -177,8 +182,8 @@ const CURSOR_MODELS: AgentModelOption[] = [
   { id: 'composer-2.5', name: 'Composer 2.5', supportsEffort: true },
   { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', supportsEffort: true },
   { id: 'cursor-grok-4.6-medium', name: 'Grok 4.6', supportsEffort: true },
-  { id: 'claude-opus-5-medium', name: 'Claude Opus 5', supportsEffort: true },
-  { id: 'claude-sonnet-5-thinking-medium', name: 'Claude Sonnet 5', supportsEffort: true },
+  { id: 'claude-opus-5-medium', name: 'Opus 5', supportsEffort: true },
+  { id: 'claude-sonnet-5-thinking-medium', name: 'Sonnet 5', supportsEffort: true },
   { id: 'gpt-5.6-sol-medium', name: 'GPT-5.6', supportsEffort: true },
 ];
 
@@ -195,25 +200,29 @@ const OPENCODE_MODELS: AgentModelOption[] = [
 const ANTIGRAVITY_MODELS: AgentModelOption[] = [
   { id: 'gemini-3.7-flash', name: 'Gemini 3.7 Flash', supportsEffort: true },
   { id: 'gemini-3.1-pro', name: 'Gemini 3.1 Pro', supportsEffort: true },
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', supportsEffort: false },
-  { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', supportsEffort: false },
+  { id: 'claude-sonnet-4-6', name: 'Sonnet 4.6', supportsEffort: false },
+  { id: 'claude-opus-4-6', name: 'Opus 4.6', supportsEffort: false },
   { id: 'gpt-oss-120b', name: 'GPT-OSS 120B', supportsEffort: false },
 ];
 
 
+/** Fallback when app-server `model/list` cannot run — ids must be valid CLI model slugs. */
 const CODEX_MODELS: AgentModelOption[] = [
-  { id: 'gpt-5.3-codex', name: 'GPT-5.3 Codex', supportsEffort: true },
-  { id: 'gpt-5.6-sol-medium', name: 'GPT-5.6', supportsEffort: true },
-  { id: 'gpt-6-sol', name: 'GPT-6 Sol', supportsEffort: true },
-  { id: 'o3-mini', name: 'o3-mini', supportsEffort: true },
-  { id: 'o4-mini', name: 'o4-mini', supportsEffort: true },
+  { id: 'gpt-6.1-sol', name: 'GPT-6.1-Sol', supportsEffort: true },
+  { id: 'gpt-6-astra', name: 'GPT-6-Astra', supportsEffort: true },
+  { id: 'gpt-6.1-terra', name: 'GPT-6.1 Terra', supportsEffort: true },
+  { id: 'gpt-6-sol', name: 'GPT-6-Sol', supportsEffort: true },
+  { id: 'gpt-6-luna', name: 'GPT-6-Luna', supportsEffort: true },
+  { id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol', supportsEffort: true },
+  { id: 'gpt-5.6-terra', name: 'GPT-5.6-Terra', supportsEffort: true },
+  { id: 'gpt-5.6-luna', name: 'GPT-5.6-Luna', supportsEffort: true },
 ];
 
 const CLAUDE_MODELS: AgentModelOption[] = [
   { id: 'default', name: 'Default', supportsEffort: true },
   { id: 'sonnet', name: 'Sonnet', supportsEffort: true },
-  { id: 'opus', name: 'Opus', supportsEffort: false },
-  { id: 'haiku', name: 'Haiku', supportsEffort: false },
+  { id: 'opus', name: 'Opus', supportsEffort: true },
+  { id: 'haiku', name: 'Haiku', supportsEffort: true },
 ];
 
 const AGENT_DEFS: AgentDef[] = [
@@ -222,7 +231,7 @@ const AGENT_DEFS: AgentDef[] = [
     name: 'Codex',
     bin: 'codex',
     capabilities: {
-      modes: ['agent'],
+      modes: ['agent', 'plan'],
       thinkingLevels: ['low', 'medium', 'high'],
       models: CODEX_MODELS,
       images: true,
@@ -232,7 +241,7 @@ const AGENT_DEFS: AgentDef[] = [
 
   {
     id: 'claude',
-    name: 'Claude Code',
+    name: 'Claude',
     bin: 'claude',
     capabilities: {
       modes: ['agent', 'plan'],
@@ -309,10 +318,10 @@ export function getCachedAgentIcon(_agentId: string): string | undefined {
 export function listAgents(): AgentInfo[] {
   return AGENT_DEFS.map((d) => {
     const catalog = listAgentModels(d.id);
-    const models = collapseModelFamilies(catalog).map((m) => ({
+    const models = withModelThinkingLevels(d.id, collapseModelFamilies(catalog).map((m) => ({
       ...m,
       supportsEffort: m.supportsEffort ?? isModelEffortSupported(d.id, m.id),
-    }));
+    })));
     const bin = d.bin ? which(d.bin) : null;
     return {
       id: d.id,
@@ -326,10 +335,41 @@ export function listAgents(): AgentInfo[] {
         // Include Go plan status for OpenCode so the phone can show a badge.
         // Uses cached value (populated during warm-up) — no extra blocking call.
         ...(d.id === 'opencode' && bin
-          ? { plan: ocPlanCache.get(bin) ?? 'unknown' }
+          ? { plan: fetchOpencodeGoStatus(bin) }
           : {}),
       },
     };
+  });
+}
+
+/**
+ * What each Claude shorthand (`opus`, `default`, ...) ran as, from the CLI's
+ * init message. The shorthand follows new releases; this only labels it.
+ */
+const claudeResolvedModels = new Map<string, string>();
+
+export function noteClaudeModel(alias: string | undefined, resolved: unknown): void {
+  if (typeof resolved !== 'string' || !resolved.trim()) return;
+  claudeResolvedModels.set(alias && alias.trim() ? alias : 'default', resolved.trim());
+}
+
+/** `claude-opus-5-5[1m]` → `Opus 5.5 (1M)`; `claude-haiku-4-5-20251001` → `Haiku 4.5`. */
+export function claudeModelLabel(id: string): string {
+  const long = /\[1m\]$/i.test(id);
+  const parts = id.replace(/\[[^\]]*\]$/, '').replace(/^claude-/, '').split('-').filter((p) => !/^\d{8}$/.test(p));
+  const family = parts.find((p) => /^[a-z]+$/i.test(p));
+  const version = parts.filter((p) => /^\d+$/.test(p)).join('.');
+  if (!family) return id;
+  const name = family[0].toUpperCase() + family.slice(1) + (version ? ` ${version}` : '');
+  return long ? `${name} (1M)` : name;
+}
+
+function withClaudeVersions(models: AgentModelOption[]): AgentModelOption[] {
+  return models.map((m) => {
+    const resolved = claudeResolvedModels.get(m.id);
+    if (!resolved) return m;
+    const label = claudeModelLabel(resolved);
+    return { ...m, name: m.id === 'default' ? `Default (${label})` : label };
   });
 }
 
@@ -495,126 +535,158 @@ export function pickModelVariant(
 }
 
 /**
- * Detect whether the user has an OpenCode Go subscription configured by
- * parsing `opencode auth list` output. Result is cached with the same TTL
- * as the model list so we don't block every RPC call.
+ * Run a short catalog command off the RPC thread. Output is only ever read
+ * from cache by agent.list / agent.listModels, so a slow or offline CLI can
+ * never block the host.
  */
-export function fetchOpencodeGoStatus(bin: string): 'go' | 'byok' | 'unknown' {
-  const now = Date.now();
-  const cacheTime = ocPlanCacheTime.get(bin) ?? 0;
-  const cached = ocPlanCache.get(bin);
-  if (cached !== undefined && now - cacheTime < MODEL_CACHE_TTL_MS) return cached;
-
-  let status: 'go' | 'byok' | 'unknown' = 'unknown';
+async function runCatalogCommand(argv: string[], timeoutMs: number): Promise<string> {
+  const proc = Bun.spawn(spawnArgv(argv), {
+    stdin: 'ignore',
+    stdout: 'pipe',
+    stderr: 'ignore',
+    env: process.env as Record<string, string>,
+  } as unknown as SpawnOpts);
+  const timer = setTimeout(() => { try { proc.kill(); } catch { /* exited */ } }, timeoutMs);
   try {
-    const proc = Bun.spawnSync(spawnArgv([bin, 'auth', 'list']), {
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeout: 5000,
-      env: process.env as Record<string, string>,
-    });
-    const text = (proc.stdout?.toString() ?? '').toLowerCase();
-    // OpenCode Go appears as a provider named "opencode" or "opencode-go"
-    // in the auth list. Look for the domain too as a fallback.
-    if (
-      /\bopencode\b/.test(text) ||
-      text.includes('opencode.ai') ||
-      text.includes('go.opencode')
-    ) {
-      status = 'go';
-    } else if (text.trim().length > 0) {
-      // Some providers configured, but not Go
-      status = 'byok';
-    }
-  } catch {
-    status = 'unknown';
+    const [text] = await Promise.all([new Response(proc.stdout as ReadableStream).text(), proc.exited]);
+    return text;
+  } finally {
+    clearTimeout(timer);
   }
-
-  ocPlanCache.set(bin, status);
-  ocPlanCacheTime.set(bin, now);
-  return status;
 }
 
-function fetchLiveModels(agentId: string, bin: string): AgentModelOption[] {
-  if (agentId === 'claude' || agentId === 'mock') return [];
-  // For opencode: use --refresh flag so we always get the latest from the registry
-  const argv = agentId === 'opencode' ? [bin, 'models', '--refresh'] : [bin, 'models'];
+async function fetchCodexModels(bin: string): Promise<AgentModelOption[]> {
+  const server = new CodexAppServer({});
   try {
-    const proc = Bun.spawnSync(spawnArgv(argv), {
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeout: 8000,
-      env: process.env as Record<string, string>,
-    });
-    const text = proc.stdout?.toString() ?? '';
-    return parseAgentModelList(text);
-  } catch {
-    return [];
+    await server.initialize(bin);
+    return await server.models();
+  } finally {
+    server.close();
   }
+}
+
+const catalogRefreshes = new Map<string, Promise<void>>();
+
+/**
+ * OpenCode Go plan status from `opencode auth list`, cached. Returns the cached
+ * value immediately and refreshes in the background when stale.
+ */
+export function fetchOpencodeGoStatus(bin: string): 'go' | 'byok' | 'unknown' {
+  const cached = ocPlanCache.get(bin);
+  if (cached === undefined || Date.now() - (ocPlanCacheTime.get(bin) ?? 0) >= MODEL_CACHE_TTL_MS) {
+    const key = `plan:${bin}`;
+    if (!catalogRefreshes.has(key) && (process.env.NODE_ENV !== 'test' || process.env.NEXUSLINK_TEST_AGENT_CATALOG === '1')) {
+      catalogRefreshes.set(key, runCatalogCommand([bin, 'auth', 'list'], 5000).then((raw) => {
+        const text = raw.toLowerCase();
+        // OpenCode Go appears as a provider named "opencode"/"opencode-go", or by domain.
+        const status = /\bopencode\b/.test(text) || text.includes('opencode.ai') || text.includes('go.opencode')
+          ? 'go' : text.trim().length > 0 ? 'byok' : 'unknown';
+        ocPlanCache.set(bin, status);
+        ocPlanCacheTime.set(bin, Date.now());
+      }).catch(() => {}).finally(() => catalogRefreshes.delete(key)));
+    }
+  }
+  return cached ?? 'unknown';
+}
+
+/** Refresh one agent's live model list in the background (never on the RPC thread). */
+function refreshAgentModels(agentId: string, network = false): Promise<void> {
+  const def = AGENT_DEFS.find((d) => d.id === agentId);
+  if (!def?.bin || agentId === 'claude' || agentId === 'mock') return Promise.resolve();
+  // Unit tests never shell out to the developer's real agent CLIs.
+  if (process.env.NODE_ENV === 'test' && process.env.NEXUSLINK_TEST_AGENT_CATALOG !== '1') return Promise.resolve();
+  const running = catalogRefreshes.get(agentId);
+  if (running) return running;
+  const bin = which(def.bin);
+  if (!bin) return Promise.resolve();
+  // `opencode models --refresh` hits the network; only an explicit refresh asks for it.
+  const argv = agentId === 'opencode' && network ? [bin, 'models', '--refresh'] : [bin, 'models'];
+  // Codex has no `models` command; its catalog is only exposed through app-server.
+  const fetchLive = agentId === 'codex'
+    ? fetchCodexModels(bin)
+    : runCatalogCommand(argv, 8000).then(parseAgentModelList);
+  const job = fetchLive.then((live) => {
+    if (live.length) {
+      modelCache.set(agentId, augmentAgentModels(agentId, live));
+      modelCacheLive.set(agentId, true);
+    }
+    modelCacheTime.set(agentId, Date.now());
+  }).catch(() => {
+    modelCacheTime.set(agentId, Date.now());
+  }).finally(() => catalogRefreshes.delete(agentId));
+  catalogRefreshes.set(agentId, job);
+  return job;
 }
 
 function augmentAgentModels(agentId: string, models: AgentModelOption[]): AgentModelOption[] {
-  return models.map((m) => ({
+  return withModelThinkingLevels(agentId, models.map((m) => ({
     ...m,
     supportsEffort: m.supportsEffort ?? isModelEffortSupported(agentId, m.id),
-  }));
+  })));
 }
 
+/** Code Agent only: the session setting that `--effort ultracode` selects. */
+export const ULTRACODE_THINKING = 'ultracode';
+
+/**
+ * Ultra Code is offered per model, not in the agent-wide thinkingLevels:
+ * released phones label unknown levels "Medium", so a new agent-wide entry
+ * would show them a second "Medium" that silently runs Ultra Code.
+ */
+function withModelThinkingLevels(agentId: string, models: AgentModelOption[]): AgentModelOption[] {
+  if (agentId !== 'claude') return models;
+  const base = AGENT_DEFS.find((d) => d.id === agentId)?.capabilities.thinkingLevels ?? [];
+  return models.map((m) =>
+    m.supportsEffort === false || !isModelEffortSupported(agentId, m.id)
+      ? m
+      : { ...m, thinkingLevels: [...base.filter((l) => l !== ULTRACODE_THINKING), ULTRACODE_THINKING] },
+  );
+}
+
+/**
+ * The thinking value an adapter receives. `ultracode` is a Code Agent setting;
+ * any other agent gets its own highest advertised level instead, so the value
+ * never reaches another CLI's flags.
+ */
+export function normalizeThinkingForAgent(agentId: string, thinking?: string): string | undefined {
+  if ((thinking ?? '').toLowerCase() !== ULTRACODE_THINKING) return thinking;
+  if (agentId === 'claude') return ULTRACODE_THINKING;
+  const levels = AGENT_DEFS.find((d) => d.id === agentId)?.capabilities.thinkingLevels ?? [];
+  return levels.at(-1) ?? 'high';
+}
+
+/**
+ * Cached model catalog. Always answers immediately (live list when known,
+ * built-in fallback otherwise) and refreshes stale entries in the background.
+ */
 export function listAgentModels(agentId: string, forceRefresh = false): AgentModelOption[] {
   const def = AGENT_DEFS.find((d) => d.id === agentId);
   if (!def) return [];
+  const stale = Date.now() - (modelCacheTime.get(agentId) ?? 0) > MODEL_CACHE_TTL_MS;
+  if (def.bin && (forceRefresh || stale)) void refreshAgentModels(agentId, forceRefresh);
+  if (!modelCache.has(agentId)) modelCache.set(agentId, augmentAgentModels(agentId, def.capabilities.models));
+  const models = augmentAgentModels(agentId, modelCache.get(agentId)!);
+  return agentId === 'claude' ? withClaudeVersions(models) : models;
+}
 
-  // Return cached result if it's still fresh and refresh wasn't forced
-  const cacheTime = modelCacheTime.get(agentId) ?? 0;
-  const cacheStale = Date.now() - cacheTime > MODEL_CACHE_TTL_MS;
-  if (!forceRefresh && modelCacheLive.get(agentId) && modelCache.has(agentId) && !cacheStale) {
-    return augmentAgentModels(agentId, modelCache.get(agentId)!);
-  }
-
-  if (def.bin) {
-    const bin = which(def.bin);
-    if (bin) {
-      const live = fetchLiveModels(agentId, bin);
-      if (live.length) {
-        const augmented = augmentAgentModels(agentId, live);
-        modelCache.set(agentId, augmented);
-        modelCacheLive.set(agentId, true);
-        modelCacheTime.set(agentId, Date.now());
-        return augmented;
-      }
-    }
-  }
-
-  if (modelCache.has(agentId)) {
-    return augmentAgentModels(agentId, modelCache.get(agentId)!);
-  }
-
-  const augmented = augmentAgentModels(agentId, def.capabilities.models);
-  modelCache.set(agentId, augmented);
-  modelCacheLive.set(agentId, false);
-  modelCacheTime.set(agentId, Date.now());
-  return augmented;
+/** Await the background catalog refresh (tests and diagnostics). */
+export async function refreshAgentCatalogs(): Promise<void> {
+  await Promise.all(AGENT_DEFS.map((d) => refreshAgentModels(d.id)));
 }
 
 function warmAgentModelCatalogs(): void {
-  for (const def of AGENT_DEFS) {
-    if (!def.bin) continue;
-    const bin = which(def.bin);
-    if (!bin) continue;
-    try {
-      listAgentModels(def.id);
-    } catch {
-      // Offline host — fallback catalog still works.
+  // Test runs and headless tools must not spawn every agent CLI at import time.
+  if (process.env.NODE_ENV === 'test' || process.env.NEXUSLINK_DISABLE_CHAT_DISCOVERY === '1') return;
+  const timer = setTimeout(() => {
+    for (const def of AGENT_DEFS) {
+      if (!def.bin) continue;
+      const bin = which(def.bin);
+      if (!bin) continue;
+      void refreshAgentModels(def.id);
+      if (def.id === 'opencode') fetchOpencodeGoStatus(bin);
     }
-    // Prime the Go plan cache for OpenCode so listAgents() has it ready.
-    if (def.id === 'opencode') {
-      try {
-        fetchOpencodeGoStatus(bin);
-      } catch {
-        // Auth list unavailable — 'unknown' will be served.
-      }
-    }
-  }
+  }, 2000);
+  (timer as { unref?: () => void }).unref?.();
 }
 
 warmAgentModelCatalogs();
@@ -624,7 +696,9 @@ export function thinkingToEffort(thinking?: string): 'low' | 'medium' | 'high' |
   const t = thinking.toLowerCase();
   if (t === 'none' || t === 'off') return undefined;
   if (t === 'low' || t === 'minimal') return 'low';
-  if (t === 'high' || t === 'extra-high' || t === 'max' || t === 'xhigh') return 'high';
+  // `ultracode` only reaches here if a caller skipped normalizeThinkingForAgent:
+  // treat it as the highest level these three-step CLIs know.
+  if (t === 'high' || t === 'extra-high' || t === 'max' || t === 'xhigh' || t === ULTRACODE_THINKING) return 'high';
   return 'medium';
 }
 
@@ -639,8 +713,8 @@ export function isModelEffortSupported(agentId?: string, modelId?: string): bool
     return m.includes('gemini');
   }
   if (agent === 'claude') {
-    if (!m || m === 'default' || m === 'sonnet' || m.includes('sonnet')) return true;
-    if (m === 'opus' || m === 'haiku' || m.includes('opus') || m.includes('haiku')) return false;
+    // Measured with claude 2.1.319: default, sonnet, opus and haiku all send
+    // the requested effort (and opus takes `ultracode`, sent as xhigh).
     return true;
   }
   if (agent === 'cursor') {
@@ -675,7 +749,7 @@ export function cursorModelFlag(model?: string, thinking?: string): string | und
   // Cursor model ids already encode thinking (…-thinking-high, …-xhigh).
   if (/thinking|xhigh|-high|-low|-medium|-max|-fast/i.test(m)) return m;
   const effort = thinkingToEffort(thinking);
-  const extraHigh = ['extra-high', 'max', 'xhigh'].includes((thinking || '').toLowerCase());
+  const extraHigh = ['extra-high', 'max', 'xhigh', ULTRACODE_THINKING].includes((thinking || '').toLowerCase());
   if (!effort || (effort === 'medium' && !extraHigh)) return m;
   return `${m}[effort=${effort}${extraHigh ? ',fast=false' : ''}]`;
 }
@@ -726,11 +800,14 @@ export function buildCursorArgv(opts: {
   thinking?: string;
   imagePaths?: string[];
   catalog?: AgentModelOption[];
+  permissionMode?: AgentSessionInfo['permissionMode'];
 }): string[] {
   const argv = [
     opts.bin, '--print', '--output-format', 'stream-json',
     '--workspace', opts.cwd,
   ];
+  // The gateway obtains approval before dispatching an Ask turn to this print-only CLI.
+  if (opts.permissionMode) argv.push('--force');
   if (opts.mode === 'plan' || opts.mode === 'ask') argv.push('--mode', opts.mode);
   const resolved = pickModelVariant(opts.model, opts.thinking, opts.catalog ?? []);
   const model = cursorModelFlag(resolved, opts.thinking);
@@ -749,13 +826,16 @@ export function buildOpencodeArgv(opts: {
   mode?: AgentMode;
   thinking?: string;
   imagePaths?: string[];
+  permissionMode?: AgentSessionInfo['permissionMode'];
 }): string[] {
   const argv = [opts.bin, 'run', '--format', 'json', '--dir', opts.cwd];
+  // Ask turns reach this adapter only after whole-turn approval in Nexus.
+  if (opts.permissionMode) argv.push('--auto');
   if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
   if (opts.mode === 'plan') argv.push('--agent', 'plan');
   if (isModelEffortSupported('opencode', opts.model)) {
     const variant = opts.thinking && opts.thinking !== 'medium' ? opts.thinking : undefined;
-    if (variant) argv.push('--variant', variant === 'extra-high' ? 'max' : variant);
+    if (variant) argv.push('--variant', variant === 'extra-high' || variant === ULTRACODE_THINKING ? 'max' : variant);
   }
   if (opts.session) argv.push('--session', opts.session);
   for (const p of opts.imagePaths ?? []) argv.push('--file', p);
@@ -775,6 +855,7 @@ export function buildAgyArgv(opts: {
   thinking?: string;
   imagePaths?: string[];
   catalog?: AgentModelOption[];
+  permissionMode?: AgentSessionInfo['permissionMode'];
 }): string[] {
   const argv = [
     opts.bin,
@@ -803,19 +884,34 @@ export function claudeSpawnArgs(opts: {
   mode?: AgentMode;
   thinking?: string;
   resumeId?: string | null;
+  /** Continue a copy of the resumed session (it belongs to another app). */
+  forkSession?: boolean;
+  permissionMode?: AgentSessionInfo['permissionMode'];
 }): string[] {
   const argv = [
     opts.bin, '--print',
     '--input-format', 'stream-json',
     '--output-format', 'stream-json',
     '--verbose',
-    '--permission-mode', opts.mode === 'plan' ? 'plan' : 'acceptEdits',
+    '--permission-mode', opts.mode === 'plan' ? 'plan' : opts.permissionMode === 'full-access' ? 'bypassPermissions' : opts.permissionMode === 'ask' ? 'default' : 'acceptEdits',
+    // Route permission prompts to us over stdin/stdout (control_request
+    // can_use_tool). Without it --print silently denies anything that would ask.
+    '--permission-prompt-tool', 'stdio',
   ];
   if (opts.model && opts.model !== 'default') argv.push('--model', opts.model);
-  if (opts.resumeId) argv.push('--resume', opts.resumeId);
+  if (opts.resumeId) {
+    argv.push('--resume', opts.resumeId);
+    if (opts.forkSession) argv.push('--fork-session');
+  }
   if (isModelEffortSupported('claude', opts.model)) {
-    const effort = thinkingToEffort(opts.thinking);
-    if (effort && effort !== 'medium') argv.push('--effort', effort);
+    if ((opts.thinking ?? '').toLowerCase() === ULTRACODE_THINKING) {
+      // In --print mode (CLI 2.1.319) this sends the same request as
+      // `--effort xhigh`; see docs/AGENT-SUBAGENT-EVENTS.md.
+      argv.push('--effort', ULTRACODE_THINKING);
+    } else {
+      const effort = thinkingToEffort(opts.thinking);
+      if (effort && effort !== 'medium') argv.push('--effort', effort);
+    }
   }
   return argv;
 }
@@ -1006,6 +1102,17 @@ function saveAgentSessionsToDisk(): void {
   }
 }
 
+/** True when the last user message was never followed by a result, an error or a stop. */
+export function turnLeftOpen(history: AgentEvent[]): boolean {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const e = history[i]!;
+    if (e.agentId) continue;
+    if (e.kind === 'result' || e.kind === 'error' || (e.kind === 'status' && e.text === 'cancelled')) return false;
+    if (e.kind === 'user') return true;
+  }
+  return false;
+}
+
 let agentSessionsLoaded = false;
 function loadAgentSessionsFromDisk(): void {
   if (agentSessionsLoaded) return;
@@ -1018,11 +1125,33 @@ function loadAgentSessionsFromDisk(): void {
       const info: AgentSessionInfo = item.info;
       const def = AGENT_DEFS.find((d) => d.id === info.agent);
       if (!def) continue;
-      const history = Array.isArray(item.history)
-        ? closeDanglingToolStarts(sanitizeAgentHistory(item.history))
-        : [];
+      const loaded = Array.isArray(item.history) ? sanitizeAgentHistory(item.history) : [];
+      // No process survives a host restart: open tools and sub-agents end here.
+      let history = closeDanglingAgents(closeDanglingToolStarts(loaded));
+      // A turn that was running (busy, or its user message stored but busy
+      // not yet) never gets its own end: give the phone one to show.
+      // (The store has already turned busy/running into 'interrupted' by now.)
+      const interrupted = (!!info.busy || ['running', 'waiting', 'interrupted'].includes(info.taskState ?? '')) && turnLeftOpen(history);
+      if (interrupted) {
+        history = [...history, {
+          seq: history.reduce((m, e) => Math.max(m, e.seq ?? 0), 0) + 1,
+          ts: Date.now(),
+          kind: 'error',
+          text: 'Interrupted: the PC host restarted while this turn was running. Send your message again to continue.',
+          turnId: info.turnId,
+        }];
+      }
+      const lastLoaded = loaded.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
+      const settled = history.filter((e) => (e.seq ?? 0) > lastLoaded);
+      const restored: AgentSessionInfo = { ...info, busy: false, status: 'running', taskState: interrupted ? 'interrupted' : (info.taskState || 'idle') };
+      if (restored.runningAgents) restored.runningAgents = 0;
+      if (settled.length) {
+        // Store the closing events too, so agent.historyPage replays them.
+        void persistAgent({ info: { ...restored }, events: settled })
+          .catch((error) => console.error('[agents] Persistence failed:', error.message));
+      }
       const session: AgentSession = {
-        info: { ...info, busy: false, status: 'running', taskState: info.busy ? 'interrupted' : (info.taskState || 'idle') },
+        info: restored,
         history,
         adapter: null as unknown as AgentAdapter,
         seq: history.length > 0 ? (history[history.length - 1].seq ?? 0) : 0,
@@ -1033,12 +1162,64 @@ function loadAgentSessionsFromDisk(): void {
       agentSessions.set(info.agentSessionId, session);
     }
   } catch (_) {}
+  // Restored sessions are never busy; replace any count the previous host left.
+  writeBusyTurnsMarker();
+}
+
+/**
+ * Streamed text arrives token by token. Each chunk is broadcast live, but
+ * storage keeps one coalesced event per message (flushed on the next
+ * non-text event, a new message, or after a second of quiet).
+ */
+const pendingDeltas = new Map<string, { session: AgentSession; event: AgentEvent; timer: ReturnType<typeof setTimeout> }>();
+function flushDelta(agentSessionId: string): void {
+  const pending = pendingDeltas.get(agentSessionId);
+  if (!pending) return;
+  pendingDeltas.delete(agentSessionId);
+  clearTimeout(pending.timer);
+  const { session, event } = pending;
+  session.history.push(event);
+  if (session.history.length > HISTORY_CAP) session.history.splice(0, 100);
+  savedSequences.set(agentSessionId, Math.max(savedSequences.get(agentSessionId) ?? 0, session.seq));
+  void persistAgent({ info: { ...session.info }, events: [event] }).catch((error) => console.error('[agents] Persistence failed:', error.message));
+}
+/** Persist any buffered streamed text now (before history reads). */
+export function flushAgentDeltas(agentSessionId?: string): void {
+  for (const id of agentSessionId ? [agentSessionId] : [...pendingDeltas.keys()]) flushDelta(id);
+}
+function emitDelta(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): void {
+  const id = session.info.agentSessionId;
+  silentTouch(session);
+  const full: AgentEvent = { ...event, seq: ++session.seq, ts: Date.now(), turnId: session.info.turnId };
+  session.info.updatedAt = full.ts;
+  const activityChanged = session.info.activity !== 'responding';
+  if (activityChanged) { session.info.activity = 'responding'; session.info.activityAt = full.ts; }
+  const pending = pendingDeltas.get(id);
+  if (pending && pending.event.refId === full.refId) {
+    pending.event = { ...pending.event, text: (pending.event.text ?? '') + (full.text ?? '') };
+    clearTimeout(pending.timer);
+    pending.timer = setTimeout(() => flushDelta(id), 1000);
+  } else {
+    flushDelta(id);
+    pendingDeltas.set(id, { session, event: full, timer: setTimeout(() => flushDelta(id), 1000) });
+  }
+  broadcast({ type: 'agent-event', agentSessionId: id, event: full });
+  if (activityChanged) broadcast({ type: 'agent-session-update', session: { ...session.info } });
 }
 
 function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): void {
+  silentTouch(session);
+  if (event.kind === 'text-delta') { emitDelta(session, event); return; }
+  flushDelta(session.info.agentSessionId);
   if (isRedundantToolStart(session.history, event)) return;
   const full: AgentEvent = { ...event, seq: ++session.seq, ts: Date.now(), turnId: session.info.turnId };
   session.info.updatedAt=full.ts;
+  const activity=sessionActivity(full);
+  const activityChanged=activity!==undefined && activity!==session.info.activity;
+  if(activityChanged){session.info.activity=activity;session.info.activityAt=full.ts;}
+  if(['result','error','permission-request'].includes(full.kind) || (full.kind==='status' && full.text==='cancelled')){
+    delete session.info.activity;delete session.info.activityAt;
+  }
   if(full.kind==='user') { session.info.taskState='running'; session.info.preview=full.text?.slice(0,160); }
   if(full.kind==='permission-request' && full.refId) {
     session.info.taskState='waiting';
@@ -1054,7 +1235,10 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
   const savedInfo={...session.info};
   void persistAgent({info:savedInfo,events:[full]}).then(()=>{
     broadcast({ type:'agent-event', agentSessionId:savedInfo.agentSessionId,event:full });
-    if(['result','error','permission-request','user','status'].includes(full.kind)) broadcast({type:'agent-session-update',session:savedInfo});
+    // The session as it is now, not as it was when the event was emitted:
+    // setBusy() may have run in between, and an older snapshot sent after it
+    // would flip the phone's Working state the wrong way.
+    if(activityChanged || ['result','error','permission-request','user','status','agent-start','agent-end'].includes(full.kind)) broadcast({type:'agent-session-update',session:{...session.info}});
   }).catch(error=>{
     session.info.taskState='failed';
     broadcast({type:'agent-event',agentSessionId:session.info.agentSessionId,event:{kind:'error',seq:++session.seq,ts:Date.now(),text:'Task history could not be saved. Check host storage.'}});
@@ -1063,7 +1247,7 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
 
   // If no active websocket clients are connected (e.g. mobile app is closed/screen off),
   // send a native push notification to registered devices.
-  if (!hasActivePushSessions()) {
+  if (!hasActivePushSessions() && !isResultWhileAgentsRun(full, session.info)) {
     if (full.kind === 'result') {
       const title = session.info.title ? `Agent Done (${session.info.title})` : 'Agent is Done';
       const body = (full.text || '').trim() || 'The agent has finished working.';
@@ -1098,9 +1282,107 @@ function emit(session: AgentSession, event: Omit<AgentEvent, 'seq' | 'ts'>): voi
   }
 }
 
+/**
+ * A result while sub-agents still run is not "done": background agents bring
+ * a second round with its own result, and that one sends the push instead.
+ */
+export function isResultWhileAgentsRun(event: Pick<AgentEvent, 'kind'>, info: Pick<AgentSessionInfo, 'runningAgents'>): boolean {
+  return event.kind === 'result' && (info.runningAgents ?? 0) > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Silent-turn watchdog: a busy turn that goes quiet gets one status line.
+// Never kills or changes busy; works for every adapter because it only looks
+// at emit() and setBusy().
+// ---------------------------------------------------------------------------
+
+export const SILENT_TURN_MS = 10 * 60 * 1000;
+export const SILENT_TURN_TEXT = 'No output for 10 min. Still running; tap Stop if it looks stuck.';
+/** Mutable so tests can shorten the threshold and fake the clock. */
+export const silentWatchdogConfig: { thresholdMs: number; now: () => number } = {
+  thresholdMs: SILENT_TURN_MS,
+  now: () => Date.now(),
+};
+interface SilentWatch { timer?: ReturnType<typeof setTimeout>; last: number; fired: boolean }
+const silentWatches = new Map<string, SilentWatch>();
+let silentWatchdogEmitting = false;
+
+function silentSchedule(session: AgentSession, watch: SilentWatch, delay: number): void {
+  if (watch.timer) clearTimeout(watch.timer);
+  watch.timer = setTimeout(() => silentCheck(session), Math.max(1, delay));
+  (watch.timer as { unref?: () => void }).unref?.();
+}
+
+function silentCheck(session: AgentSession): void {
+  const id = session.info.agentSessionId;
+  const watch = silentWatches.get(id);
+  if (!watch) return;
+  watch.timer = undefined;
+  if (!session.info.busy) { silentWatches.delete(id); return; }
+  const { thresholdMs, now } = silentWatchdogConfig;
+  const remaining = watch.last + thresholdMs - now();
+  if (remaining > 0) { silentSchedule(session, watch, remaining); return; }
+  const waiting = session.pendingPermissions.size > 0 || pendingAgentApprovals(id).length > 0;
+  // A tool still running is not silence: look again after another threshold.
+  if (waiting || unmatchedToolStarts(session.history).length > 0) { silentSchedule(session, watch, thresholdMs); return; }
+  watch.fired = true;
+  silentWatchdogEmitting = true;
+  try { emit(session, { kind: 'status', text: SILENT_TURN_TEXT }); } finally { silentWatchdogEmitting = false; }
+}
+
+function silentTouch(session: AgentSession): void {
+  if (silentWatchdogEmitting) return;
+  const watch = silentWatches.get(session.info.agentSessionId);
+  if (!watch) return;
+  watch.last = silentWatchdogConfig.now();
+  if (watch.fired) {
+    watch.fired = false;
+    silentSchedule(session, watch, silentWatchdogConfig.thresholdMs);
+  }
+}
+
+function silentArm(session: AgentSession): void {
+  const id = session.info.agentSessionId;
+  if (silentWatches.has(id)) return;
+  const watch: SilentWatch = { last: silentWatchdogConfig.now(), fired: false };
+  silentWatches.set(id, watch);
+  silentSchedule(session, watch, silentWatchdogConfig.thresholdMs);
+}
+
+function silentDisarm(id: string): void {
+  const watch = silentWatches.get(id);
+  if (watch?.timer) clearTimeout(watch.timer);
+  silentWatches.delete(id);
+}
+
+/** Test hooks: drive emit/setBusy on a live session without a real adapter. */
+export const agentWatchdogTestHooks = {
+  emit: (id: string, event: Omit<AgentEvent, 'seq' | 'ts'>) => { const s = agentSessions.get(id); if (s) emit(s, event); },
+  setBusy: (id: string, busy: boolean) => { const s = agentSessions.get(id); if (s) setBusy(s, busy); },
+  pendingPermissions: (id: string) => agentSessions.get(id)?.pendingPermissions,
+  watching: (id: string) => silentWatches.has(id),
+};
+
 function setBusy(session: AgentSession, busy: boolean): void {
   session.info.busy = busy;
+  if (busy) silentArm(session); else silentDisarm(session.info.agentSessionId);
+  writeBusyTurnsMarker();
   broadcast({ type: 'agent-session-update', session: { ...session.info } });
+}
+
+/** Where scripts/deploy-host.sh reads how many agent turns are running. */
+export function busyTurnsMarkerPath(): string {
+  return join(process.env.NEXUSLINK_DATA_DIR || join(homedir(), '.cache', 'nexuslink'), 'busy-turns.json');
+}
+
+/** Record the running-turn count so a deferred restart can wait for zero. */
+export function writeBusyTurnsMarker(): void {
+  const busy = [...agentSessions.values()].filter((s) => s.info.busy).length;
+  try {
+    const path = busyTurnsMarkerPath();
+    mkdirSync(join(path, '..'), { recursive: true });
+    writeFileSync(path, JSON.stringify({ busy, pid: process.pid, ts: Date.now() }));
+  } catch { /* best effort */ }
 }
 
 /** Expand ~ and require an existing directory. Any path is allowed for now. */
@@ -1141,6 +1423,7 @@ export function isDefaultSessionTitle(title: string | undefined, agentId?: strin
     current === 'OpenCode' ||
     current === 'Cursor CLI' ||
     current === 'Claude Code' ||
+    current === 'Code Agent' ||
     current === 'Demo Agent'
   );
 }
@@ -1180,6 +1463,44 @@ export function createAgentSession(
   saveAgentSessionsToDisk();
   broadcast({ type: 'agent-session-update', session: { ...info } });
   return { ...info };
+}
+
+/** Save a chat override; the gateway and adapter apply it before the next turn. */
+export function setAgentPermissionMode(agentSessionId: string, mode: string): { ok: boolean; reason?: string; session?: AgentSessionInfo } {
+  loadAgentSessionsFromDisk();
+  const session = agentSessions.get(agentSessionId);
+  if (!session || session.info.status !== 'running') return { ok: false, reason: 'This chat is closed.' };
+  if (session.info.busy || session.pendingPermissions.size || session.info.runningAgents) return { ok: false, reason: 'Stop the current reply and wait for background agents before changing permissions.' };
+  if (mode !== 'ask' && mode !== 'full-access') return { ok: false, reason: 'Unknown permission mode.' };
+  session.info.permissionMode = mode;
+  saveAgentSessionsToDisk();
+  broadcast({ type: 'agent-session-update', session: { ...session.info } });
+  return { ok: true, session: { ...session.info } };
+}
+
+/** Print-only providers cannot pause individual tools reliably: approve before spawning. */
+export function usesTurnApproval(agent: string): boolean {
+  return !['claude', 'codex', 'mock'].includes(agent);
+}
+
+function sessionApprovalMode(session: AgentSession): AgentApprovalMode {
+  if (session.info.permissionMode === 'full-access') return 'auto';
+  if (session.info.permissionMode === 'ask') return usesTurnApproval(session.info.agent) ? 'auto' : 'ask';
+  return getAgentApprovalMode(session.info.agent);
+}
+
+/** Explicit overrides avoid inheriting a PC-wide never/danger-full-access configuration. */
+export function codexPermissionPolicy(mode: AgentSessionInfo['permissionMode'], cwd: string) {
+  if (mode === 'ask') return {
+    approvalPolicy: 'untrusted',
+    approvalsReviewer: 'user',
+    sandboxPolicy: { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: false },
+  };
+  if (mode === 'full-access') return {
+    approvalPolicy: 'never',
+    sandboxPolicy: { type: 'dangerFullAccess' },
+  };
+  return {};
 }
 
 export function listAgentSessions(): AgentSessionInfo[] {
@@ -1236,11 +1557,78 @@ export function listHostChats(agent?: string): AgentHostChat[] {
     .slice(0, 80);
 }
 
+/** Parent PID from /proc (Linux), or undefined. */
+function parentPid(pid: number): number | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // Field 4, after the parenthesised command name (which may contain spaces).
+    const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+    return Number.isFinite(ppid) ? ppid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+function isOwnDescendant(pid: number): boolean {
+  let current: number | undefined = pid;
+  for (let depth = 0; current && current > 1 && depth < 32; depth++) {
+    current = parentPid(current);
+    if (current === process.pid) return true;
+  }
+  return false;
+}
+
+/**
+ * Processes NexusLink itself started for this chat. A chat ID appearing in some
+ * other process's command line (e.g. Claude Desktop keeping `claude --resume=<id>`
+ * alive while idle) is neither "busy" nor ours to signal.
+ */
+export function findHostChatProcesses(agent: string, hostChatId: string): number[] {
+  const pids: number[] = [];
+  if (!hostChatId || process.platform !== 'linux') return pids;
+  try {
+    for (const entry of readdirSync('/proc')) {
+      if (!/^[0-9]+$/.test(entry)) continue;
+      const pid = Number(entry);
+      if (pid === process.pid) continue;
+      try {
+        const args = readFileSync(`/proc/${entry}/cmdline`, 'utf8').split('\0');
+        if (!args.some((arg) => arg === hostChatId || arg.endsWith(`=${hostChatId}`))) continue;
+        if (isOwnDescendant(pid)) pids.push(pid);
+      } catch { /* exited */ }
+    }
+  } catch { /* no procfs */ }
+  return pids;
+}
+
+/** Busy only when NexusLink is running a turn; native activity comes from the chat library's live status. */
+export function isHostChatBusy(agent: string, hostChatId: string, _cwd?: string): boolean {
+  loadAgentSessionsFromDisk();
+  return [...agentSessions.values()].some(
+    (s) => s.info.agent === agent && (s.info.hostChatId === hostChatId || s.info.agentSessionId === hostChatId) && s.info.status === 'running' && s.info.busy,
+  );
+}
+
+/** Interrupt only processes NexusLink spawned for this chat. */
+export function killHostChatProcesses(agent: string, hostChatId: string): boolean {
+  let killed = false;
+  for (const pid of findHostChatProcesses(agent, hostChatId)) {
+    try {
+      process.kill(pid, 'SIGINT');
+      killed = true;
+    } catch { /* exited */ }
+  }
+  return killed;
+}
+
 export function openHostChat(params: {
   agent: string;
   hostChatId: string;
   cwd?: string;
   title?: string;
+  /** Pre-parsed native transcript (from the chat library worker); skips the synchronous parse. */
+  history?: HostChatDelta[];
+  /** Native activity time, so attaching never makes an old chat look brand new. */
+  updatedAt?: number;
 }): AgentSessionInfo {
   loadAgentSessionsFromDisk();
   const { agent, hostChatId } = params;
@@ -1254,6 +1642,11 @@ export function openHostChat(params: {
     if (params.cwd?.trim()) {
       existing.info.cwd = resolveAgentCwd(params.cwd);
     }
+    const busy = isHostChatBusy(agent, hostChatId, existing.info.cwd);
+    if (busy !== existing.info.busy) {
+      existing.info.busy = busy;
+    }
+    existing.info.imported = false;
     saveAgentSessionsToDisk();
     broadcast({ type: 'agent-session-update', session: { ...existing.info } });
     return { ...existing.info };
@@ -1272,10 +1665,15 @@ export function openHostChat(params: {
   const info = createAgentSession(agent, cwd, title, { hostChatId });
   const session = agentSessions.get(info.agentSessionId);
   if (!session) return info;
-  session.info.imported = true;
+  session.info.imported = false;
+  const busy = isHostChatBusy(agent, hostChatId, cwd);
+  if (busy) {
+    session.info.busy = true;
+  }
+  if (params.updatedAt && Number.isFinite(params.updatedAt)) session.info.updatedAt = params.updatedAt;
   const def = AGENT_DEFS.find((d) => d.id === agent);
   const bin = def?.bin ? which(def.bin) : null;
-  const history = loadHostChatHistory(agent, hostChatId, bin);
+  const history = params.history ?? loadHostChatHistory(agent, hostChatId, bin);
   seedHistory(session, history);
   if (!history.length) {
     seedHistory(session, [{
@@ -1300,6 +1698,7 @@ export function agentHistory(agentSessionId: string): AgentEvent[] {
   loadAgentSessionsFromDisk();
   const session = agentSessions.get(agentSessionId);
   if (!session) return [];
+  flushDelta(agentSessionId);
   if (session.history.length === 0 && session.info.hostChatId) {
     const def = AGENT_DEFS.find((d) => d.id === session.info.agent);
     const bin = def?.bin ? which(def.bin) : null;
@@ -1307,8 +1706,9 @@ export function agentHistory(agentSessionId: string): AgentEvent[] {
     seedHistory(session, history);
   }
   session.history = sanitizeAgentHistory(session.history);
-  if (!session.info.busy) {
-    const settled = closeDanglingToolStarts(session.history);
+  // Background sub-agents keep tools open after the turn's result.
+  if (!session.info.busy && !(session.info.runningAgents ?? 0)) {
+    const settled = closeDanglingAgents(closeDanglingToolStarts(session.history));
     if (settled.length !== session.history.length) {
       session.history = settled;
       session.seq = Math.max(session.seq, settled[settled.length - 1]?.seq ?? 0);
@@ -1322,20 +1722,18 @@ export function promptAgent(
   agentSessionId: string,
   text: string,
   opts: AgentPromptOpts = {},
-): { ok: boolean } {
+): { ok: boolean; reason?: string } {
   loadAgentSessionsFromDisk();
   const session = agentSessions.get(agentSessionId);
-  if (!session || session.info.status !== 'running') return { ok: false };
+  if (!session || session.info.status !== 'running') return { ok: false, reason: 'This task is closed. Start a new chat.' };
   if (session.info.hostChatId?.startsWith('ide:')) throw new Error('Cursor IDE chats are read only. Start a new chat to use Cursor CLI.');
-  if (session.info.imported) throw new Error('Replying is unavailable until this app confirms the original PC chat is safe to continue. Start a new chat to reply.');
   if(session.info.busy) throw new Error('This task is already working. Stop it before sending another prompt.');
-  if (session.info.agent === 'codex' && opts.mode === 'plan') throw new Error('Codex Plan mode is unavailable. Select Agent mode.');
   session.info.turnId=crypto.randomUUID();
   const materialized = materializeAgentImages(session.info.agentSessionId, opts.images);
   const key = parseEnvApiKey(text, ['CURSOR_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'OPENAI_API_KEY']);
   const display = (key ? `${key.name}=••••` : text.trim())
     || (materialized.files.length ? 'Attached photo(s)' : '');
-  if (!display) return { ok: false };
+  if (!display) return { ok: false, reason: 'Type a message or attach a photo.' };
 
   // Auto-name the session if it still has the default/generic name
   if (isDefaultSessionTitle(session.info.title, session.info.agent)) {
@@ -1353,14 +1751,71 @@ export function promptAgent(
     images: materialized.files.map((f) => f.name),
   });
   setBusy(session, true);
-  session.adapter.prompt(text.trim() || 'Please look at the attached image(s).', {
+  const dispatch = () => session.adapter.prompt(text.trim() || 'Please look at the attached image(s).', {
+    permissionMode: session.info.permissionMode,
     model: opts.model,
     mode: opts.mode,
-    thinking: opts.thinking,
+    thinking: normalizeThinkingForAgent(session.info.agent, opts.thinking),
     imagePaths: materialized.paths,
     images: materialized.files,
   });
+  if (session.info.permissionMode === 'ask' && usesTurnApproval(session.info.agent)) {
+    const turnId = session.info.turnId;
+    const requestId = `turn-approval-${turnId}`;
+    session.pendingPermissions.set(requestId, allow => {
+      // A stopped, replaced or closed turn must never start from an old card.
+      if (!session.info.busy || session.info.turnId !== turnId || !agentSessions.has(agentSessionId)) return;
+      if (allow) dispatch();
+      else {
+        setBusy(session, false);
+        emit(session, { kind: 'result', text: 'Turn not started: permission was denied or expired.' });
+      }
+    });
+    emit(session, {
+      kind: 'permission-request', refId: requestId, toolName: 'Run agent turn',
+      toolInput: JSON.stringify({ agent: session.info.agent, cwd: session.info.cwd, prompt: display }),
+      text: 'Allow this entire turn? The agent may edit files, run commands and use the network within its PC policy. Individual tools will not ask again during this turn.',
+    });
+    trackPermissionTimeout(session, requestId);
+  } else dispatch();
   return { ok: true };
+}
+
+/**
+ * What a turn NexusLink is driving is doing right now, in the same shape the
+ * chat library reports for chats running in other apps.
+ */
+export function agentSessionLive(agentSessionId: string): ChatLive | undefined {
+  const session = agentSessions.get(agentSessionId);
+  if (!session || !(session.info.busy || session.info.taskState === 'waiting')) return undefined;
+  const recent = session.history.slice(-300);
+  const waiting = pendingAgentApprovals(agentSessionId).at(-1);
+  const open = unmatchedToolStarts(recent).at(-1);
+  let lastText = pendingDeltas.get(agentSessionId)?.event.text;
+  let turnStartedAt: number | undefined;
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const e = recent[i]!;
+    if (lastText === undefined && (e.kind === 'text' || e.kind === 'text-delta') && e.text?.trim()) lastText = e.text;
+    if (e.kind === 'user') { turnStartedAt = e.ts; break; }
+  }
+  const last = recent.at(-1);
+  const current = waiting ?? open;
+  const described = current
+    ? describeTool(current.toolName ?? 'tool', current.toolInput)
+    : last?.kind === 'thinking' ? { step: 'Thinking', activity: 'thinking' } : { step: lastText ? 'Responding' : 'Thinking', activity: lastText ? 'responding' : 'thinking' };
+  const live: ChatLive = {
+    state: waiting ? 'waiting' : 'working',
+    step: described.step,
+    activity: waiting ? 'waiting' : described.activity,
+    via: 'nexuslink',
+  };
+  if (current?.toolName) live.tool = current.toolName;
+  if (waiting) live.waitingFor = clip(waiting.text || `Approve ${waiting.toolName ?? 'action'}`, 200);
+  if (turnStartedAt) live.turnStartedAt = turnStartedAt;
+  if (session.info.updatedAt) live.updatedAt = session.info.updatedAt;
+  const text = clip(lastText);
+  if (text) live.lastText = text;
+  return live;
 }
 
 export function renameAgentSession(
@@ -1394,7 +1849,10 @@ export function cancelAgent(agentSessionId: string): { ok: boolean } {
   const session = agentSessions.get(agentSessionId);
   if (!session) return { ok: false };
   session.adapter.cancel();
-  const settled = closeDanglingToolStarts(session.history, 'Stopped.');
+  if (session.info.hostChatId) {
+    killHostChatProcesses(session.info.agent, session.info.hostChatId);
+  }
+  const settled = closeDanglingAgents(closeDanglingToolStarts(session.history, 'Stopped.'), 'Stopped.');
   if (settled.length !== session.history.length) {
     session.history = settled;
     session.seq = Math.max(session.seq, settled[settled.length - 1]?.seq ?? 0);
@@ -1411,6 +1869,8 @@ export function cancelAgent(agentSessionId: string): { ok: boolean } {
 export function closeAgentSession(agentSessionId: string): { ok: boolean } {
   const session = agentSessions.get(agentSessionId);
   if (!session) return { ok: false };
+  flushDelta(agentSessionId);
+  silentDisarm(agentSessionId);
   clearAllPermissionTimeouts(agentSessionId);
   session.adapter?.close?.();
   session.info.status = 'exited';
@@ -1621,6 +2081,30 @@ export function sanitizeCliError(text: string, agentName: string): string {
   return cleaned;
 }
 
+/**
+ * The text of an error that ends a turn. Internal tool noise is hidden from
+ * history and chat, so as the end of a turn it would leave the phone with no
+ * visible reason; say that the turn stopped instead.
+ */
+export function turnEndError(text: string, agentName: string): string {
+  const cleaned = sanitizeCliError(text, agentName);
+  if (isInternalCliNoise(text) || isInternalCliNoise(cleaned)) {
+    return `${agentName} stopped after a rejected tool call (invalid arguments or a path outside its allowed folders). Send your request again.`;
+  }
+  return cleaned || `${agentName} stopped without saying why.`;
+}
+
+/** Wait for a stream to finish, but not forever: a child that inherited the pipe can outlive the CLI. */
+async function settleWithin<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => { timer = setTimeout(() => resolve(fallback), ms); });
+  try {
+    return await Promise.race([promise.catch(() => fallback), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function sanitizeAgentHistory(history: AgentEvent[]): AgentEvent[] {
   return history.filter((e) => {
     if (e.kind === 'error' && isInternalCliNoise(e.text ?? '')) {
@@ -1674,6 +2158,295 @@ export function closeDanglingToolStarts(
     refId: start.refId,
   }));
   return [...history, ...extra];
+}
+
+const AGENT_RECORD_KEYS = [
+  'agentId', 'refId', 'agentName', 'agentType', 'agentDepth', 'agentParentId', 'agentBackground',
+] as const;
+
+/** Copy the sub-agent record fields of an agent-* event (no kind/seq/text). */
+function agentRecord(e: Partial<AgentEvent>): Partial<AgentEvent> {
+  const out: Partial<AgentEvent> = {};
+  for (const key of AGENT_RECORD_KEYS) {
+    if (e[key] !== undefined) (out as Record<string, unknown>)[key] = e[key];
+  }
+  return out;
+}
+
+/** Latest agent-start/agent-update of every sub-agent that has no agent-end after it. */
+export function runningAgentEvents(history: AgentEvent[]): AgentEvent[] {
+  const latest = new Map<string, AgentEvent>();
+  for (const e of history) {
+    if (!e.agentId) continue;
+    if (e.kind === 'agent-start' || e.kind === 'agent-update') latest.set(e.agentId, e);
+    else if (e.kind === 'agent-end') latest.delete(e.agentId);
+  }
+  return [...latest.values()];
+}
+
+/**
+ * End sub-agents that never got an agent-end (host restart, lost process), so
+ * a replay never shows an agent running forever. Deepest agents end first.
+ */
+export function closeDanglingAgents(
+  history: AgentEvent[],
+  text = 'Interrupted — host restarted.',
+): AgentEvent[] {
+  const open = runningAgentEvents(history);
+  if (open.length === 0) return history;
+  const turns = new Map<string, string>();
+  for (const e of history) if (e.agentId && e.turnId) turns.set(e.agentId, e.turnId);
+  let seq = history.reduce((m, e) => Math.max(m, e.seq ?? 0), 0);
+  const extra: AgentEvent[] = open
+    .sort((a, b) => (b.agentDepth ?? 1) - (a.agentDepth ?? 1))
+    .map((last) => ({
+      ...agentRecord(last),
+      seq: ++seq,
+      ts: Date.now(),
+      kind: 'agent-end' as const,
+      agentStatus: 'stopped' as const,
+      text,
+      ...(turns.has(last.agentId!) ? { turnId: turns.get(last.agentId!) } : {}),
+    }));
+  return [...history, ...extra];
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code sub-agents (stream-json `system` task events + parent_tool_use_id)
+// ---------------------------------------------------------------------------
+
+interface TrackedAgent {
+  agentId: string;
+  refId?: string;
+  agentName?: string;
+  agentType?: string;
+  agentDepth: number;
+  agentParentId?: string;
+  agentBackground: boolean;
+  running: boolean;
+  /** Latest progress line, repeated on agent-update events. */
+  lastText?: string;
+}
+
+function str(value: unknown): string | undefined {
+  return typeof value === 'string' && value ? value : undefined;
+}
+
+/** task_notification status → agentStatus. */
+export function claudeTaskStatus(status: unknown): 'completed' | 'failed' | 'stopped' {
+  const s = String(status ?? '').toLowerCase();
+  if (/fail|error/.test(s)) return 'failed';
+  if (/kill|stop|cancel|abort|interrupt/.test(s)) return 'stopped';
+  return 'completed';
+}
+
+/**
+ * Turns `task_started` / `task_progress` / `task_updated` / `task_notification`
+ * into agent-start / agent-update / agent-end, and tells which sub-agent owns a
+ * message. Only agent tasks count: background shell commands (`local_bash`)
+ * are tasks too but are not agents.
+ */
+export class ClaudeSubagentTracker {
+  private agents = new Map<string, TrackedAgent>();
+  private byTask = new Map<string, string>();
+  private byToolUse = new Map<string, string>();
+
+  get runningCount(): number {
+    let n = 0;
+    for (const a of this.agents.values()) if (a.running) n++;
+    return n;
+  }
+
+  isRunning(agentId: string): boolean {
+    return this.agents.get(agentId)?.running === true;
+  }
+
+  /** agentId for a task id the CLI used (agent_id on messages / control requests). */
+  knownAgent(taskId: unknown): string | undefined {
+    const id = str(taskId);
+    if (!id) return undefined;
+    const mapped = this.byTask.get(id) ?? id;
+    return this.agents.has(mapped) ? mapped : undefined;
+  }
+
+  private event(kind: 'agent-start' | 'agent-update' | 'agent-end', a: TrackedAgent, extra: Partial<AgentEvent> = {}): AgentDelta {
+    const out: AgentDelta = { kind, agentId: a.agentId };
+    if (a.refId) out.refId = a.refId;
+    if (a.agentName) out.agentName = a.agentName;
+    if (a.agentType) out.agentType = a.agentType;
+    out.agentDepth = a.agentDepth;
+    if (a.agentParentId) out.agentParentId = a.agentParentId;
+    out.agentBackground = a.agentBackground;
+    out.agentStatus = 'running';
+    return { ...out, ...extra };
+  }
+
+  /**
+   * Owner of an assistant/user message. Messages carry `agent_id` and
+   * `parent_tool_use_id`; when the agent was never announced, an agent-start
+   * is synthesized so an agentId is never seen before its start.
+   */
+  ownerOf(msg: Record<string, unknown>): { agentId?: string; starts: AgentDelta[] } {
+    const parent = str(msg.parent_tool_use_id);
+    if (!parent) return { starts: [] };
+    const taskId = str(msg.agent_id);
+    const known = (taskId && this.knownAgent(taskId)) || this.byToolUse.get(parent);
+    if (known) return { agentId: known, starts: [] };
+    const agent: TrackedAgent = {
+      agentId: taskId ?? parent,
+      refId: parent,
+      agentName: str(msg.task_description),
+      agentType: str(msg.subagent_type),
+      agentDepth: 1,
+      agentBackground: false,
+      running: true,
+    };
+    this.agents.set(agent.agentId, agent);
+    this.byToolUse.set(parent, agent.agentId);
+    if (taskId) this.byTask.set(taskId, agent.agentId);
+    return { agentId: agent.agentId, starts: [this.event('agent-start', agent)] };
+  }
+
+  /** A `system` message; returns agent-* deltas (empty for anything else). */
+  onSystem(msg: Record<string, unknown>): AgentDelta[] {
+    const subtype = msg.subtype;
+    if (subtype === 'task_started') return this.started(msg);
+    const agentId = this.knownAgent(msg.task_id);
+    const agent = agentId ? this.agents.get(agentId) : undefined;
+    if (!agent || !agent.running) return [];
+    if (subtype === 'task_progress') {
+      const line = str(msg.description);
+      if (line) agent.lastText = clip(line, 300);
+      const extra: Partial<AgentEvent> = {};
+      if (agent.lastText) extra.text = agent.lastText;
+      const tool = str(msg.last_tool_name);
+      if (tool) extra.toolName = tool;
+      return [this.event('agent-update', agent, extra)];
+    }
+    if (subtype === 'task_updated') {
+      // Status patches are ignored: an agent ends on its task_notification.
+      const patch = (msg.patch ?? {}) as Record<string, unknown>;
+      let changed = false;
+      if (typeof patch.is_backgrounded === 'boolean' && patch.is_backgrounded !== agent.agentBackground) {
+        agent.agentBackground = patch.is_backgrounded;
+        changed = true;
+      }
+      const description = str(patch.description);
+      if (description && description !== agent.agentName) {
+        agent.agentName = description;
+        changed = true;
+      }
+      if (!changed) return [];
+      return [this.event('agent-update', agent, agent.lastText ? { text: agent.lastText } : {})];
+    }
+    if (subtype === 'task_notification') {
+      agent.running = false;
+      const summary = str(msg.summary);
+      return [this.event('agent-end', agent, {
+        agentStatus: claudeTaskStatus(msg.status),
+        ...(summary ? { text: summary.slice(0, 4000) } : {}),
+      })];
+    }
+    return [];
+  }
+
+  private started(msg: Record<string, unknown>): AgentDelta[] {
+    const taskType = String(msg.task_type ?? '');
+    const isAgent = /agent/i.test(taskType) || (!taskType && !!str(msg.subagent_type));
+    const taskId = str(msg.task_id);
+    if (!isAgent || !taskId) return [];
+    const toolUse = str(msg.tool_use_id);
+    const existingId = this.byTask.get(taskId) ?? (toolUse ? this.byToolUse.get(toolUse) : undefined)
+      ?? (this.agents.has(taskId) ? taskId : undefined);
+    const existing = existingId ? this.agents.get(existingId) : undefined;
+    const parentTask = str(msg.parent_task_id);
+    const parentId = parentTask ? (this.knownAgent(parentTask) ?? parentTask) : undefined;
+    const parentDepth = parentId ? this.agents.get(parentId)?.agentDepth : undefined;
+    const depth = typeof msg.spawn_depth === 'number' && msg.spawn_depth > 0
+      ? msg.spawn_depth
+      : parentDepth !== undefined ? parentDepth + 1 : 1;
+    const agent: TrackedAgent = existing ?? {
+      agentId: taskId,
+      agentDepth: depth,
+      agentBackground: false,
+      running: true,
+    };
+    const wasRunning = existing?.running === true;
+    agent.refId = toolUse ?? agent.refId;
+    agent.agentName = str(msg.description) ?? agent.agentName;
+    agent.agentType = str(msg.subagent_type) ?? agent.agentType;
+    agent.agentDepth = depth;
+    if (parentId) agent.agentParentId = parentId;
+    agent.agentBackground = msg.is_backgrounded === true;
+    agent.running = true;
+    agent.lastText = undefined;
+    this.agents.set(agent.agentId, agent);
+    this.byTask.set(taskId, agent.agentId);
+    if (toolUse) this.byToolUse.set(toolUse, agent.agentId);
+    // Synthesized earlier from a message: the start is already out, add details.
+    if (wasRunning) return [this.event('agent-update', agent)];
+    const prompt = str(msg.prompt);
+    return [this.event('agent-start', agent, prompt ? { agentPrompt: prompt.slice(0, 4000) } : {})];
+  }
+
+  /** End every running agent (process exit, cancel). Deepest first. */
+  endAll(status: 'stopped' | 'failed', text: string): AgentDelta[] {
+    const running = [...this.agents.values()].filter((a) => a.running)
+      .sort((a, b) => b.agentDepth - a.agentDepth);
+    return running.map((a) => {
+      a.running = false;
+      return this.event('agent-end', a, { agentStatus: status, text });
+    });
+  }
+
+  reset(): void {
+    this.agents.clear();
+    this.byTask.clear();
+    this.byToolUse.clear();
+  }
+}
+
+/**
+ * Normalize one claude stream-json line that carries chat content: assistant
+ * and user messages (main agent or, with `parent_tool_use_id`, a sub-agent)
+ * and the `system` task events. Other lines return [].
+ */
+export function translateClaudeEvent(msg: Record<string, unknown>, agents: ClaudeSubagentTracker): AgentDelta[] {
+  const type = String(msg.type ?? '');
+  if (type === 'system') return agents.onSystem(msg);
+  if (type !== 'assistant' && type !== 'user') return [];
+  const message = msg.message as Record<string, unknown> | undefined;
+  const content = message?.content;
+  if (!Array.isArray(content)) return [];
+  const owner = agents.ownerOf(msg);
+  const out: AgentDelta[] = [...owner.starts];
+  const tag = (d: AgentDelta): AgentDelta => (owner.agentId ? { ...d, agentId: owner.agentId } : d);
+  for (const raw of content) {
+    const part = raw as Record<string, unknown>;
+    if (type === 'assistant') {
+      if (part.type === 'text' && typeof part.text === 'string' && part.text.trim()) {
+        out.push(tag({ kind: 'text', text: part.text }));
+      } else if (part.type === 'thinking' && typeof part.thinking === 'string') {
+        out.push(tag({ kind: 'thinking', text: part.thinking }));
+      } else if (part.type === 'tool_use') {
+        out.push(tag({
+          kind: 'tool-start',
+          toolName: String(part.name ?? 'tool'),
+          toolInput: JSON.stringify(part.input ?? {}, null, 2),
+          refId: String(part.id ?? ''),
+        }));
+      }
+    } else if (part.type === 'tool_result') {
+      // Tool results come back as user messages in the transcript stream. A
+      // sub-agent's text parts are its task prompt (already on agent-start).
+      out.push(tag({
+        kind: 'tool-end',
+        refId: String(part.tool_use_id ?? ''),
+        toolOutput: contentToText(part.content).slice(0, 4000),
+      }));
+    }
+  }
+  return out;
 }
 
 function asToolRecord(value: unknown): Record<string, unknown> {
@@ -2172,7 +2945,30 @@ export function parseAgyStreamEvent(msg: Record<string, unknown>): AgentDelta[] 
 }
 
 function hostEnv(extra?: Record<string, string>): Record<string, string> {
-  return { ...(process.env as Record<string, string>), ...extra };
+  // NEXUSLINK_AGENT_TURN lets scripts/deploy-host.sh see that it runs inside a
+  // Nexus agent turn and defer the host restart that would kill this turn.
+  return { ...(process.env as Record<string, string>), NEXUSLINK_AGENT_TURN: '1', ...extra };
+}
+
+/**
+ * True when a non-archived Claude Desktop "Code" session is bound to this CLI
+ * session id (~/.config/Claude/claude-code-sessions/<account>/<org>/local_*.json).
+ */
+export function claudeDesktopOwnsSession(cliSessionId: string, base = join(providerRoots().claudeDesktop, 'claude-code-sessions')): boolean {
+  if (!cliSessionId) return false;
+  const dirs = (path: string): string[] => { try { return readdirSync(path); } catch { return []; } };
+  for (const account of dirs(base)) for (const org of dirs(join(base, account))) {
+    for (const name of dirs(join(base, account, org))) {
+      if (!/^local_.*\.json$/.test(name)) continue;
+      try {
+        const text = readFileSync(join(base, account, org, name), 'utf8');
+        if (!text.includes(cliSessionId)) continue;
+        const d = JSON.parse(text) as { cliSessionId?: unknown; isArchived?: unknown };
+        if (d.cliSessionId === cliSessionId && d.isArchived !== true) return true;
+      } catch { /* unreadable or mid-write */ }
+    }
+  }
+  return false;
 }
 
 function spawnJsonCli(
@@ -2410,26 +3206,63 @@ export function isSafeAgentToolCall(
 // Claude Code adapter — persistent `claude --print` with stream-json in/out.
 // ---------------------------------------------------------------------------
 
+function claudeSpawnKey(opts?: AdapterPromptOpts): string {
+  return `${opts?.model ?? ''}|${opts?.mode ?? 'agent'}|${opts?.thinking ?? ''}|${opts?.permissionMode ?? ''}`;
+}
+
 class ClaudeAdapter implements AgentAdapter {
   private proc: Proc | null = null;
   private spawnKey = '';
+  /** The model shorthand this process was started with. */
+  private modelAlias = 'default';
   private sawResult = false;
+  /** Main-agent text was streamed in the current round (sub-agent text does not count). */
   private streamedText = false;
   private resumeId: string | null = null;
   private hasPrompted = false;
+  private agents = new ClaudeSubagentTracker();
 
   constructor(private session: AgentSession) {}
 
   bindHostChat(id: string): void { this.resumeId = id; this.hasPrompted = true; }
 
+  private procAlive(): boolean {
+    return !!this.proc && this.proc.exitCode === null && !this.proc.killed;
+  }
+
+  /** Emit, keeping info.runningAgents current before the session update goes out. */
+  private emitTracked(d: AgentDelta): void {
+    if (d.kind === 'agent-start' || d.kind === 'agent-end') {
+      this.session.info.runningAgents = this.agents.runningCount;
+    }
+    if (d.kind === 'text' && !d.agentId) this.streamedText = true;
+    emit(this.session, d);
+  }
+
+  private endAgents(text: string): void {
+    for (const d of this.agents.endAll('stopped', text)) this.emitTracked(d);
+  }
+
   private ensureProc(opts?: AdapterPromptOpts): Proc {
-    const key = `${opts?.model ?? ''}|${opts?.mode ?? 'agent'}|${opts?.thinking ?? ''}`;
+    const key = claudeSpawnKey(opts);
     if (this.proc && this.proc.exitCode === null && !this.proc.killed && this.spawnKey === key) {
       return this.proc;
     }
     this.cancel();
     this.spawnKey = key;
+    this.modelAlias = opts?.model || 'default';
     const bin = resolveBin('claude') ?? 'claude';
+    // Claude Desktop keeps its own process on its chats and never reloads
+    // turns another process adds, so writing into the same session would
+    // split its history. Continue a copy instead; the copy's new id comes
+    // back in the init event and later turns resume that.
+    const forkSession = !!this.resumeId && claudeDesktopOwnsSession(this.resumeId);
+    if (forkSession) {
+      emit(this.session, {
+        kind: 'status',
+        text: 'This chat is open in the Claude desktop app. Nexus continues it as a separate copy, so the desktop app will not show these messages and its own history stays as it was.',
+      });
+    }
     this.proc = Bun.spawn(
       spawnArgv(claudeSpawnArgs({
         bin,
@@ -2437,13 +3270,15 @@ class ClaudeAdapter implements AgentAdapter {
         mode: opts?.mode,
         thinking: opts?.thinking,
         resumeId: this.resumeId,
+        forkSession,
+        permissionMode: opts?.permissionMode,
       })),
       {
         cwd: this.session.info.cwd,
         stdin: 'pipe',
         stdout: 'pipe',
         stderr: 'pipe',
-        env: process.env as Record<string, string>,
+        env: hostEnv(),
       } as unknown as SpawnOpts,
     );
     const stderrP = collectText(this.proc.stderr);
@@ -2454,7 +3289,11 @@ class ClaudeAdapter implements AgentAdapter {
     }).catch(() => {});
     spawned.exited.then(async (code) => {
       if (this.proc !== spawned) return;
+      // Sub-agents die with the process, busy or not (background agents run
+      // after the turn's result).
+      this.endAgents('The agent process ended.');
       const stderr = await stderrP.catch(() => '');
+      if (this.proc !== spawned) return;
       if (!this.session.info.busy) return;
       setBusy(this.session, false);
       const isSuccess = code === 0 && (this.streamedText || this.sawResult);
@@ -2469,7 +3308,7 @@ class ClaudeAdapter implements AgentAdapter {
         }
         return;
       }
-      const cleaned = sanitizeCliError(fail.text ?? '', 'Claude Code');
+      const cleaned = sanitizeCliError(fail.text ?? '', 'Claude');
       emit(this.session, withoutDuplicateResult({ kind: 'error', text: cleaned }, this.streamedText));
     }).catch(() => {});
     return this.proc;
@@ -2487,44 +3326,13 @@ class ClaudeAdapter implements AgentAdapter {
       }
     }
     const type = String(msg.type ?? '');
-    if (type === 'assistant') {
-      const message = msg.message as Record<string, unknown> | undefined;
-      const content = message?.content;
-      if (Array.isArray(content)) {
-        for (const raw of content) {
-          const part = raw as Record<string, unknown>;
-          if (part.type === 'text' && typeof part.text === 'string' && part.text.trim()) {
-            this.streamedText = true;
-            emit(s, { kind: 'text', text: part.text });
-          } else if (part.type === 'thinking' && typeof part.thinking === 'string') {
-            emit(s, { kind: 'thinking', text: part.thinking });
-          } else if (part.type === 'tool_use') {
-            emit(s, {
-              kind: 'tool-start',
-              toolName: String(part.name ?? 'tool'),
-              toolInput: JSON.stringify(part.input ?? {}, null, 2),
-              refId: String(part.id ?? ''),
-            });
-          }
-        }
-      }
-    } else if (type === 'user') {
-      // Tool results come back as user messages in the transcript stream.
-      const message = msg.message as Record<string, unknown> | undefined;
-      const content = message?.content;
-      if (Array.isArray(content)) {
-        for (const raw of content) {
-          const part = raw as Record<string, unknown>;
-          if (part.type === 'tool_result') {
-            emit(s, {
-              kind: 'tool-end',
-              refId: String(part.tool_use_id ?? ''),
-              toolOutput: contentToText(part.content).slice(0, 4000),
-            });
-          }
-        }
-      }
+    if (type === 'assistant' || type === 'user' || (type === 'system' && msg.subtype !== 'init')) {
+      for (const d of translateClaudeEvent(msg, this.agents)) this.emitTracked(d);
     } else if (type === 'result') {
+      // Any result ends the phone's turn. With background sub-agents the CLI
+      // later starts a round by itself (system init … result, `origin.kind`
+      // 'task-notification'); that round is never busy, so the phone can send
+      // meanwhile, and its events arrive as normal main-agent events.
       this.sawResult = true;
       setBusy(s, false);
       const failed = msg.is_error === true || (typeof msg.subtype === 'string' && msg.subtype.startsWith('error'));
@@ -2533,25 +3341,34 @@ class ClaudeAdapter implements AgentAdapter {
         text: typeof msg.result === 'string' ? msg.result : failed ? JSON.stringify(msg.errors ?? 'Provider turn failed') : '',
       }, this.streamedText));
     } else if (type === 'system' && msg.subtype === 'init') {
+      // Every round starts with init, including one the CLI starts by itself.
+      this.sawResult = false;
+      this.streamedText = false;
+      noteClaudeModel(this.modelAlias, msg.model);
       emit(s, { kind: 'status', text: 'ready' });
-    } else if (type === 'control_request' || msg.subtype === 'can_use_tool') {
-      const requestId = String(msg.request_id ?? msg.id ?? crypto.randomUUID());
-      const tool = (msg.request as Record<string, unknown> | undefined) ?? msg;
-      
-      const toolName = String(tool.tool_name ?? tool.name ?? 'tool');
-      const toolInput = (tool.input ?? tool.tool_input ?? {}) as Record<string, unknown>;
-      const toolInputStr = JSON.stringify(toolInput, null, 2);
-
+    } else if (type === 'control_cancel_request') {
+      // Claude withdrew a prompt (turn interrupted or answered elsewhere).
+      const requestId = String(msg.request_id ?? '');
+      if (s.pendingPermissions.delete(requestId)) {
+        clearPermissionTimeout(s.info.agentSessionId, requestId);
+        settleApproval(s, requestId, 'canceled');
+      }
+    } else if (type === 'control_request') {
+      const requestId = String(msg.request_id ?? crypto.randomUUID());
+      const request = (msg.request as Record<string, unknown> | undefined) ?? {};
+      if (request.subtype !== 'can_use_tool') {
+        // Hooks, MCP and other host callbacks are not offered by this client.
+        this.writeControl({ type: 'control_response', response: { subtype: 'error', request_id: requestId, error: `Unsupported request: ${String(request.subtype ?? 'unknown')}` } });
+        return;
+      }
+      const toolName = String(request.tool_name ?? 'tool');
+      const toolInput = (request.input ?? {}) as Record<string, unknown>;
       const respond = (allow: boolean) => {
-        try {
-          const stdin = this.proc?.stdin as unknown as { write(s: string): unknown; flush?: () => void } | undefined;
-          stdin?.write(JSON.stringify({
-            type: 'control_response',
-            request_id: requestId,
-            response: { allowed: allow },
-          }) + '\n');
-          stdin?.flush?.();
-        } catch {
+        // Claude's SDK control protocol: allow must echo the (possibly edited) input.
+        const decision = allow
+          ? { behavior: 'allow', updatedInput: toolInput }
+          : { behavior: 'deny', message: 'The user denied this action from NexusLink.' };
+        if (!this.writeControl({ type: 'control_response', response: { subtype: 'success', request_id: requestId, response: decision } })) {
           emit(s, { kind: 'error', text: 'failed to send permission response' });
         }
       };
@@ -2562,7 +3379,7 @@ class ClaudeAdapter implements AgentAdapter {
       // Auto mode answers immediately, so a turn can never block on a phone that
       // is closed, backgrounded, or watching a different session. Actions that
       // would have required a tap are still announced, so the log stays honest.
-      if (getAgentApprovalMode(s.info.agent) === 'auto') {
+      if (sessionApprovalMode(s) === 'auto') {
         respond(true);
         if (!safety.safe) {
           emit(s, { kind: 'status', text: `Auto-approved: ${safety.reason || toolName}` });
@@ -2575,28 +3392,52 @@ class ClaudeAdapter implements AgentAdapter {
         return;
       }
 
+      // A sub-agent's request names it in `agent_id` (only when announced).
+      const agentId = this.agents.knownAgent(request.agent_id);
       emit(s, {
         kind: 'permission-request',
         refId: requestId,
         toolName,
-        toolInput: toolInputStr,
+        toolInput: JSON.stringify(toolInput, null, 2),
         text: safety.reason || `Allow ${toolName}?`,
+        ...(agentId ? { agentId } : {}),
       });
       s.pendingPermissions.set(requestId, respond);
       trackPermissionTimeout(s, requestId);
     }
   }
 
+  private writeControl(message: unknown): boolean {
+    try {
+      const stdin = this.proc?.stdin as unknown as { write(s: string): unknown; flush?: () => void } | undefined;
+      if (!stdin) return false;
+      stdin.write(JSON.stringify(message) + '\n');
+      stdin.flush?.();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   prompt(text: string, opts?: AdapterPromptOpts): void {
     this.sawResult = false;
     this.streamedText = false;
-    const nextKey = `${opts?.model ?? ''}|${opts?.mode ?? 'agent'}|${opts?.thinking ?? ''}`;
-    if (this.hasPrompted && !this.resumeId && (!this.proc || this.proc.exitCode !== null || this.proc.killed || this.spawnKey !== nextKey)) {
+    const nextKey = claudeSpawnKey(opts);
+    // A new model / mode / effort needs a new process, and killing it would
+    // stop background sub-agents. While any run, keep the process and say so.
+    const keep = this.procAlive() && this.spawnKey !== nextKey && this.agents.runningCount > 0;
+    if (!keep && this.hasPrompted && !this.resumeId && (!this.proc || this.proc.exitCode !== null || this.proc.killed || this.spawnKey !== nextKey)) {
       setBusy(this.session, false);
-      emit(this.session, { kind: 'error', text: 'Cannot continue Claude conversation: provider session ID was not recovered.' });
+      emit(this.session, { kind: 'error', text: 'Cannot continue this conversation: provider session ID was not recovered.' });
       return;
     }
-    const proc = this.ensureProc(opts);
+    if (keep) {
+      emit(this.session, {
+        kind: 'status',
+        text: 'Sub-agents are still running, so this message keeps the current model, mode and effort. The new choice applies once they finish.',
+      });
+    }
+    const proc = keep ? this.proc! : this.ensureProc(opts);
     this.hasPrompted = true;
     const line = JSON.stringify({
       type: 'user',
@@ -2608,12 +3449,14 @@ class ClaudeAdapter implements AgentAdapter {
       stdin.flush?.();
     } catch {
       setBusy(this.session, false);
-      emit(this.session, { kind: 'error', text: 'failed to reach the Claude Code process' });
+      emit(this.session, { kind: 'error', text: 'failed to reach the Claude process' });
     }
   }
 
   cancel(): void {
-    // Claude Code has no in-band cancel on stream-json stdin; drop the process.
+    // Claude Code has no in-band cancel on stream-json stdin; drop the process
+    // and with it every sub-agent (foreground and background).
+    this.endAgents('Stopped.');
     try {
       this.proc?.kill();
     } catch {
@@ -2623,6 +3466,9 @@ class ClaudeAdapter implements AgentAdapter {
   }
 
   close(): void {
+    // The session is being deleted: no closing events for it.
+    this.agents.reset();
+    this.session.info.runningAgents = 0;
     this.cancel();
   }
 }
@@ -2687,6 +3533,7 @@ class CursorAdapter implements AgentAdapter {
     this.idle.clear();
     const bin = resolveBin('cursor-agent') ?? 'cursor-agent';
     const argv = buildCursorArgv({
+      permissionMode: opts?.permissionMode,
       bin,
       cwd: this.session.info.cwd,
       chatId: this.chatId,
@@ -2916,6 +3763,7 @@ class OpenCodeAdapter implements AgentAdapter {
     this.streamedText = false;
     const bin = resolveBin('opencode') ?? 'opencode';
     const argv = buildOpencodeArgv({
+      permissionMode: opts?.permissionMode,
       bin,
       cwd: this.session.info.cwd,
       session: this.ocSession,
@@ -3008,7 +3856,7 @@ class AntigravityAdapter implements AgentAdapter {
   private streamGen = 0;
   private conversationId: string | null = null;
   private sawResult = false;
-  private pendingResult: AgentDelta | undefined;
+  private resultDelivered = false;
   private streamedText = false;
   private newProjectAttempted = false;
   private authUrlEmitted = false;
@@ -3049,7 +3897,7 @@ class AntigravityAdapter implements AgentAdapter {
     }
     this.cancel();
     this.sawResult = false;
-    this.pendingResult = undefined;
+    this.resultDelivered = false;
     this.streamedText = false;
     this.authUrlEmitted = false;
     this.authHintEmitted = false;
@@ -3059,6 +3907,7 @@ class AntigravityAdapter implements AgentAdapter {
     const newProject = !this.conversationId && !projectId && !this.newProjectAttempted;
     if (newProject) this.newProjectAttempted = true;
     const argv = buildAgyArgv({
+      permissionMode: opts?.permissionMode,
       bin,
       cwd,
       conversationId: this.conversationId,
@@ -3091,9 +3940,10 @@ class AntigravityAdapter implements AgentAdapter {
     this.proc = proc;
     proc.exited.then(async (code) => {
       if (this.streamGen !== gen) return;
-      await drained.catch(() => {});
+      // A grandchild that inherited the pipes must not keep the turn open.
+      await settleWithin(drained, 2000, undefined);
       if (this.streamGen !== gen) return;
-      const errText = await stderr.catch(() => '');
+      const errText = await settleWithin(stderr, 1000, stderrCombined);
       if (this.conversationId) {
         let changed = false;
         if (!this.session.info.hostChatId) {
@@ -3112,20 +3962,27 @@ class AntigravityAdapter implements AgentAdapter {
           broadcast({ type: 'agent-session-update', session: { ...this.session.info } });
         }
       }
-      if (!this.session.info.busy) return;
+      if (this.resultDelivered || !this.session.info.busy) return;
       setBusy(this.session, false);
       const isSuccess = (code === 0 && (this.sawResult || this.streamedText)) || (this.sawResult && code === 0);
+      if (code === 0 && !isSuccess) {
+        // Exited cleanly but never said anything: not a finished turn.
+        emit(this.session, {
+          kind: 'error',
+          text: 'Antigravity ended unexpectedly: it exited without a reply. Send your message again.',
+        });
+        return;
+      }
       const fail = finishCliTurn({
         sawResult: isSuccess,
         exitCode: code,
         stderr: isSuccess ? '' : errText,
       });
       if (!fail) {
-        emit(this.session, this.pendingResult ?? { kind: 'result', text: '' });
+        emit(this.session, { kind: 'result', text: '' });
         return;
       }
-      const cleaned = sanitizeCliError(fail.text ?? '', 'Antigravity');
-      emit(this.session, { kind: 'error', text: cleaned });
+      emit(this.session, { kind: 'error', text: turnEndError(fail.text ?? '', 'Antigravity') });
     }).catch(() => {});
   }
 
@@ -3162,8 +4019,15 @@ class AntigravityAdapter implements AgentAdapter {
     for (const ev of events) {
       if (ev.kind === 'text' || ev.kind === 'text-delta') this.streamedText = true;
       if (ev.kind === 'result') {
-        this.pendingResult = withoutDuplicateResult(ev, this.streamedText);
+        // Deliver now: the CLI may stay alive after its result, and the turn
+        // is over. Errors never reach here as results (the parser turns an
+        // ERROR status into an error event), so nothing needs the exit code.
         this.sawResult = true;
+        this.resultDelivered = true;
+        if (this.session.info.busy) {
+          setBusy(this.session, false);
+          emit(this.session, withoutDuplicateResult(ev, this.streamedText));
+        }
         continue;
       }
       if (ev.kind === 'error') {
@@ -3188,7 +4052,7 @@ class AntigravityAdapter implements AgentAdapter {
           }
         };
 
-        const approvalMode = getAgentApprovalMode(this.session.info.agent);
+        const approvalMode = sessionApprovalMode(this.session);
         if (approvalMode === 'auto') {
           respond(true);
           emit(this.session, { kind: 'status', text: `Auto-approved: ${ev.toolName || 'action'}` });
@@ -3203,7 +4067,7 @@ class AntigravityAdapter implements AgentAdapter {
 
       if (ev.kind === 'tool-start') {
         const safety = isSafeAgentToolCall(ev.toolName ?? 'tool', ev.toolInput, this.session.info.cwd);
-        const approvalMode = getAgentApprovalMode(this.session.info.agent);
+        const approvalMode = sessionApprovalMode(this.session);
         if (approvalMode === 'auto') {
           if (!safety.safe) {
             emit(this.session, { kind: 'status', text: `Auto-approved: ${safety.reason || ev.toolName}` });
@@ -3220,7 +4084,7 @@ class AntigravityAdapter implements AgentAdapter {
       }
 
       const out = ev.kind === 'error'
-        ? { kind: 'error' as const, text: sanitizeCliError(ev.text ?? '', 'Antigravity') }
+        ? { kind: 'error' as const, text: turnEndError(ev.text ?? '', 'Antigravity') }
         : ev;
       emit(this.session, withoutDuplicateResult(out, this.streamedText));
     }
@@ -3368,14 +4232,7 @@ class MockAdapter implements AgentAdapter {
         refId: 'mock-1',
       }));
     at(500, () => {
-      emit(s, {
-        kind: 'permission-request',
-        refId: 'mock-perm',
-        toolName: 'Shell',
-        toolInput: JSON.stringify({ command: 'echo demo' }, null, 2),
-        text: 'Allow the demo agent to run `echo demo`?',
-      });
-      s.pendingPermissions.set('mock-perm', (allow) => {
+      const respond = (allow: boolean) => {
         if (!allow) {
           emit(s, { kind: 'error', text: 'Permission denied' });
           setBusy(s, false);
@@ -3389,7 +4246,19 @@ class MockAdapter implements AgentAdapter {
         });
         setBusy(s, false);
         emit(s, { kind: 'result', text: '' });
-      });
+      };
+      if (sessionApprovalMode(s) === 'auto') respond(true);
+      else {
+        s.pendingPermissions.set('mock-perm', respond);
+        emit(s, {
+          kind: 'permission-request',
+          refId: 'mock-perm',
+          toolName: 'Shell',
+          toolInput: JSON.stringify({ command: 'echo demo' }, null, 2),
+          text: 'Allow the demo agent to run `echo demo`?',
+        });
+        trackPermissionTimeout(s, 'mock-perm');
+      }
     });
   }
 
@@ -3462,6 +4331,8 @@ export function parseCodexStreamEvent(msg: Record<string, unknown>): AgentDelta[
   return [];
 }
 
+/** An app-server kept for a continued Codex chat is closed after this much idle time. */
+const CODEX_IDLE_CLOSE_MS = 10 * 60 * 1000;
 class CodexAppServerAdapter implements AgentAdapter {
   private server?: CodexAppServer;
   private initialization?: Promise<void>;
@@ -3469,8 +4340,20 @@ class CodexAppServerAdapter implements AgentAdapter {
   private turnId?: string;
   private generation=0;
   private streamed = new Set<string>();
+  /** Collaboration mode sticks to the thread, so an Agent turn after a Plan turn must reset it. */
+  private planActive=false;
+  private idleTimer?: ReturnType<typeof setTimeout>;
   constructor(private session: AgentSession) {}
   bindHostChat(id:string) {this.threadId=id;}
+  /** Each continued chat holds a codex app-server; release it when the chat goes quiet. */
+  private scheduleIdleClose() {
+    clearTimeout(this.idleTimer);
+    this.idleTimer=setTimeout(()=>{
+      if(this.session.info.busy || this.session.pendingPermissions.size)return this.scheduleIdleClose();
+      this.server?.close();this.server=undefined;this.initialization=undefined;
+    },CODEX_IDLE_CLOSE_MS);
+    (this.idleTimer as {unref?:()=>void}).unref?.();
+  }
   private async ready() {
     if(!this.initialization) {
       const server=new CodexAppServer({
@@ -3489,6 +4372,7 @@ class CodexAppServerAdapter implements AgentAdapter {
   }
   prompt(text:string,options:AdapterPromptOpts={}) {
     const generation=++this.generation;
+    clearTimeout(this.idleTimer);
     this.streamed.clear();
     void this.start(text,options,generation).catch(()=>{
       if(generation!==this.generation)return;
@@ -3506,44 +4390,61 @@ class CodexAppServerAdapter implements AgentAdapter {
     saveAgentSessionsToDisk();broadcast({type:'agent-session-update',session:{...this.session.info}});
     const input:any[]=[{type:'text',text}];
     for(const path of options.imagePaths || []) input.push({type:'localImage',path});
-    const turn=await this.server!.request('turn/start',{threadId:this.threadId,input,...(options.model?{model:options.model}:{}),...(options.thinking?{effort:options.thinking==='extra-high'?'xhigh':options.thinking}:{})});
+    const effort=options.thinking?(options.thinking==='extra-high'?'xhigh':options.thinking):undefined;
+    const plan=options.mode==='plan';
+    const model=options.model || result.model;
+    if(plan && !model)throw new Error('Codex returned no model for Plan mode');
+    const collaborationMode=plan || this.planActive?{collaborationMode:{mode:plan?'plan':'default',settings:{model,reasoning_effort:effort ?? null,developer_instructions:null}}}:{};
+    const turn=await this.server!.request('turn/start',{threadId:this.threadId,input,...codexPermissionPolicy(this.session.info.permissionMode,this.session.info.cwd),...(options.model?{model:options.model}:{}),...(effort?{effort}:{}),...collaborationMode});
+    this.planActive=plan;
     if(generation!==this.generation){if(turn.turn?.id)await this.server?.request('turn/interrupt',{threadId:this.threadId,turnId:turn.turn.id});return;}
     if(this.session.info.busy)this.turnId=turn.turn?.id;
   }
   private notification(method:string,params:any) {
     if(params?.threadId && params.threadId!==this.threadId)return;
-    if(!this.session.info.busy)return;
-    if(method==='item/agentMessage/delta') {
+    // Late items after turn/completed (or a turn started by another client on this
+    // thread) are still part of the conversation; keep them instead of dropping.
+    if(method==='item/agentMessage/delta' || method==='item/plan/delta') {
       this.streamed.add(params.itemId);emit(this.session,{kind:'text-delta',text:params.delta,refId:params.itemId});
     } else if(method==='item/started' || method==='item/completed') {
       const item=params.item;
-      if(item?.type==='agentMessage' && method==='item/completed' && !this.streamed.has(item.id))emit(this.session,{kind:'text',text:item.text,refId:item.id});
+      if((item?.type==='agentMessage' || item?.type==='plan') && method==='item/completed' && !this.streamed.has(item.id))emit(this.session,{kind:'text',text:item.text,refId:item.id});
       else if(item?.type==='commandExecution' || item?.type==='fileChange')emit(this.session,{kind:method==='item/started'?'tool-start':'tool-end',toolName:item.type==='commandExecution'?'Command':'File changes',toolInput:item.command || JSON.stringify(item.changes),toolOutput:item.aggregatedOutput,refId:item.id});
     } else if(method==='turn/started') {this.turnId=params.turn?.id;}
     else if(method==='turn/completed') {
       const failed=params.turn?.status==='failed';
-      emit(this.session,{kind:failed?'error':'result',text:failed?'Codex reply failed. Check the app on the PC.':''});setBusy(this.session,false);this.turnId=undefined;
+      emit(this.session,{kind:failed?'error':'result',text:failed?'Codex reply failed. Check the app on the PC.':''});
+      if(this.session.info.busy)setBusy(this.session,false);
+      this.turnId=undefined;this.scheduleIdleClose();
     } else if(method==='error' && params.willRetry!==true) {
-      emit(this.session,{kind:'error',text:'Codex reported an error. Check sign-in and configuration on the PC.'});setBusy(this.session,false);
+      emit(this.session,{kind:'error',text:'Codex reported an error. Check sign-in and configuration on the PC.'});
+      if(this.session.info.busy)setBusy(this.session,false);
+      this.scheduleIdleClose();
     }
   }
   private request(id:string|number,method:string,params:any) {
     const ref=String(id);
     if(params?.threadId!==this.threadId || !this.session.info.busy) {this.server?.respond(id,{decision:'decline'});return;}
     if(!['item/commandExecution/requestApproval','item/fileChange/requestApproval'].includes(method)) {
-      if(method==='item/permissions/requestApproval')this.server?.respond(id,{permissions:{},scope:'turn'});else this.server?.reject(id);
+      if(method==='item/permissions/requestApproval')this.server?.respond(id,{permissions:{},scope:'turn'});
+      // Unanswered questions let a Plan turn carry on with its own assumptions.
+      else if(method==='item/tool/requestUserInput')this.server?.respond(id,{answers:{}});
+      else this.server?.reject(id);
       emit(this.session,{kind:'status',text:'Codex requested an interaction this phone does not support. Open the chat on the PC.'});return;
     }
-    if(getAgentApprovalMode('codex')==='auto'){this.server?.respond(id,{decision:'accept'});return;}
-    this.session.pendingPermissions.set(ref,allow=>this.server?.respond(id,{decision:allow?'accept':'decline'}));
+    if(sessionApprovalMode(this.session)==='auto'){this.server?.respond(id,{decision:'accept'});return;}
+    const server=this.server;
+    this.session.pendingPermissions.set(ref,allow=>server?.respond(id,{decision:allow?'accept':'decline'}));
     emit(this.session,{kind:'permission-request',refId:ref,toolName:method==='item/commandExecution/requestApproval'?'Command':'File changes',toolInput:JSON.stringify(params),text:params.reason || 'Codex needs your approval.'});
+    // Unanswered approvals are declined after the standard timeout instead of wedging the turn.
+    trackPermissionTimeout(this.session,ref);
   }
   permission(id:string,allow:boolean) {const callback=this.session.pendingPermissions.get(id);this.session.pendingPermissions.delete(id);callback?.(allow);}
   cancel() {
     ++this.generation;
     if(this.server && this.threadId && this.turnId)void this.server.request('turn/interrupt',{threadId:this.threadId,turnId:this.turnId}).catch(()=>{});
   }
-  close() {this.cancel();this.server?.close();this.server=undefined;this.initialization=undefined;}
+  close() {clearTimeout(this.idleTimer);this.cancel();this.server?.close();this.server=undefined;this.initialization=undefined;}
 }
 
 export function archiveAgentSession(id:string,archived:boolean) {

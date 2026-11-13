@@ -14,7 +14,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <meta name="theme-color" content="#0a0a0f" />
         <link rel="manifest" href="/manifest.json" />
       </head>
-      <body>
+      <body style={{ margin: 0 }}>
         <Suspense fallback={<Loading />}>{children}</Suspense>
       </body>
     </html>

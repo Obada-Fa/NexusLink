@@ -2,6 +2,7 @@ import type { AgentEvent, AgentImageAttachment } from './index';
 
 export type ContinuationSafety = 'ready' | 'busy' | 'unknown';
 export interface ChatSummary {
+  permissionMode?: 'ask' | 'full-access';
   id: string;
   hostId: string;
   source: string;
@@ -16,8 +17,60 @@ export interface ChatSummary {
   folderName: string;
   activityAt: number | null;
   archived: boolean;
+  taskState?: string;
+  activity?: string;
   execution: 'working' | 'needsReply' | 'idle' | 'unknown';
   capabilities: { read: boolean; continue: boolean; safety: ContinuationSafety; reason?: string };
+  /** Live view of what the agent is doing right now, for chats running anywhere on the PC. */
+  live?: ChatLive;
+  /** Set when a needs-you state was cleared: the owner marked it done, or it went stale. */
+  attentionCleared?: 'acknowledged' | 'stale';
+  /** Library id of the orchestrator session that started this one (a worker reports to it, not to the owner). */
+  parentId?: string;
+}
+export interface ChatSubagent {
+  /** What it was asked to do ("Port gesture engine to Dart"). */
+  name: string;
+  /** Agent type when known (Explore, general-purpose, …). */
+  kind?: string;
+  state: 'working' | 'waiting' | 'done';
+  /** Current step, or what it is waiting for. */
+  step?: string;
+  updatedAt?: number;
+}
+export interface ChatLive {
+  /** working: actively producing; waiting: blocked on the user (approval/question); done: finished its last turn; failed: last turn errored. */
+  state: 'working' | 'waiting' | 'done' | 'failed' | 'idle';
+  /** Human sentence for the current step, e.g. "Editing lib/main.dart", "Running: npm test", "Thinking". */
+  step?: string;
+  /** Raw tool name of the current step when known (Edit, Bash, shell, apply_patch…). */
+  tool?: string;
+  /** reading | editing | running-command | thinking | responding | searching | browsing | waiting */
+  activity?: string;
+  /** Start of the current run/turn (ms). */
+  turnStartedAt?: number;
+  /** Last time the agent wrote anything (ms). */
+  updatedAt?: number;
+  /** Plan/todo progress when the agent keeps one (TodoWrite, update_plan, task boundaries). */
+  todos?: { text: string; state: 'pending' | 'active' | 'done' }[];
+  /** Last assistant sentence, ≤ 280 chars. */
+  lastText?: string;
+  /** Why it is waiting, e.g. "Approve: rm -rf build" or the question text. */
+  waitingFor?: string;
+  /** What a `waiting` chat is blocked on. A `via` ending in `-heuristic` means it is a guess. */
+  waitKind?: 'approval' | 'question' | 'plan';
+  /**
+   * The turn ended and left the owner an optional follow-up ("Should I commit it?").
+   * Not a block: state stays done/idle and the chat does not need attention.
+   */
+  ask?: string;
+  /** Sub-agents this chat delegated to recently (newest first). */
+  subagents?: ChatSubagent[];
+  model?: string;
+  /** Turns/steps so far in this chat, when cheap to know. */
+  steps?: number;
+  /** Where the status came from: transcript tail, app metadata, process, nexuslink. */
+  via?: string;
 }
 export interface FolderSummary {
   id: string | null;
@@ -35,6 +88,8 @@ export interface SourceHealth {
   durationMs?: number;
 }
 export interface ChatQuery {
+  sort?: string;
+  monitorFilter?: 'all' | 'running' | 'attention' | 'recent';
   query?: string;
   source?: string;
   folderId?: string | null;
@@ -75,6 +130,7 @@ export interface ChatSend {
   requiredFolder?: string;
   expectedRevision?: number;
   operationId: string;
+  interrupt?: boolean;
 }
 export interface ChatDelivery {
   operationId: string;
@@ -90,4 +146,5 @@ export interface ChatRpc {
   'chat.subscribe': { params: { enabled: boolean }; result: { revision: number } };
   'chat.send': { params: ChatSend; result: ChatDelivery };
   'chat.sendStatus': { params: { operationId: string }; result: ChatDelivery | null };
+  'chat.setState': { params: { chatId: string; acknowledged?: boolean; hidden?: boolean }; result: { ok: boolean; chat?: ChatSummary; revision: number } };
 }

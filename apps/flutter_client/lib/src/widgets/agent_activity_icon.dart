@@ -108,7 +108,6 @@ class AgentMark extends StatelessWidget {
     final painter = switch (agentId) {
       'cursor' => _CursorLogoPainter(color),
       'antigravity' => _AntigravityLogoPainter(color),
-      'claude' => _ClaudeLogoPainter(color),
       'opencode' => _OpenCodeLogoPainter(color),
       _ => null,
     };
@@ -132,7 +131,7 @@ String agentSourceLabel(String agentId, [String? source]) {
   final given = source?.trim() ?? '';
   if (given.isNotEmpty) return given;
   return switch (agentId) {
-    'claude' => 'Claude Code',
+    'claude' => 'Claude',
     'cursor' => 'Cursor',
     'opencode' => 'OpenCode',
     'antigravity' => 'Antigravity',
@@ -239,45 +238,47 @@ class _AgentActivityIconState extends State<AgentActivityIcon>
       );
     }
 
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        final t = _controller.value * 2 * math.pi;
-        final scale = 1.0 + 0.14 * math.sin(t);
-        final angle = 0.12 * math.sin(t);
-        final colorT = (math.sin(t) + 1) / 2;
-        final color = Color.lerp(widget.color, Colors.white, colorT)!;
-        return SizedBox(
-          width: widget.size,
-          height: widget.size,
-          child: Stack(
-            clipBehavior: Clip.none,
-            alignment: Alignment.center,
-            children: [
-              Positioned.fill(
-                child: CustomPaint(
-                  painter: _OrbitPainter(
-                    progress: _controller.value,
-                    color: color,
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) {
+          final t = _controller.value * 2 * math.pi;
+          final scale = 1.0 + 0.14 * math.sin(t);
+          final angle = 0.12 * math.sin(t);
+          final colorT = (math.sin(t) + 1) / 2;
+          final color = Color.lerp(widget.color, Colors.white, colorT)!;
+          return SizedBox(
+            width: widget.size,
+            height: widget.size,
+            child: Stack(
+              clipBehavior: Clip.none,
+              alignment: Alignment.center,
+              children: [
+                Positioned.fill(
+                  child: CustomPaint(
+                    painter: _OrbitPainter(
+                      progress: _controller.value,
+                      color: color,
+                    ),
                   ),
                 ),
-              ),
-              Transform.rotate(
-                angle: angle,
-                child: Transform.scale(
-                  scale: scale,
-                  child: AgentMark(
-                    agentId: widget.agentId,
-                    icon: widget.icon,
-                    size: widget.size * 0.8,
-                    color: color,
+                Transform.rotate(
+                  angle: angle,
+                  child: Transform.scale(
+                    scale: scale,
+                    child: AgentMark(
+                      agentId: widget.agentId,
+                      icon: widget.icon,
+                      size: widget.size * 0.8,
+                      color: color,
+                    ),
                   ),
                 ),
-              ),
-            ],
-          ),
-        );
-      },
+              ],
+            ),
+          );
+        },
+      ),
     );
   }
 }
@@ -409,37 +410,6 @@ class _AntigravityLogoPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _AntigravityLogoPainter old) =>
       old.color != color;
-}
-
-/// Official Claude mark (Anthropic spark mark).
-class _ClaudeLogoPainter extends CustomPainter {
-  _ClaudeLogoPainter(this.color);
-
-  final Color color;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    canvas.scale(size.shortestSide / 24);
-    final path = Path()
-      ..moveTo(12.0, 2.0)
-      ..lineTo(14.4, 9.6)
-      ..lineTo(22.0, 12.0)
-      ..lineTo(14.4, 14.4)
-      ..lineTo(12.0, 22.0)
-      ..lineTo(9.6, 14.4)
-      ..lineTo(2.0, 12.0)
-      ..lineTo(9.6, 9.6)
-      ..close();
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = color
-        ..style = PaintingStyle.fill,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _ClaudeLogoPainter old) => old.color != color;
 }
 
 /// OpenCode mark (terminal chevron prompt).

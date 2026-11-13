@@ -54,17 +54,26 @@ const double longPressMaxMovePx = 10;
 /// Precision mode divides relative cursor deltas by this for fine control.
 const double precisionDivisor = 3;
 
-/// Minimum pinch-distance change (px) before a two-finger gesture reads as
-/// zoom.
-const double pinchMinDeltaPx = 6;
+/// Mouse mode: view px a two-finger gesture must spread/pinch (or travel)
+/// before it locks as a view zoom (or a scroll) for the rest of the gesture.
+const double twoFingerLockPx = 12;
 
-/// Screen-px -> zoom-scale factor per pinch step.
-const double pinchZoomScale = 0.005;
+/// Mouse mode tap slop in VIEW px. Host-px slop shrinks to ~2 finger px on a
+/// big desktop, which turns ordinary tap jitter into pointer moves.
+const double mouseTapSlopViewPx = 6;
 
 /// 'direct' (default): phone-like. Tap = click, one-finger pan = scroll,
-/// long-press = right click, long-press-then-move = drag, two-finger pan =
-/// scroll. 'mouse': canvas pan + floating cursor. 'trackpad': relative cursor.
-enum GestureMode { direct, trackpad, mouse }
+/// long-press = right click, long-press-then-move = drag, two fingers =
+/// zoom/pan the local view.
+/// 'mouse': RustDesk-style virtual trackpad. One finger moves a cursor
+/// (relative), tap = click at the cursor, tap-then-hold-and-move = drag,
+/// two-finger tap = right click, two fingers = scroll or zoom the view
+/// (locked per gesture).
+/// 'trackpad': legacy relative cursor (precision).
+/// 'view': nothing reaches the host; one finger pans, two fingers zoom/pan.
+enum GestureMode { direct, trackpad, mouse, view }
+
+enum _TwoFingerLock { none, transform, scroll }
 
 enum Axis { none, vertical, horizontal, free }
 
@@ -127,8 +136,8 @@ class TouchPoint {
 //
 // TS mapping: mouse-click/left -> Tap, mouse-click/right -> Context,
 // mouse-click/middle -> MiddleClick, mouse-dbl-click -> DoubleTap,
-// mouse-scroll -> Scroll, mouse-move -> MouseMove, drag-* -> Drag*,
-// zoom -> Zoom. Coordinates are in HOST pixel space.
+// mouse-scroll -> Scroll, mouse-move -> MouseMove, drag-* -> Drag*.
+// Coordinates are in HOST pixel space unless an event says otherwise.
 
 sealed class GestureEvent {
   const GestureEvent();
@@ -198,19 +207,42 @@ final class DragEndEvent extends GestureEvent {
   const DragEndEvent(this.x, this.y);
 }
 
-/// Pinch zoom step (TS `zoom`). [scale] is signed: positive = zoom in.
-final class ZoomEvent extends GestureEvent {
+/// Local view zoom/pan step (never reaches the host). VIEW px: [scale] is the
+/// ratio to the previous step, the focal point moved by ([dx], [dy]) to
+/// ([focalX], [focalY]).
+final class ViewTransformEvent extends GestureEvent {
   final double scale;
-  final double x;
-  final double y;
-  const ZoomEvent(this.scale, this.x, this.y);
-}
-
-/// Client-viewport pan in mouse mode (does not move the host pointer).
-final class CanvasPanEvent extends GestureEvent {
+  final double focalX;
+  final double focalY;
   final double dx;
   final double dy;
-  const CanvasPanEvent(this.dx, this.dy);
+  const ViewTransformEvent(
+    this.scale,
+    this.focalX,
+    this.focalY,
+    this.dx,
+    this.dy,
+  );
+}
+
+/// Mouse mode finger motion in VIEW px; the owner moves its virtual cursor.
+/// [dragging] is true between [DragStartEvent] and [DragEndEvent].
+final class PointerDeltaEvent extends GestureEvent {
+  final double dx;
+  final double dy;
+  final double timestampMs;
+  final bool dragging;
+  const PointerDeltaEvent(
+    this.dx,
+    this.dy,
+    this.timestampMs, {
+    this.dragging = false,
+  });
+}
+
+/// Two-finger tap outside mouse mode (where it is a right click instead).
+final class TwoFingerTapEvent extends GestureEvent {
+  const TwoFingerTapEvent();
 }
 
 /// Maps a view-space coordinate to host-space (see scale_to_host.dart).
@@ -265,6 +297,9 @@ class TouchClassifier {
   bool _dragStarted = false;
   int _maxTouches = 0;
 
+  /// Mouse mode: this touch began right after a tap, so moving drags.
+  bool _tapDragArmed = false;
+
   // Scroll accumulation (fractional host px carried between emits).
   double _scrollCarryX = 0;
   double _scrollCarryY = 0;
@@ -275,6 +310,12 @@ class TouchClassifier {
   // Two-finger state (view px, as in the TS which used clientX/clientY).
   ({double x, double y})? _prevScrollMid;
   double _prevPinchDist = 0;
+  ({double x, double y})? _twoStartMid;
+  double _twoStartDist = 0;
+  _TwoFingerLock _twoLock = _TwoFingerLock.none;
+
+  /// Largest spread change or midpoint travel (view px) this gesture.
+  double _twoMaxMove = 0;
 
   /// Effective mode: precision forces relative-cursor (trackpad) behaviour.
   GestureMode get _effectiveMode =>
@@ -294,6 +335,11 @@ class TouchClassifier {
     _lastView = null;
     _prevScrollMid = null;
     _prevPinchDist = 0;
+    _twoStartMid = null;
+    _twoStartDist = 0;
+    _twoLock = _TwoFingerLock.none;
+    _twoMaxMove = 0;
+    _tapDragArmed = false;
     _moveAccumDx = 0;
     _moveAccumDy = 0;
     _scrollCarryX = 0;
@@ -333,7 +379,13 @@ class TouchClassifier {
     _dragStarted = false;
     _velocity.reset();
     _state = GestureState.undecided;
-    _longPressArmed = true;
+    _longPressArmed = _effectiveMode != GestureMode.view;
+    // Mouse mode: only timing matters (the cursor, not the finger, is the
+    // target), so a second touch anywhere soon after a tap can drag.
+    _tapDragArmed =
+        _effectiveMode == GestureMode.mouse &&
+        _lastTapTime > 0 &&
+        timestampMs - _lastTapTime < doubleTapThresholdMs;
   }
 
   void onTouchStart(List<TouchPoint> touches, double timestampMs) {
@@ -355,6 +407,13 @@ class TouchClassifier {
       final dx = t0.x - t1.x;
       final dy = t0.y - t1.y;
       _prevPinchDist = math.sqrt(dx * dx + dy * dy);
+      _twoStartMid = _prevScrollMid;
+      _twoStartDist = _prevPinchDist;
+      _twoLock = switch (_effectiveMode) {
+        GestureMode.direct || GestureMode.view => _TwoFingerLock.transform,
+        GestureMode.trackpad => _TwoFingerLock.scroll,
+        GestureMode.mouse => _TwoFingerLock.none,
+      };
     }
   }
 
@@ -373,6 +432,19 @@ class TouchClassifier {
     evaluateLongPress(timestampMs);
 
     final host = _toHost(touch.x, touch.y);
+
+    // A finger left over from a two-finger gesture must not scroll or move
+    // the cursor (it reads as a ghost scroll after a pinch).
+    if (_maxTouches >= 2 && _effectiveMode != GestureMode.view) {
+      _lastPos = host;
+      _lastView = (x: touch.x, y: touch.y);
+      return;
+    }
+
+    if (_effectiveMode == GestureMode.mouse) {
+      _handleMouseMove(touch, host, timestampMs);
+      return;
+    }
 
     // Held-then-move => drag (long press already emitted its context click).
     if (_longPressFired) {
@@ -409,10 +481,10 @@ class TouchClassifier {
       if (_dist(host, start) > tapMaxMovePx) {
         _emitFingerScroll(viewDx, viewDy, host, timestampMs);
       }
-    } else if (_effectiveMode == GestureMode.mouse) {
-      if (_dist(host, start) > tapMaxMovePx) {
+    } else if (_effectiveMode == GestureMode.view) {
+      if (_state == GestureState.panning || _dist(host, start) > tapMaxMovePx) {
         _state = GestureState.panning;
-        _emit(CanvasPanEvent(viewDx, viewDy));
+        _emit(ViewTransformEvent(1, touch.x, touch.y, viewDx, viewDy));
       }
     } else {
       _state = GestureState.panning;
@@ -431,6 +503,42 @@ class TouchClassifier {
       }
     }
 
+    _lastPos = host;
+    _lastView = (x: touch.x, y: touch.y);
+  }
+
+  /// Mouse mode one-finger motion: relative cursor moves, or a drag when the
+  /// touch followed a tap (tap-then-hold) or a long press.
+  void _handleMouseMove(
+    TouchPoint touch,
+    ({double x, double y}) host,
+    double timestampMs,
+  ) {
+    final start = _startPos;
+    final lastView = _lastView;
+    if (start == null || lastView == null) return;
+    // Under the slop nothing moves yet, and _lastView stays at the touch
+    // origin so the first real delta includes the slop (no lost motion).
+    final slop = math.sqrt(math.pow(touch.x - lastView.x, 2) +
+        math.pow(touch.y - lastView.y, 2));
+    if (_state == GestureState.undecided &&
+        !_longPressFired &&
+        slop <= mouseTapSlopViewPx) {
+      return;
+    }
+    _longPressArmed = false;
+    if (!_dragStarted && (_tapDragArmed || _longPressFired)) {
+      _dragStarted = true;
+      _state = GestureState.dragging;
+      _emit(DragStartEvent(start.x, start.y));
+    } else if (!_dragStarted) {
+      _state = GestureState.panning;
+    }
+    final dx = touch.x - lastView.x;
+    final dy = touch.y - lastView.y;
+    if (dx != 0 || dy != 0) {
+      _emit(PointerDeltaEvent(dx, dy, timestampMs, dragging: _dragStarted));
+    }
     _lastPos = host;
     _lastView = (x: touch.x, y: touch.y);
   }
@@ -468,18 +576,34 @@ class TouchClassifier {
     final prevMid = _prevScrollMid;
     final panDx = prevMid != null ? midX - prevMid.x : 0.0;
     final panDy = prevMid != null ? midY - prevMid.y : 0.0;
-    final pinchDelta = pinchDist - _prevPinchDist;
 
     final host = _toHost(t0.x, t0.y);
 
-    // Pinch dominates over pan -> zoom; otherwise two-finger pan -> scroll.
-    // Trackpad/precision mode never zooms: two fingers always scroll, like a
-    // laptop trackpad (per-event zoom/scroll flapping reads as glitching).
-    if (_effectiveMode != GestureMode.trackpad &&
-        pinchDelta.abs() >= pinchMinDeltaPx &&
-        pinchDelta.abs() > math.sqrt(panDx * panDx + panDy * panDy)) {
+    // Mouse mode locks the whole gesture as zoom or scroll on whichever
+    // threshold it crosses first: per-event zoom/scroll flapping reads as
+    // glitching. Other modes are locked from the start.
+    final startMid = _twoStartMid ?? (x: midX, y: midY);
+    final tdx = midX - startMid.x;
+    final tdy = midY - startMid.y;
+    final travel = math.sqrt(tdx * tdx + tdy * tdy);
+    final spread = (pinchDist - _twoStartDist).abs();
+    _twoMaxMove = math.max(_twoMaxMove, math.max(travel, spread));
+    if (_twoLock == _TwoFingerLock.none) {
+      if (spread >= twoFingerLockPx) {
+        _twoLock = _TwoFingerLock.transform;
+      } else if (travel >= twoFingerLockPx) {
+        _twoLock = _TwoFingerLock.scroll;
+      } else {
+        // Undecided: keep the previous sample at the touch origin so the
+        // first locked step carries everything moved so far.
+        return;
+      }
+    }
+
+    if (_twoLock == _TwoFingerLock.transform) {
       _state = GestureState.pinching;
-      _emit(ZoomEvent(pinchDelta * pinchZoomScale, host.x, host.y));
+      final ratio = _prevPinchDist > 0 ? pinchDist / _prevPinchDist : 1.0;
+      _emit(ViewTransformEvent(ratio, midX, midY, panDx, panDy));
     } else {
       _state = GestureState.scrolling;
       final sdx = -panDx;
@@ -539,11 +663,16 @@ class TouchClassifier {
     final moved = start != null && _lastPos != null ? _dist(start, _lastPos!) : 0.0;
     final duration = timestampMs - _startTime;
 
+    // A two-finger tap never locked into a zoom or scroll.
     if (start != null &&
         isTap(duration, moved) &&
         _maxTouches == 2 &&
-        _effectiveMode == GestureMode.mouse) {
-      _emit(ContextEvent(start.x, start.y));
+        _twoMaxMove < twoFingerLockPx) {
+      if (_effectiveMode == GestureMode.mouse) {
+        _emit(ContextEvent(start.x, start.y));
+      } else if (_effectiveMode != GestureMode.trackpad) {
+        _emit(const TwoFingerTapEvent());
+      }
       _resetState();
       return;
     }

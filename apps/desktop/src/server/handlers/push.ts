@@ -290,31 +290,85 @@ async function sendFcmPush(
   return false;
 }
 
-async function sendNtfyPush(
-  tokenRecord: PushTokenRecord,
-  payload: { title: string; body: string; data?: Record<string, string> },
-): Promise<boolean> {
-  const url =
+type PushPayload = { title: string; body: string; data?: Record<string, string> };
+
+/** The topic URL a record publishes to (endpoint, URL token, or ntfy.sh/<token>). */
+export function ntfyTopicUrl(tokenRecord: Pick<PushTokenRecord, 'token' | 'endpoint'>): string {
+  return (
     tokenRecord.endpoint ??
     (tokenRecord.token.startsWith('http')
       ? tokenRecord.token
-      : `https://ntfy.sh/${encodeURIComponent(tokenRecord.token)}`);
+      : `https://ntfy.sh/${encodeURIComponent(tokenRecord.token)}`)
+  );
+}
 
-  try {
-    const res = await fetch(url, {
+/**
+ * RFC 2047 encoded-word for HTTP header values. fetch() rejects non-Latin-1
+ * header values outright (TypeError), which silently dropped every push whose
+ * title contained "…" or an emoji. ntfy decodes =?UTF-8?B?...?= headers.
+ */
+export function rfc2047(value: string): string {
+  if (/^[\x20-\x7e]*$/.test(value)) return value;
+  return `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`;
+}
+
+/**
+ * ntfy JSON publishing: POST {topic,title,message,...} to the server root.
+ * The body is UTF-8 JSON, so titles need no header encoding at all.
+ * Returns null when the URL has no topic segment to publish to.
+ */
+export function ntfyJsonRequest(topicUrl: string, payload: PushPayload): { url: string; init: RequestInit } | null {
+  let parsed: URL;
+  try { parsed = new URL(topicUrl); } catch { return null; }
+  const segments = parsed.pathname.split('/');
+  while (segments.length && !segments[segments.length - 1]) segments.pop();
+  const topic = decodeURIComponent(segments.pop() ?? '');
+  if (!topic) return null;
+  parsed.pathname = `${segments.join('/')}/`;
+  return {
+    url: parsed.toString(),
+    init: {
       method: 'POST',
-      headers: {
-        Title: payload.title,
-        Priority: 'high',
-        Tags: 'robot,nexuslink',
-      },
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic, title: payload.title, message: payload.body, priority: 4, tags: ['robot', 'nexuslink'] }),
+    },
+  };
+}
+
+/** Classic header publishing (fallback for servers/URLs that reject JSON publishing). */
+export function ntfyHeaderRequest(topicUrl: string, payload: PushPayload): { url: string; init: RequestInit } {
+  return {
+    url: topicUrl,
+    init: {
+      method: 'POST',
+      headers: { Title: rfc2047(payload.title), Priority: 'high', Tags: 'robot,nexuslink' },
       body: payload.body,
-    });
+    },
+  };
+}
+
+async function sendNtfyPush(tokenRecord: PushTokenRecord, payload: PushPayload, fetcher: typeof fetch = fetch): Promise<boolean> {
+  const url = ntfyTopicUrl(tokenRecord);
+  try {
+    const json = ntfyJsonRequest(url, payload);
+    if (json) {
+      const res = await fetcher(json.url, json.init);
+      if (res.ok) return true;
+      // Auth/rate-limit failures won't improve with the other format.
+      if (![400, 404, 405, 415].includes(res.status)) return false;
+    }
+    const plain = ntfyHeaderRequest(url, payload);
+    const res = await fetcher(plain.url, plain.init);
     return res.ok;
   } catch (err) {
-    console.error(`[push] ntfy push error for ${url}:`, err);
+    console.error(`[push] ntfy push error for ${url}:`, err instanceof Error ? err.message : err);
     return false;
   }
+}
+
+/** Test seam: publish one ntfy push through an injected fetch. */
+export function sendNtfyPushForTests(tokenRecord: PushTokenRecord, payload: PushPayload, fetcher: typeof fetch): Promise<boolean> {
+  return sendNtfyPush(tokenRecord, payload, fetcher);
 }
 
 async function sendWebhookPush(

@@ -1,0 +1,27 @@
+name: nexus_remote
+description: Nexus Remote phone UI and session (trackpad, keyboard, dictation) as a local package.
+publish_to: none
+version: 1.4.0+7
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  record: ^7.1.1
+  sqflite: ^2.4.2
+  path_provider: ^2.1.6
+  crypto: ^3.0.7
+  uuid: ^4.6.0
+  clock: ^1.1.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  path_provider_platform_interface: ^2.1.3
+  plugin_platform_interface: ^2.1.8
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

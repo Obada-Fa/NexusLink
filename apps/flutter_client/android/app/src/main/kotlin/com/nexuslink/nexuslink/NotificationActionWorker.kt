@@ -31,7 +31,7 @@ class NotificationActionWorker(context:Context,params:WorkerParameters):Worker(c
                 val manager=applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 manager.notify("action:$operation",9002,NotificationCompat.Builder(applicationContext,"task_attention")
                     .setSmallIcon(if(state=="accepted")android.R.drawable.stat_notify_sync else android.R.drawable.stat_notify_error)
-                    .setContentTitle("NexusLink action").setContentText(if(reason.isNullOrBlank())state.replaceFirstChar{it.uppercase()} else "$state: $reason")
+                    .setContentTitle("Nexus action").setContentText(if(reason.isNullOrBlank())state.replaceFirstChar{it.uppercase()} else "$state: $reason")
                     .setOnlyAlertOnce(true).setAutoCancel(true).build())
             }
             val deadline=row.created+30000

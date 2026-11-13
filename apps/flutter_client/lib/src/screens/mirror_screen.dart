@@ -3,9 +3,11 @@
 // manipulation touch via the ported GestureEngine (lib/src/gestures/).
 
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -19,6 +21,9 @@ import '../util/mjpeg_sink.dart';
 import '../widgets/mirror_frame_painter.dart';
 import '../widgets/not_connected_view.dart';
 import 'mirror_fit.dart';
+import 'mirror_webrtc.dart';
+import 'cursor_keyboard_policy.dart';
+import 'stream_keyboard.dart';
 
 /// What to show: a virtual app session (sessionAppId launches a new one,
 /// sessionId re-attaches), an existing window (windowId), an app to launch on
@@ -38,6 +43,10 @@ class MirrorTarget {
   /// Whether this target is a web browser (built-in or desktop-adopted).
   final bool isBrowser;
 
+  /// Start without forwarding touches to the PC (pinch/drag only zoom and
+  /// pan the picture). The chrome bar can switch control on.
+  final bool viewOnly;
+
   const MirrorTarget({
     this.windowId,
     this.appId,
@@ -46,9 +55,22 @@ class MirrorTarget {
     this.sessionAppId,
     this.sessionId,
     this.isBrowser = false,
+    this.viewOnly = false,
   });
 
+  /// The whole PC desktop (primary monitor), as `MirrorTarget()` requests.
+  const MirrorTarget.desktop({this.viewOnly = false})
+    : windowId = null,
+      appId = null,
+      wmClass = null,
+      title = 'Desktop',
+      sessionAppId = null,
+      sessionId = null,
+      isBrowser = false;
+
   bool get isVirtual => sessionAppId != null || sessionId != null;
+
+  bool get isDesktop => !isVirtual && windowId == null && appId == null;
 }
 
 enum MirrorPhase { launching, adopting, streaming, error }
@@ -63,7 +85,7 @@ class MirrorScreen extends ConsumerStatefulWidget {
 }
 
 class _MirrorScreenState extends ConsumerState<MirrorScreen>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   MirrorPhase _phase = MirrorPhase.launching;
   String _errorMsg = '';
   final _decoded = ValueNotifier<ui.Image?>(null);
@@ -74,12 +96,39 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   String? _windowId;
   int _frameCount = 0;
   int _fps = 0;
+  int _jpegBytes = 0;
+  double _jpegKbitPerSecond = 0;
+  MirrorRtcRates? _rtcRates;
+  bool _showStats = false;
+  String? _fallbackReason;
+  double? _tapStartedMs;
+  double? _tapFrameMs;
+  int _tapSequence = 0;
   double _lastDecodeMs = 0;
   bool _keyboardOpen = false;
   bool _mouseMode = false;
+
+  /// Full desktop only: touches pan/zoom the picture but never reach the PC.
+  late bool _viewOnly = widget.target.viewOnly;
+
+  /// Full desktop only: user asked for landscape to see the 16:9 desktop larger.
+  bool _landscape = false;
   bool _chromeVisible = true;
-  Offset _canvasPan = Offset.zero;
-  double _canvasScale = 1;
+
+  /// Local pinch-zoom/pan of the picture (all modes; never reaches the PC).
+  final _zoom = ViewZoom();
+
+  /// Bumps when [_zoom] changes so only the transformed picture rebuilds.
+  final _viewTick = ValueNotifier<int>(0);
+
+  /// Mouse mode pointer, owned by the phone (region-local host px).
+  final _cursor = VirtualCursor();
+  bool _cursorPlaced = false;
+
+  /// Last PC pointer position reported by input.cursorHint (region-local).
+  Offset? _hintCursor;
+  double _lastTwoFingerTapMs = -1;
+  bool _sharpRequested = false;
   Offset? _cursorHost;
   Size _viewSize = Size.zero;
   int? _queuedDragX;
@@ -90,19 +139,97 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   AppSessionInfo? _session;
   final List<void Function()> _unsubs = [];
 
-  // WebRTC upgrade path: H.264/Opus from the host's GStreamer agent. MJPEG
-  // keeps streaming until the RTC track renders, then it is stopped.
-  String? _webrtcId;
-  RTCPeerConnection? _pc;
-  RTCVideoRenderer? _renderer;
-  bool _rtcLive = false;
+  MirrorWebrtc? _rtc;
+  bool get _rtcLive => _rtc?.live ?? false;
+  final _rtcRetryPolicy = MirrorRetryPolicy();
+  Timer? _rtcRetry;
 
-  final _kbController = TextEditingController();
+  final _kbController = TextEditingController.fromValue(_kbEmpty);
+  static const _kbEmpty = TextEditingValue(
+    text: imeSentinel,
+    selection: TextSelection.collapsed(offset: imeSentinel.length),
+  );
+
+  /// The IME text the PC has already received.
+  String _kbSent = imeSentinel;
+  final Set<String> _kbModifiers = {};
+  bool _kbTrayOpen = false;
+
+  double get _kbBarHeight => streamKeyBarHeight * (_kbTrayOpen ? 2 : 1);
   final _kbFocus = FocusNode();
   StreamSubscription<MirrorFrame>? _frameSub;
   Timer? _fpsTimer;
   Timer? _chromeHideTimer;
   bool _started = false;
+  Timer? _cursorTimer;
+  bool _cursorPending = false;
+  final _cursorKeyboard = CursorKeyboardPolicy();
+
+  bool get _canPollCursor =>
+      mounted &&
+      WidgetsBinding.instance.lifecycleState != AppLifecycleState.paused &&
+      WidgetsBinding.instance.lifecycleState != AppLifecycleState.inactive &&
+      WidgetsBinding.instance.lifecycleState != AppLifecycleState.hidden &&
+      TickerMode.valuesOf(context).enabled &&
+      (ModalRoute.of(context)?.isCurrent ?? true) &&
+      _phase == MirrorPhase.streaming;
+
+  Future<void> _pollCursor() async {
+    final client = _captureClient;
+    if (!_canPollCursor ||
+        _cursorPending ||
+        client == null ||
+        !client.supports('input.cursor.v1')) {
+      return;
+    }
+    _cursorPending = true;
+    try {
+      final hint = await client.requestMap(
+        'input.cursorHint',
+        _sid({if (_windowId != null) 'windowId': _windowId}),
+        const Duration(seconds: 2),
+      );
+      if (!_canPollCursor) return;
+      final r = _region;
+      final x = hint['x'];
+      final y = hint['y'];
+      final inside =
+          r != null &&
+          x is num &&
+          y is num &&
+          x >= r.x &&
+          x < r.x + r.width &&
+          y >= r.y &&
+          y < r.y + r.height;
+      if (inside) {
+        _hintCursor = Offset(x.toDouble() - r.x, y.toDouble() - r.y);
+        if (_keyboardOpen) _viewTick.value++;
+      }
+      if (_cursorKeyboard.observe(
+        active: hint['textCursor'] == true && inside,
+        focus: hint['focus'] as String?,
+      )) {
+        _showKeyboard();
+      }
+    } catch (_) {
+      // A missed hint must never interrupt the stream or manual keyboard.
+    } finally {
+      _cursorPending = false;
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _pollCursor();
+  }
+
+  void _cursorTapped() {
+    _cursorKeyboard.rearm();
+    // Give the host time to apply the click before inspecting its cursor.
+    Future.delayed(const Duration(milliseconds: 250), () {
+      if (mounted) _pollCursor();
+    });
+  }
 
   // Gesture engine + a single monotonic clock shared by touch events and the
   // inertia ticker (they must agree on "now" or velocity math is wrong).
@@ -111,6 +238,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   final _clock = Stopwatch();
   final _activePointers = <int, Offset>{};
 
+  RpcClient? _captureClient;
   RpcClient? get _client => ref.read(activeClientProvider);
 
   double get _nowMs => _clock.elapsedMicroseconds / 1000.0;
@@ -127,8 +255,15 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   @override
   void initState() {
     super.initState();
+    _kbController.addListener(_pinKbCaret);
+    WidgetsBinding.instance.addObserver(this);
+    _cursorTimer = Timer.periodic(
+      const Duration(milliseconds: 750),
+      (_) => _pollCursor(),
+    );
     _clock.start();
     _engine = GestureEngine(onGesture: _onGesture);
+    _engine.setMode(_gestureMode);
     _ticker = createTicker((_) {
       // Drive long-press evaluation + inertia on a shared clock. Keep ticking
       // while streaming so a pending long-press fires even without new frames.
@@ -140,14 +275,14 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   }
 
   Future<void> _start() async {
-    if (_started) return;
+    if (!mounted || _started) return;
     _started = true;
     final client = _client;
+    _captureClient = client;
     if (client == null) {
       setState(() {
         _phase = MirrorPhase.error;
         _errorMsg = 'Not connected to the PC.';
-        _chromeVisible = true;
       });
       return;
     }
@@ -193,7 +328,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           if (windowId != null) break;
         }
         if (windowId == null) {
-          throw 'The app started but no window appeared. Go back and tap it under "Open on your PC".';
+          throw 'The app started but its window hasn’t appeared yet. Go back and open it from Running windows on the PC tab.';
         }
       }
       if (!mounted) return;
@@ -211,46 +346,15 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         params['windowId'] = windowId;
       }
 
-      final cap = await client.requestMap('screen.startCapture', params);
-      _streamId = cap['streamId'] as String?;
-      _streamKey = (cap['streamKey'] as num?)?.toInt() ?? -1;
-      if (cap['region'] != null) {
-        _setRegion(
-          CaptureRegion.fromJson(cap['region'] as Map<String, dynamic>),
-        );
-      }
-
-      _attachMjpeg(client);
-      _unsubs.add(
-        client.subscribe('stream-region', (msg) {
-          if (msg['streamId'] != _streamId) return;
-          final r = msg['region'];
-          if (r is Map<String, dynamic> && mounted) {
-            _setRegion(CaptureRegion.fromJson(r));
-          }
-        }),
-      );
-      _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (mounted) setState(() => _fps = _frameCount);
-        final sid = _streamId;
-        if (sid != null && !_rtcLive) {
-          _client?.notify('screen.reportStats', {
-            'streamId': sid,
-            'fps': _frameCount,
-            'frameAgeMs': _lastDecodeMs.round(),
-          });
-        }
-        _frameCount = 0;
-      });
-
-      if (mounted) setState(() => _phase = MirrorPhase.streaming);
+      if (!await _beginCapture(client, params)) return;
+      setState(() => _phase = MirrorPhase.streaming);
       _scheduleHideChrome();
+      _tryWebrtc(client);
     } catch (e) {
       if (mounted) {
         setState(() {
           _phase = MirrorPhase.error;
           _errorMsg = friendlyLaunchError(e);
-          _chromeVisible = true;
         });
       }
     }
@@ -309,11 +413,13 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     // and don't leave the engine on its 1920×1080 default.
     _setRegion(CaptureRegion(0, 0, session.width, session.height));
 
-    await _beginCapture(client, {
+    if (!await _beginCapture(client, {
       'quality': 'medium',
       'fps': 24,
       'sessionId': session.sessionId,
-    });
+    })) {
+      return;
+    }
     _unsubs.add(
       client.subscribe('app-session-update', (msg) {
         final s = msg['session'];
@@ -323,16 +429,13 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           setState(() {
             _phase = MirrorPhase.error;
             _errorMsg = 'The app has exited.';
-            _chromeVisible = true;
           });
         }
       }),
     );
     if (mounted) setState(() => _phase = MirrorPhase.streaming);
     _scheduleHideChrome();
-    if (shouldUpgradeWebrtc(isVirtual: true, sessionId: session.sessionId)) {
-      unawaited(_tryWebrtc(client, session.sessionId));
-    }
+    _tryWebrtc(client);
   }
 
   Future<void> _waitForSessionReady(
@@ -348,12 +451,17 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     }
   }
 
-  Future<void> _beginCapture(
+  Future<bool> _beginCapture(
     RpcClient client,
     Map<String, dynamic> params,
   ) async {
     final cap = await client.requestMap('screen.startCapture', params);
-    _streamId = cap['streamId'] as String?;
+    final id = cap['streamId'] as String?;
+    if (!mounted) {
+      if (id != null) client.notify('screen.stopCapture', {'streamId': id});
+      return false;
+    }
+    _streamId = id;
     _streamKey = (cap['streamKey'] as num?)?.toInt() ?? -1;
     if (cap['region'] != null) {
       _setRegion(CaptureRegion.fromJson(cap['region'] as Map<String, dynamic>));
@@ -368,25 +476,46 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         }
       }),
     );
+    var sampledAt = _nowMs;
     _fpsTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() => _fps = _frameCount);
-      final sid = _streamId;
-      if (sid != null && !_rtcLive) {
-        _client?.notify('screen.reportStats', {
-          'streamId': sid,
-          'fps': _frameCount,
-          'frameAgeMs': _lastDecodeMs.round(),
+      final now = _nowMs;
+      final elapsed = now - sampledAt;
+      sampledAt = now;
+      if (mounted && !_rtcLive) {
+        setState(() {
+          _fps = _frameCount;
+          _jpegKbitPerSecond = elapsed > 0 ? _jpegBytes * 8 / elapsed : 0;
         });
+        if (id != null) {
+          client.notify('screen.reportStats', {
+            'streamId': id,
+            'fps': _frameCount,
+            'frameAgeMs': _lastDecodeMs.round(),
+          });
+        }
       }
       _frameCount = 0;
+      _jpegBytes = 0;
     });
+    return true;
   }
 
   void _attachMjpeg(RpcClient client) {
     _sink?.dispose();
     _sink = MirrorFrameSink(
       onDecodeAge: (ms) => _lastDecodeMs = ms.toDouble(),
-      onDisplayed: () => _frameCount++,
+      onDisplayed: () {
+        if (!mounted || _rtcLive) return;
+        _frameCount++;
+        final started = _tapStartedMs;
+        if (started != null) {
+          _tapStartedMs = null;
+          final elapsed = _nowMs - started;
+          if (_showStats && elapsed <= 2000) {
+            setState(() => _tapFrameMs = elapsed);
+          }
+        }
+      },
       onImage: (img) {
         if (!mounted || _rtcLive) {
           img.dispose();
@@ -401,6 +530,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     _frameSub?.cancel();
     _frameSub = client.frames.listen((f) {
       if (_rtcLive || f.streamKey != _streamKey) return;
+      _jpegBytes += f.jpeg.length + frameHeaderBytes;
       _sink?.pushJpeg(f.jpeg);
     });
   }
@@ -408,117 +538,95 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   void _syncDecodeWidth() {
     if (!mounted) return;
     final dpr = MediaQuery.maybeOf(context)?.devicePixelRatio ?? 1;
-    final w = _viewSize.width * dpr;
+    // Decode at the zoomed size (capped at the source) so zooming in shows
+    // real detail instead of an upscaled phone-width frame.
+    var w = _viewSize.width * dpr * _zoom.scale;
+    final src = _region?.width;
+    if (src != null && src > 0) {
+      w = math.min(w, math.max(src.toDouble(), _viewSize.width * dpr));
+    }
     if (w >= 32) _sink?.targetWidth = w.round();
   }
 
-  void _stopMjpeg() {
-    _frameSub?.cancel();
-    _frameSub = null;
-    _sink?.dispose();
-    _sink = null;
-    final old = _decoded.value;
-    _decoded.value = null;
-    old?.dispose();
-    final id = _streamId;
-    _streamId = null;
-    if (id != null) _client?.notify('screen.stopCapture', {'streamId': id});
+  void _tryWebrtc(RpcClient client) {
+    final streamId = _streamId;
+    if (streamId == null || !client.supports('screen.h264.v1')) return;
+    _rtcRetry?.cancel();
+    _rtcRetry = null;
+    late final MirrorWebrtc attempt;
+    attempt = MirrorWebrtc(
+      client: client,
+      streamId: streamId,
+      sessionId: _session?.sessionId,
+      onChanged: () {
+        if (!mounted) return;
+        setState(() {
+          if (_rtcLive) {
+            _tapFrameMs = null;
+            _tapStartedMs = null;
+          }
+        });
+      },
+      onRates: (rates) {
+        if (mounted && _showStats) {
+          setState(() => _rtcRates = rates);
+        } else {
+          _rtcRates = rates;
+        }
+      },
+      onFallback: (reason, code) {
+        if (!mounted) return;
+        setState(() {
+          _rtc = null;
+          _rtcRates = null;
+          _tapFrameMs = null;
+          _fallbackReason = reason;
+          if (code == 'capture-ended') {
+            _phase = MirrorPhase.error;
+            _errorMsg = reason;
+          }
+        });
+        _sharpRequested = false;
+        _maybeRequestSharp();
+        final delay = _rtcRetryPolicy.afterFallback(code, attempt.livedFor);
+        if (delay == Duration.zero) {
+          _tryWebrtc(client);
+        } else if (delay != null) {
+          _rtcRetry = Timer(delay, () {
+            if (mounted &&
+                _rtc == null &&
+                _streamId == streamId &&
+                _phase == MirrorPhase.streaming) {
+              _tryWebrtc(client);
+            }
+          });
+        }
+      },
+    );
+    _rtc = attempt;
+    _fallbackReason = null;
+    attempt.zoom(_zoom.scale > 1.3);
+    unawaited(attempt.start());
   }
 
-  /// Best-effort WebRTC upgrade for virtual sessions only. Failures leave MJPEG.
-  Future<void> _tryWebrtc(RpcClient client, String? sessionId) async {
-    if (!shouldUpgradeWebrtc(
-      isVirtual: widget.target.isVirtual,
-      sessionId: sessionId,
-    )) {
+  void _sampleTap() {
+    if (!_showStats) return;
+    final rtc = _rtc;
+    final sequence = ++_tapSequence;
+    if (rtc == null || !rtc.live) {
+      _tapStartedMs = _nowMs;
       return;
     }
-    try {
-      final res = await client.requestMap('webrtc.start', {
-        'sessionId': ?sessionId,
-        'fps': 24,
-      });
-      if (res['available'] != true || res['webrtcId'] is! String) return;
-      _webrtcId = res['webrtcId'] as String;
-
-      final renderer = RTCVideoRenderer();
-      await renderer.initialize();
-      if (!mounted) {
-        renderer.dispose();
-        return;
-      }
-      _renderer = renderer;
-
-      final pc = await createPeerConnection({
-        'sdpSemantics': 'unified-plan',
-        'iceServers': [
-          {
-            'urls': ['stun:stun.l.google.com:19302'],
-          },
-        ],
-      });
-      _pc = pc;
-      pc.onTrack = (event) {
-        if (event.streams.isEmpty) return;
-        renderer.srcObject = event.streams[0];
-        if (!mounted) return;
-        setState(() => _rtcLive = true);
-        _stopMjpeg();
-      };
-      pc.onIceCandidate = (c) {
-        if (c.candidate == null || _webrtcId == null) return;
-        client.notify('webrtc.signal', {
-          'webrtcId': _webrtcId,
-          'data': {
-            'kind': 'ice',
-            'candidate': c.candidate,
-            'sdpMLineIndex': c.sdpMLineIndex ?? 0,
-          },
-        });
-      };
-
-      _unsubs.add(
-        client.subscribe('webrtc-signal', (msg) {
-          if (msg['webrtcId'] != _webrtcId) return;
-          final data = msg['data'];
-          if (data is! Map) return;
-          unawaited(_onWebrtcSignal(Map<String, dynamic>.from(data)));
-        }),
-      );
-    } catch (_) {
-      // Native WebRTC isn't available on this platform; MJPEG stays up.
-    }
-  }
-
-  Future<void> _onWebrtcSignal(Map<String, dynamic> data) async {
-    final pc = _pc;
-    final client = _client;
-    final webrtcId = _webrtcId;
-    if (pc == null || client == null || webrtcId == null) return;
-    try {
-      final kind = data['kind'];
-      if (kind == 'offer' && data['sdp'] is String) {
-        await pc.setRemoteDescription(
-          RTCSessionDescription(data['sdp'] as String, 'offer'),
-        );
-        final answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        client.notify('webrtc.signal', {
-          'webrtcId': webrtcId,
-          'data': {'kind': 'answer', 'sdp': answer.sdp},
-        });
-      } else if (kind == 'ice' && data['candidate'] is String) {
-        await pc.addCandidate(
-          RTCIceCandidate(
-            data['candidate'] as String,
-            '',
-            (data['sdpMLineIndex'] as num?)?.toInt() ?? 0,
-          ),
-        );
-      }
-    } catch (_) {
-      // Drop a bad candidate; the next one may still connect.
-    }
+    unawaited(
+      rtc.estimateTapToFrame().then((delay) {
+        if (mounted &&
+            _showStats &&
+            identical(_rtc, rtc) &&
+            sequence == _tapSequence) {
+          setState(() => _tapFrameMs = delay);
+        }
+      }),
+    );
   }
 
   Map<String, dynamic> _sid([Map<String, dynamic>? extra]) {
@@ -537,6 +645,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _cursorTimer?.cancel();
     _ticker.dispose();
     _frameSub?.cancel();
     _fpsTimer?.cancel();
@@ -547,26 +657,26 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     leftover?.dispose();
     _decoded.dispose();
     _pointerView.dispose();
+    _viewTick.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    if (_landscape) SystemChrome.setPreferredOrientations(const []);
     for (final u in _unsubs) {
       u();
     }
     _unsubs.clear();
     _kbController.dispose();
     _kbFocus.dispose();
-    final client = _client;
+    // Dispose cannot read Riverpod; release resources on their owning client.
+    final client = _captureClient;
     final id = _streamId;
     final win = _windowId;
-    final webrtcId = _webrtcId;
     if (client != null) {
       if (id != null) client.notify('screen.stopCapture', {'streamId': id});
       if (win != null) client.notify('window.release', {'windowId': win});
-      if (webrtcId != null)
-        client.notify('webrtc.stop', {'webrtcId': webrtcId});
     }
+    _rtcRetry?.cancel();
+    _rtc?.dispose();
     // Home keeps the virtual session alive (like backgrounding a phone app).
-    unawaited(_pc?.close() ?? Future.value());
-    _renderer?.dispose();
     super.dispose();
   }
 
@@ -584,6 +694,28 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   void _onGesture(GestureEvent e) {
     final client = _client;
     if (client == null) return;
+    // Local-only gestures: zooming/panning the picture never reaches the PC.
+    switch (e) {
+      case ViewTransformEvent():
+        _applyViewStep(e);
+        return;
+      case TwoFingerTapEvent():
+        final now = _nowMs;
+        if (_lastTwoFingerTapMs >= 0 && now - _lastTwoFingerTapMs < 400) {
+          _lastTwoFingerTapMs = -1;
+          _resetZoom();
+        } else {
+          _lastTwoFingerTapMs = now;
+        }
+        return;
+      default:
+        break;
+    }
+    if (_viewOnly) return;
+    if (_mouseMode) {
+      _onMouseGesture(e, client);
+      return;
+    }
     final ox = _region?.x ?? 0;
     final oy = _region?.y ?? 0;
     int hx(double x) => (x + ox).round();
@@ -591,26 +723,25 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
 
     switch (e) {
       case TapEvent():
+        _cursorTapped();
         _cursorHost = Offset(e.x, e.y);
         _syncPointerFromHost();
+        _sampleTap();
         client.notify(
           'input.mouseClick',
           _sid({'button': 'left', 'x': hx(e.x), 'y': hy(e.y)}),
         );
       case DoubleTapEvent():
+        // The first tap already clicked; one more click within the OS
+        // double-click time makes the double click (two here was a triple).
+        _cursorTapped();
         _cursorHost = Offset(e.x, e.y);
         _syncPointerFromHost();
-        final x = hx(e.x), y = hy(e.y);
+        _sampleTap();
         client.notify(
           'input.mouseClick',
-          _sid({'button': 'left', 'x': x, 'y': y}),
+          _sid({'button': 'left', 'x': hx(e.x), 'y': hy(e.y)}),
         );
-        Future.delayed(const Duration(milliseconds: 50), () {
-          client.notify(
-            'input.mouseClick',
-            _sid({'button': 'left', 'x': x, 'y': y}),
-          );
-        });
       case ContextEvent():
         HapticFeedback.mediumImpact();
         _cursorHost = Offset(e.x, e.y);
@@ -630,8 +761,8 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           _sid({
             'deltaX': e.deltaX,
             'deltaY': e.deltaY,
-            if (!_mouseMode) 'x': hx(e.x),
-            if (!_mouseMode) 'y': hy(e.y),
+            'x': hx(e.x),
+            'y': hy(e.y),
           }),
         );
       case MouseMoveEvent():
@@ -654,32 +785,187 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           'input.buttonUp',
           _sid({'button': 'left', 'x': hx(e.x), 'y': hy(e.y)}),
         );
-      case ZoomEvent():
-        if (_mouseMode) {
-          setState(() {
-            _canvasScale = (_canvasScale * (1 + e.scale)).clamp(1.0, 4.0);
-          });
-          _syncCanvasTransform();
-        } else {
-          client.notify(
-            'input.mouseScroll',
-            _sid({
-              'deltaX': 0,
-              'deltaY': (-e.scale * 160).round(),
-              'x': hx(e.x),
-              'y': hy(e.y),
-              'modifiers': ['ctrl'],
-            }),
-          );
-        }
-      case CanvasPanEvent():
-        setState(() => _canvasPan += Offset(e.dx, e.dy));
-        _syncCanvasTransform();
+      case PointerDeltaEvent() || ViewTransformEvent() || TwoFingerTapEvent():
+        break;
     }
   }
 
+  /// Mouse mode: every click lands where the phone-drawn pointer is, not
+  /// where the finger is.
+  void _onMouseGesture(GestureEvent e, RpcClient client) {
+    _ensureCursorPlaced();
+    final at = _sid({
+      'x': (_cursor.x + (_region?.x ?? 0)).round(),
+      'y': (_cursor.y + (_region?.y ?? 0)).round(),
+    });
+    void click(String button) {
+      _flushQueuedDrag();
+      if (button == 'left') _sampleTap();
+      client.notify('input.mouseClick', {...at, 'button': button});
+    }
+
+    switch (e) {
+      case PointerDeltaEvent():
+        _moveCursor(e);
+      case TapEvent() || DoubleTapEvent():
+        _cursorTapped();
+        click('left');
+      case ContextEvent():
+        HapticFeedback.mediumImpact();
+        click('right');
+      case MiddleClickEvent():
+        click('middle');
+      case ScrollEvent():
+        _flushQueuedDrag();
+        client.notify(
+          'input.mouseScroll',
+          _sid({'deltaX': e.deltaX, 'deltaY': e.deltaY}),
+        );
+      case DragStartEvent():
+        HapticFeedback.selectionClick();
+        _flushQueuedDrag();
+        client.notify('input.buttonDown', {...at, 'button': 'left'});
+      case DragEndEvent():
+        _flushQueuedDrag();
+        client.notify('input.buttonUp', {...at, 'button': 'left'});
+      case MouseMoveEvent() ||
+          DragMoveEvent() ||
+          ViewTransformEvent() ||
+          TwoFingerTapEvent():
+        break;
+    }
+  }
+
+  GestureMode get _gestureMode => _viewOnly
+      ? GestureMode.view
+      : _mouseMode
+      ? GestureMode.mouse
+      : GestureMode.direct;
+
+  ContentRect get _contentRect {
+    final r = _region;
+    return fittedContentRect(
+      _viewSize.width,
+      _viewSize.height,
+      (r?.width ?? 1).toDouble(),
+      (r?.height ?? 1).toDouble(),
+      _scaleFit,
+    );
+  }
+
+  /// Region-local host px → where it is drawn on screen right now.
+  Offset _hostToScreen(double x, double y) {
+    final r = _region;
+    if (r == null || _viewSize == Size.zero) return Offset.zero;
+    final m = hostToView(
+      x,
+      y,
+      _viewSize.width,
+      _viewSize.height,
+      r.width.toDouble(),
+      r.height.toDouble(),
+      _scaleFit,
+    );
+    final v = _zoom.toView(m.x, m.y);
+    return Offset(v.x, v.y);
+  }
+
+  void _ensureCursorPlaced() {
+    final r = _region;
+    if (_cursorPlaced || r == null) return;
+    final start =
+        _hintCursor ?? _cursorHost ?? Offset(r.width / 2, r.height / 2);
+    _cursor.placeAt(start.dx, start.dy);
+    _cursorHost = start;
+    _cursorPlaced = true;
+  }
+
+  void _moveCursor(PointerDeltaEvent e) {
+    final r = _region;
+    if (r == null || _viewSize == Size.zero) return;
+    final rect = _contentRect;
+    final hostPerView = r.width / math.max(1.0, rect.w * _zoom.scale);
+    _cursor.moveBy(
+      e.dx,
+      e.dy,
+      e.timestampMs,
+      hostPerView,
+      r.width.toDouble(),
+      r.height.toDouble(),
+    );
+    _cursorHost = Offset(_cursor.x, _cursor.y);
+    // While zoomed, the picture follows the pointer near the screen edges.
+    final v = _hostToScreen(_cursor.x, _cursor.y);
+    final px = _zoom.panX, py = _zoom.panY;
+    _zoom.follow(v.dx, v.dy, 56, rect, _viewSize.width, _viewSize.height);
+    if (px != _zoom.panX || py != _zoom.panY) _viewChanged();
+    _pointerView.value = _hostToScreen(_cursor.x, _cursor.y);
+    // Absolute moves: the PC pointer can never drift from the drawn one.
+    // Sent once per frame by the ticker (latest wins).
+    _queuedDragX = (_cursor.x + r.x).round();
+    _queuedDragY = (_cursor.y + r.y).round();
+  }
+
+  void _applyViewStep(ViewTransformEvent e) {
+    if (_viewSize == Size.zero) return;
+    final before = _zoom.scale;
+    _zoom.applyStep(
+      ratio: e.scale,
+      focalX: e.focalX,
+      focalY: e.focalY,
+      dx: e.dx,
+      dy: e.dy,
+      rect: _contentRect,
+      viewW: _viewSize.width,
+      viewH: _viewSize.height,
+    );
+    _viewChanged(scaleChanged: (before - _zoom.scale).abs() > 1e-4);
+  }
+
+  void _resetZoom() {
+    if (!_zoom.zoomed) return;
+    _zoom.reset();
+    _viewChanged(scaleChanged: true);
+  }
+
+  void _viewChanged({bool scaleChanged = false}) {
+    final wasZoomed = _zoomBadgeShown;
+    _zoomBadgeShown = _zoom.zoomed;
+    _viewTick.value++;
+    _syncCanvasTransform();
+    _syncPointerFromHost();
+    if (scaleChanged) {
+      _syncDecodeWidth();
+      _maybeRequestSharp();
+    }
+    if (wasZoomed != _zoomBadgeShown) setState(() {});
+  }
+
+  bool _zoomBadgeShown = false;
+
+  /// Zoomed in: ask the PC for native-resolution frames so text stays sharp.
+  /// The PC's own QoS may still step down again on a congested link.
+  void _maybeRequestSharp() {
+    _rtc?.zoom(_zoom.scale > 1.3);
+    if (_zoom.scale <= 1.3) {
+      _sharpRequested = false;
+      return;
+    }
+    final client = _captureClient;
+    final id = _streamId;
+    if (_rtcLive ||
+        _sharpRequested ||
+        client == null ||
+        id == null ||
+        !client.supports('screen.quality.v1')) {
+      return;
+    }
+    _sharpRequested = true;
+    client.notify('screen.setQuality', {'streamId': id, 'quality': 'full'});
+  }
+
   void _syncCanvasTransform() {
-    _engine.setCanvasTransform(_canvasPan.dx, _canvasPan.dy, _canvasScale);
+    _engine.setCanvasTransform(_zoom.panX, _zoom.panY, _zoom.scale);
   }
 
   void _flushQueuedDrag() {
@@ -696,22 +982,14 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
       .toList();
 
   void _syncPointerFromHost() {
-    final region = _region;
     final cursor = _cursorHost;
-    if (region == null || cursor == null || _viewSize == Size.zero) return;
-    final mapped = hostToView(
-      cursor.dx,
-      cursor.dy,
-      _viewSize.width,
-      _viewSize.height,
-      region.width.toDouble(),
-      region.height.toDouble(),
-      _scaleFit,
-    );
-    _pointerView.value = Offset(
-      mapped.x * _canvasScale + _canvasPan.dx,
-      mapped.y * _canvasScale + _canvasPan.dy,
-    );
+    if (_viewOnly ||
+        _region == null ||
+        cursor == null ||
+        _viewSize == Size.zero) {
+      return;
+    }
+    _pointerView.value = _hostToScreen(cursor.dx, cursor.dy);
   }
 
   void _showChrome() {
@@ -724,21 +1002,25 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     _chromeHideTimer?.cancel();
     if (_phase != MirrorPhase.streaming) return;
     _chromeHideTimer = Timer(const Duration(milliseconds: 1600), () {
-      if (!mounted || _keyboardOpen) return;
+      if (!mounted) return;
       setState(() => _chromeVisible = false);
     });
   }
 
   void _onPointerDown(PointerDownEvent e) {
     _activePointers[e.pointer] = e.localPosition;
-    _pointerView.value = e.localPosition;
+    // A touch can move the PC's caret, so old words are no longer editable.
+    if (_keyboardOpen) _resetKbField();
+    if (!_viewOnly && !_mouseMode) _pointerView.value = e.localPosition;
+    // Each mouse-mode stroke starts from rest (no carried-over speed).
+    if (_mouseMode && _activePointers.length == 1) _cursor.endStroke();
     if (!_chromeVisible && e.localPosition.dy < 28) _showChrome();
     _engine.onTouchStart(_touches, _nowMs);
   }
 
   void _onPointerMove(PointerMoveEvent e) {
     _activePointers[e.pointer] = e.localPosition;
-    _pointerView.value = e.localPosition;
+    if (!_viewOnly && !_mouseMode) _pointerView.value = e.localPosition;
     _engine.onTouchMove(_touches, _nowMs);
   }
 
@@ -768,13 +1050,38 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   void _sendKeyMods(String key, List<String> mods) =>
       _client?.notify('input.keyEvent', _sid({'key': key, 'modifiers': mods}));
 
-  void _toggleKeyboard() {
-    setState(() => _keyboardOpen = !_keyboardOpen);
-    if (_keyboardOpen) {
+  void _showKeyboard() {
+    setState(() {
+      _keyboardOpen = true;
+    });
+    _scheduleHideChrome();
+    // The TextField is conditional: wait until it exists before attaching IME.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_keyboardOpen) return;
       _kbFocus.requestFocus();
-      _chromeHideTimer?.cancel();
+      FocusManager.instance.applyFocusChangesIfNeeded();
+      // Also reopen after Android Back hides the IME but retains field focus.
+      SystemChannels.textInput.invokeMethod<void>('TextInput.show');
+    });
+  }
+
+  void _hideKeyboard() {
+    _kbFocus.unfocus();
+    SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+    _resetKbField();
+    setState(() {
+      _keyboardOpen = false;
+      _kbTrayOpen = false;
+      _kbModifiers.clear();
+    });
+    _scheduleHideChrome();
+  }
+
+  void _toggleKeyboard() {
+    if (_keyboardOpen && MediaQuery.viewInsetsOf(context).bottom > 0) {
+      _hideKeyboard();
     } else {
-      _scheduleHideChrome();
+      _showKeyboard();
     }
   }
 
@@ -786,24 +1093,124 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         'modifiers': ['ctrl'],
       }),
     );
-    setState(() => _keyboardOpen = true);
-    _kbFocus.requestFocus();
-    _chromeHideTimer?.cancel();
+    _showKeyboard();
   }
 
   void _onKbChanged(String value) {
-    if (value.isEmpty) return;
-    _client?.notify('input.typeText', _sid({'text': value}));
-    _kbController.clear();
+    final edit = diffImeText(_kbSent, value);
+    _kbSent = value;
+    for (var i = 0; i < edit.backspaces; i++) {
+      _sendKey('BackSpace');
+    }
+    if (edit.text.isNotEmpty) _sendKbText(edit.text);
+    // Keep typed words in the field so the IME can suggest from them.
+    if (!value.startsWith(imeSentinel) ||
+        (value.length > 256 && value.endsWith(' '))) {
+      _resetKbField();
+    }
+  }
+
+  void _sendKbText(String text) {
+    if (_kbModifiers.isEmpty) {
+      _client?.notify('input.typeText', _sid({'text': text}));
+      return;
+    }
+    final key = keysymForChar(text);
+    if (key == null) {
+      _client?.notify('input.typeText', _sid({'text': text}));
+    } else {
+      _sendKeyMods(key, _kbModifiers.toList());
+    }
+    _resetKbField();
+    setState(_kbModifiers.clear);
+  }
+
+  void _resetKbField() {
+    _kbSent = imeSentinel;
+    if (_kbController.value != _kbEmpty) _kbController.value = _kbEmpty;
+  }
+
+  /// Edits happen at the end of the field only, the one place the diff can map
+  /// to the PC, so caret moves from the IME's space bar snap back.
+  void _pinKbCaret() {
+    final value = _kbController.value;
+    final end = TextSelection.collapsed(offset: value.text.length);
+    if (value.text == _kbSent && value.selection != end) {
+      _kbController.selection = end;
+    }
+  }
+
+  void _onBarKey(String key) {
+    if (_kbModifiers.isEmpty) {
+      _sendKey(key);
+    } else {
+      _sendKeyMods(key, _kbModifiers.toList());
+      setState(_kbModifiers.clear);
+    }
+    _resetKbField();
+  }
+
+  void _toggleKbModifier(String name) {
+    // The Windows key also works alone: a second tap presses it (Start menu).
+    if (name == 'super' && _kbModifiers.contains(name)) {
+      _sendKey(name);
+      setState(() => _kbModifiers.remove(name));
+      return;
+    }
+    setState(() {
+      if (!_kbModifiers.remove(name)) _kbModifiers.add(name);
+    });
+  }
+
+  double get _kbCaretY {
+    final r = _region;
+    if (r == null) return 0;
+    final caret =
+        _hintCursor ?? _cursorHost ?? Offset(r.width / 2, r.height / 2);
+    return _hostToScreen(caret.dx, caret.dy).dy;
   }
 
   @override
   Widget build(BuildContext context) {
+    final imeHeight = MediaQuery.viewInsetsOf(context).bottom;
+    // Over the nav bar when Back has closed the IME but the bar is still up.
+    final barBottom = math.max(
+      imeHeight,
+      MediaQuery.viewPaddingOf(context).bottom,
+    );
+    final overlayBottom = _keyboardOpen ? barBottom + _kbBarHeight + 12 : 12.0;
     return Scaffold(
       backgroundColor: Colors.black,
+      // The keyboard floats over the stream, so the picture keeps its size.
+      resizeToAvoidBottomInset: false,
       body: Stack(
         children: [
-          Positioned.fill(child: _stage()),
+          Positioned.fill(
+            child: ValueListenableBuilder<int>(
+              valueListenable: _viewTick,
+              builder: (context, _, stage) {
+                final lift =
+                    _keyboardOpen &&
+                        imeHeight > 0 &&
+                        _phase == MirrorPhase.streaming
+                    ? keyboardLift(
+                        caretY: _kbCaretY,
+                        viewHeight: _viewSize.height,
+                        covered: imeHeight + _kbBarHeight,
+                      )
+                    : 0.0;
+                return TweenAnimationBuilder<double>(
+                  tween: Tween(end: lift),
+                  duration: const Duration(milliseconds: 160),
+                  curve: Curves.easeOut,
+                  builder: (context, y, stage) =>
+                      Transform.translate(offset: Offset(0, -y), child: stage),
+                  child: stage,
+                );
+              },
+              child: _stage(),
+            ),
+          ),
           if (_chromeVisible)
             Positioned(top: 0, left: 0, right: 0, child: _chromeBar()),
           if (!_chromeVisible && _phase == MirrorPhase.streaming)
@@ -820,8 +1227,44 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                 },
               ),
             ),
+          // While the IME is up the bar's own button closes it; this one is for
+          // reopening after Android Back.
+          if (!_viewOnly && imeHeight == 0)
+            Positioned(
+              right: 12,
+              bottom: overlayBottom,
+              child: SafeArea(
+                child: IconButton.filled(
+                  tooltip: 'Show or hide keyboard',
+                  onPressed: _toggleKeyboard,
+                  icon: const Icon(Icons.keyboard),
+                ),
+              ),
+            ),
+          if (_showStats && _phase == MirrorPhase.streaming)
+            Positioned(
+              top: _chromeVisible ? 50 : 30,
+              left: 8,
+              right: 8,
+              child: SafeArea(bottom: false, child: _statsOverlay()),
+            ),
+          if (_zoomBadgeShown && _phase == MirrorPhase.streaming)
+            Positioned(
+              left: 12,
+              bottom: overlayBottom,
+              child: SafeArea(child: _zoomBadge()),
+            ),
+          // Keyed: the button above disappears when the IME opens, and without a
+          // key that shift rebuilds the hidden field, which drops the IME
+          // connection (keyboard visible, typing goes nowhere).
           if (_keyboardOpen)
-            Positioned(left: 0, right: 0, bottom: 0, child: _keyboardBar()),
+            Positioned(
+              key: const ValueKey('stream-key-bar'),
+              left: 0,
+              right: 0,
+              bottom: barBottom,
+              child: _keyboardBar(),
+            ),
         ],
       ),
     );
@@ -871,34 +1314,15 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
               ),
               IconButton(
                 tooltip: _mouseMode
-                    ? 'Mouse mode: pan the picture, tap to click'
+                    ? 'Mouse mode: drag to move the pointer, tap to click'
                     : 'Touch mode: tap where you press, swipe to scroll',
                 icon: Icon(
                   _mouseMode ? Icons.mouse : Icons.touch_app,
                   color: _mouseMode ? const Color(0xFF2A6AFF) : Colors.white,
                 ),
-                onPressed: () {
-                  setState(() {
-                    _mouseMode = !_mouseMode;
-                    if (!_mouseMode) {
-                      _canvasPan = Offset.zero;
-                      _canvasScale = 1;
-                    }
-                  });
-                  _engine.setMode(
-                    _mouseMode ? GestureMode.mouse : GestureMode.direct,
-                  );
-                  _syncCanvasTransform();
-                  _scheduleHideChrome();
-                },
+                onPressed: _toggleMouseMode,
               ),
-              IconButton(
-                icon: Icon(
-                  Icons.keyboard,
-                  color: _keyboardOpen ? const Color(0xFF2A6AFF) : Colors.white,
-                ),
-                onPressed: _toggleKeyboard,
-              ),
+              _statsButton(),
               if (_session != null)
                 IconButton(
                   tooltip: 'Quit this app',
@@ -964,6 +1388,76 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     );
   }
 
+  /// Says the new input mode in words (and to TalkBack) when it changes.
+  void _announceMode() {
+    final label = mirrorInputModeLabel(viewOnly: _viewOnly, mouse: _mouseMode);
+    SemanticsService.sendAnnouncement(
+      View.of(context),
+      label,
+      Directionality.of(context),
+    );
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    messenger
+      ?..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          key: const ValueKey('mirror-mode-label'),
+          content: Text(label, textAlign: TextAlign.center),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(milliseconds: 1400),
+          width: 200,
+        ),
+      );
+  }
+
+  void _toggleViewOnly() {
+    setState(() {
+      _viewOnly = !_viewOnly;
+      if (_viewOnly && _keyboardOpen) {
+        _kbFocus.unfocus();
+        _keyboardOpen = false;
+        _kbTrayOpen = false;
+        _kbModifiers.clear();
+      }
+    });
+    _pointerView.value = null;
+    _engine.setMode(_gestureMode);
+    if (!_viewOnly && _mouseMode) {
+      _cursorPlaced = false;
+      _ensureCursorPlaced();
+      _syncPointerFromHost();
+    }
+    _announceMode();
+    _scheduleHideChrome();
+  }
+
+  void _toggleMouseMode() {
+    setState(() => _mouseMode = !_mouseMode);
+    _announceMode();
+    _pointerView.value = null;
+    _engine.setMode(_gestureMode);
+    if (_mouseMode) {
+      // Start from the PC's real pointer when we know it.
+      _cursorPlaced = false;
+      _ensureCursorPlaced();
+      _syncPointerFromHost();
+    }
+    _scheduleHideChrome();
+  }
+
+  void _toggleLandscape() {
+    setState(() => _landscape = !_landscape);
+    SystemChrome.setPreferredOrientations(
+      _landscape
+          ? const [
+              DeviceOrientation.landscapeLeft,
+              DeviceOrientation.landscapeRight,
+            ]
+          : const [],
+    );
+    _scheduleHideChrome();
+  }
+
   Widget _genericBar() {
     final title =
         widget.target.title ??
@@ -982,6 +1476,7 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           child: Row(
             children: [
               IconButton(
+                tooltip: 'Back',
                 icon: const Icon(Icons.home_outlined, color: Colors.white),
                 onPressed: () => Navigator.of(context).maybePop(),
               ),
@@ -1028,36 +1523,39 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                   ],
                 ),
               ),
-              IconButton(
-                tooltip: _mouseMode
-                    ? 'Mouse mode: pan the picture, tap to click'
-                    : 'Touch mode: tap where you press, swipe to scroll',
-                icon: Icon(
-                  _mouseMode ? Icons.mouse : Icons.touch_app,
-                  color: _mouseMode ? const Color(0xFF2A6AFF) : Colors.white,
+              if (widget.target.isDesktop) ...[
+                IconButton(
+                  tooltip: _viewOnly
+                      ? 'View only: tap to control the PC'
+                      : 'Controlling the PC: tap for view only',
+                  icon: Icon(
+                    _viewOnly
+                        ? Icons.visibility_outlined
+                        : Icons.back_hand_outlined,
+                    color: _viewOnly ? const Color(0xFF7AA2FF) : Colors.white,
+                  ),
+                  onPressed: _toggleViewOnly,
                 ),
-                onPressed: () {
-                  setState(() {
-                    _mouseMode = !_mouseMode;
-                    if (!_mouseMode) {
-                      _canvasPan = Offset.zero;
-                      _canvasScale = 1;
-                    }
-                  });
-                  _engine.setMode(
-                    _mouseMode ? GestureMode.mouse : GestureMode.direct,
-                  );
-                  _syncCanvasTransform();
-                  _scheduleHideChrome();
-                },
-              ),
-              IconButton(
-                icon: Icon(
-                  Icons.keyboard,
-                  color: _keyboardOpen ? const Color(0xFF2A6AFF) : Colors.white,
+                IconButton(
+                  tooltip: _landscape
+                      ? 'Back to portrait'
+                      : 'Rotate to landscape',
+                  icon: const Icon(Icons.screen_rotation, color: Colors.white),
+                  onPressed: _toggleLandscape,
                 ),
-                onPressed: _toggleKeyboard,
-              ),
+              ],
+              if (!_viewOnly)
+                IconButton(
+                  tooltip: _mouseMode
+                      ? 'Mouse mode: drag to move the pointer, tap to click'
+                      : 'Touch mode: tap where you press, swipe to scroll',
+                  icon: Icon(
+                    _mouseMode ? Icons.mouse : Icons.touch_app,
+                    color: _mouseMode ? const Color(0xFF2A6AFF) : Colors.white,
+                  ),
+                  onPressed: _toggleMouseMode,
+                ),
+              _statsButton(),
               if (_session != null)
                 IconButton(
                   tooltip: 'Quit this app',
@@ -1071,12 +1569,117 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
     );
   }
 
+  Widget _statsButton() => IconButton(
+    tooltip: _showStats ? 'Hide stream stats' : 'Show stream stats',
+    icon: Icon(
+      Icons.monitor_heart_outlined,
+      color: _showStats ? const Color(0xFF7AA2FF) : Colors.white,
+    ),
+    onPressed: () {
+      setState(() {
+        _showStats = !_showStats;
+        _tapStartedMs = null;
+        _tapFrameMs = null;
+        _tapSequence++;
+      });
+      _scheduleHideChrome();
+    },
+  );
+
+  Widget _statsOverlay() {
+    final rates = _rtcRates;
+    final fps = _rtcLive ? rates?.fps : _fps.toDouble();
+    final kbit = _rtcLive ? rates?.kbitPerSecond : _jpegKbitPerSecond;
+    final tap = _tapFrameMs;
+    final label = _rtcLive ? 'H.264' : 'MJPEG';
+    final fallback = _fallbackReason;
+    return IgnorePointer(
+      child: Align(
+        alignment: Alignment.topLeft,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: const Color(0xDD0A0A0F),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            child: Text(
+              '$label · ${kbit?.round() ?? '–'} kbit/s · ${fps?.toStringAsFixed(1) ?? '–'} fps'
+              '\nTap → frame (est.)  ${tap == null ? '–' : '${tap.round()} ms'}'
+              '${fallback == null ? '' : '\n$fallback'}',
+              style: const TextStyle(color: Colors.white, fontSize: 11),
+              maxLines: 4,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _videoLayers() {
+    final renderer = _rtc?.renderer;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (renderer != null)
+          ValueListenableBuilder<RTCVideoValue>(
+            valueListenable: renderer,
+            builder: (context, value, _) {
+              final width = value.rotation % 180 == 0
+                  ? value.width
+                  : value.height;
+              final height = value.rotation % 180 == 0
+                  ? value.height
+                  : value.width;
+              if (width <= 0 || height <= 0) return const SizedBox.shrink();
+              return FittedBox(
+                fit: _boxFit,
+                clipBehavior: Clip.hardEdge,
+                child: SizedBox(
+                  width: width,
+                  height: height,
+                  child: RTCVideoView(renderer),
+                ),
+              );
+            },
+          ),
+        if (!_rtcLive)
+          ColoredBox(
+            color: Colors.black,
+            child: ValueListenableBuilder<ui.Image?>(
+              valueListenable: _decoded,
+              builder: (context, img, _) {
+                if (img == null) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                return CustomPaint(
+                  painter: MirrorFramePainter(
+                    image: img,
+                    fit: _boxFit,
+                    repaint: _decoded,
+                  ),
+                  child: const SizedBox.expand(),
+                );
+              },
+            ),
+          ),
+      ],
+    );
+  }
+
   Widget _stage() {
     switch (_phase) {
       case MirrorPhase.streaming:
         return LayoutBuilder(
           builder: (context, constraints) {
-            _viewSize = Size(constraints.maxWidth, constraints.maxHeight);
+            final size = Size(constraints.maxWidth, constraints.maxHeight);
+            if (size != _viewSize) {
+              _viewSize = size;
+              // Rotation / keyboard: keep the zoomed picture on screen.
+              _zoom.clamp(_contentRect, size.width, size.height);
+              _syncCanvasTransform();
+            }
             _engine.setViewSize(constraints.maxWidth, constraints.maxHeight);
             _syncDecodeWidth();
             return Listener(
@@ -1091,34 +1694,15 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    Transform(
-                      transform: Matrix4.identity()
-                        ..translate(_canvasPan.dx, _canvasPan.dy)
-                        ..scale(_canvasScale),
-                      child: _rtcLive && _renderer != null
-                          ? RTCVideoView(
-                              _renderer!,
-                              objectFit: RTCVideoViewObjectFit
-                                  .RTCVideoViewObjectFitContain,
-                            )
-                          : ValueListenableBuilder<ui.Image?>(
-                              valueListenable: _decoded,
-                              builder: (context, img, _) {
-                                if (img == null) {
-                                  return const Center(
-                                    child: CircularProgressIndicator(),
-                                  );
-                                }
-                                return CustomPaint(
-                                  painter: MirrorFramePainter(
-                                    image: img,
-                                    fit: _boxFit,
-                                    repaint: _decoded,
-                                  ),
-                                  child: const SizedBox.expand(),
-                                );
-                              },
-                            ),
+                    ValueListenableBuilder<int>(
+                      valueListenable: _viewTick,
+                      builder: (context, _, child) => Transform(
+                        transform: Matrix4.identity()
+                          ..translateByDouble(_zoom.panX, _zoom.panY, 0, 1)
+                          ..scaleByDouble(_zoom.scale, _zoom.scale, 1, 1),
+                        child: child,
+                      ),
+                      child: _videoLayers(),
                     ),
                     _cursorOverlay(),
                   ],
@@ -1144,12 +1728,14 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
         return _centered(
           Icons.warning_amber,
           _errorMsg,
-          action: 'Back to apps',
+          action: widget.target.isDesktop ? 'Back' : 'Back to apps',
         );
       default:
         return _centered(
           null,
-          _phase == MirrorPhase.launching
+          widget.target.isDesktop
+              ? 'Connecting to your desktop…'
+              : _phase == MirrorPhase.launching
               ? 'Opening on your PC (Beta)…'
               : 'Fitting the app to your screen (Beta)…',
         );
@@ -1159,30 +1745,17 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   Widget _cursorOverlay() {
     return ValueListenableBuilder<Offset?>(
       valueListenable: _pointerView,
-      builder: (context, finger, _) {
-        var pos = finger;
-        final region = _region;
-        final cursor = _cursorHost;
-        if (pos == null &&
-            _mouseMode &&
-            region != null &&
-            cursor != null &&
-            _viewSize != Size.zero) {
-          final mapped = hostToView(
-            cursor.dx,
-            cursor.dy,
-            _viewSize.width,
-            _viewSize.height,
-            region.width.toDouble(),
-            region.height.toDouble(),
-            _scaleFit,
-          );
-          pos = Offset(
-            mapped.x * _canvasScale + _canvasPan.dx,
-            mapped.y * _canvasScale + _canvasPan.dy,
+      builder: (context, pos, _) {
+        if (pos == null || _viewOnly) return const SizedBox.shrink();
+        if (_mouseMode) {
+          // Tip of the arrow is the hot spot.
+          return IgnorePointer(
+            child: CustomPaint(
+              painter: _ArrowCursorPainter(pos),
+              child: const SizedBox.expand(),
+            ),
           );
         }
-        if (pos == null) return const SizedBox.shrink();
         return IgnorePointer(
           child: Stack(
             children: [
@@ -1203,6 +1776,35 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
           ),
         );
       },
+    );
+  }
+
+  /// Shown while zoomed: current zoom, tap to fit the whole picture again.
+  Widget _zoomBadge() {
+    return ValueListenableBuilder<int>(
+      valueListenable: _viewTick,
+      builder: (context, _, _) => Material(
+        color: const Color(0xCC0A0A0F),
+        shape: const StadiumBorder(),
+        child: InkWell(
+          customBorder: const StadiumBorder(),
+          onTap: _resetZoom,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${_zoom.scale.toStringAsFixed(1)}×',
+                  style: const TextStyle(color: Colors.white, fontSize: 13),
+                ),
+                const SizedBox(width: 6),
+                const Icon(Icons.fit_screen, size: 18, color: Colors.white),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -1237,49 +1839,76 @@ class _MirrorScreenState extends ConsumerState<MirrorScreen>
   }
 
   Widget _keyboardBar() {
-    return Container(
-      color: const Color(0xFF0F0F1A),
-      padding: EdgeInsets.only(
-        left: 10,
-        right: 10,
-        top: 8,
-        bottom: 8 + MediaQuery.of(context).viewInsets.bottom,
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _kbController,
-              focusNode: _kbFocus,
-              autocorrect: false,
-              enableSuggestions: false,
-              onChanged: _onKbChanged,
-              onSubmitted: (_) => _sendKey('Return'),
-              decoration: InputDecoration(
-                isDense: true,
-                hintText: 'Type — sent to the PC',
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-              ),
-            ),
+    return StreamKeyBar(
+      modifiers: _kbModifiers,
+      trayOpen: _kbTrayOpen,
+      onToggleTray: () => setState(() => _kbTrayOpen = !_kbTrayOpen),
+      onToggleModifier: _toggleKbModifier,
+      onKey: _onBarKey,
+      onHide: _hideKeyboard,
+      field: IgnorePointer(
+        child: Opacity(
+          opacity: 0,
+          child: TextField(
+            controller: _kbController,
+            focusNode: _kbFocus,
+            autocorrect: true,
+            enableSuggestions: true,
+            onChanged: _onKbChanged,
+            textInputAction: TextInputAction.send,
+            onEditingComplete: () {},
+            onSubmitted: (_) {
+              _sendKey('Return');
+              _resetKbField();
+              _showKeyboard();
+            },
+            decoration: const InputDecoration.collapsed(hintText: null),
           ),
-          _kbKey('⌫', () => _sendKey('BackSpace')),
-          _kbKey('⏎', () => _sendKey('Return')),
-          _kbKey('Esc', () => _sendKey('Escape')),
-        ],
+        ),
       ),
     );
   }
-
-  Widget _kbKey(String label, VoidCallback onTap) => Padding(
-    padding: const EdgeInsets.only(left: 6),
-    child: OutlinedButton(
-      onPressed: onTap,
-      style: OutlinedButton.styleFrom(
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-      ),
-      child: Text(label),
-    ),
-  );
 }
+
+/// Classic arrow pointer, white with a dark outline, tip at [tip].
+class _ArrowCursorPainter extends CustomPainter {
+  _ArrowCursorPainter(this.tip);
+
+  final Offset tip;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = Path()
+      ..moveTo(0, 0)
+      ..lineTo(0, 17)
+      ..lineTo(4.2, 13.2)
+      ..lineTo(7.2, 19.6)
+      ..lineTo(10, 18.4)
+      ..lineTo(7.1, 12.1)
+      ..lineTo(12.6, 12.1)
+      ..close();
+    canvas.save();
+    canvas.translate(tip.dx, tip.dy);
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color = Colors.black87
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.2
+        ..strokeJoin = StrokeJoin.round,
+    );
+    canvas.drawPath(path, Paint()..color = Colors.white);
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(_ArrowCursorPainter old) => old.tip != tip;
+}
+
+/// The viewer's input mode in words.
+String mirrorInputModeLabel({required bool viewOnly, required bool mouse}) =>
+    viewOnly
+    ? 'View only'
+    : mouse
+    ? 'Trackpad'
+    : 'Direct touch';

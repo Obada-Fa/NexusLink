@@ -64,10 +64,15 @@ test('chat RPC authenticates, excludes monitors, and tracks duplicate delivery',
   const control=await client();const monitor=await client();
   try {
     expect((await control.call('chat.list')).code).toBe('UNAUTHENTICATED');
+    expect((await control.call('activity.monitor')).code).toBe('UNAUTHENTICATED');
     const auth=(await control.call('session.enroll',{code:enableEnrollment(),name:'chat phone'})).result;
     await monitor.call('session.resume',{credential:auth.credential,role:'monitor'});
     expect((await control.call('session.getCapabilities')).result.features).toContain('chat.library.v1');
     for(const method of ['chat.list','chat.folders','chat.historyPage','chat.refresh','chat.subscribe','chat.send','chat.sendStatus'])expect((await monitor.call(method)).code).toBe('PERMISSION_DENIED');
+    const summary = await monitor.call('activity.monitor');
+    expect(summary.error).toBeUndefined();
+    expect(Array.isArray(summary.result.items)).toBe(true);
+    expect((await control.call('session.getCapabilities')).result.features).toContain('activity.monitor.v1');
     const created=(await control.call('agent.createSession',{agent:'mock',cwd:directory,title:'Chat library test'})).result;
     const library=(await control.call('chat.list')).result;
     const chat=library.items.find((row:any)=>row.agentSessionId===created.agentSessionId);
@@ -101,6 +106,7 @@ test('activity v2 replays committed records and deduplicates monitor replies',as
     expect(snapshot.events.length).toBeGreaterThan(0);
     expect(snapshot.nextCursor).toBe(snapshot.events.at(-1).cursor);
     expect(monitor.events.some(e=>e.type==='activity-update')).toBe(true);
+    expect(monitor.events.some(e=>e.type==='agent-session-update' && e.session.agentSessionId===task && e.session.activity==='running-command')).toBe(true);
     const approval=snapshot.events.find((e:any)=>e.agentSessionId===task && e.kind==='approval-requested');
     expect(approval).toBeDefined();
     expect(approval.availableActions).toContain('approve');
@@ -143,3 +149,40 @@ test('activity pages stop at a fixed watermark and signal retention gaps',async(
   expect(next.events[0].cursor).toBe(first.nextCursor+1);
   expect(next.events.every((e:any)=>e.cursor<=watermark)).toBe(true);
 },20000);
+
+test('cursor hints require control access and reject invalid stream targets', async () => {
+  const control = await client();
+  const monitor = await client();
+  try {
+    expect((await control.call('input.cursorHint')).code).toBe('UNAUTHENTICATED');
+    const auth = (await control.call('session.enroll', {code: enableEnrollment(), name: 'cursor phone'})).result;
+    await monitor.call('session.resume', {credential: auth.credential, role: 'monitor'});
+    expect((await monitor.call('input.cursorHint')).code).toBe('PERMISSION_DENIED');
+    expect((await control.call('session.getCapabilities')).result.features).toContain('input.cursor.v1');
+    expect((await control.call('input.cursorHint', {sessionId: 'missing'})).code).toBe('INVALID_ARGUMENT');
+    expect((await control.call('input.cursorHint', {sessionId: 123})).code).toBe('INVALID_ARGUMENT');
+    expect((await control.call('input.cursorHint', {windowId: 'not-a-window'})).code).toBe('INVALID_ARGUMENT');
+  } finally {control.ws.close(); monitor.ws.close();}
+});
+
+test('mission-control snapshot and monitor push carry vitals, agent apps and remote health',async()=>{
+  const {ws,events,call}=await client();
+  try {
+    await call('session.enroll',{code:enableEnrollment(),name:'monitor phone'});
+    const capabilities=(await call('session.getCapabilities')).result;
+    expect(capabilities.features).toContain('monitor.v1');
+    expect(capabilities.methods).toContain('monitor.snapshot');
+    const snapshot=(await call('monitor.snapshot')).result;
+    expect(snapshot.vitals.cpu.cores).toBeGreaterThan(0);
+    expect(snapshot.vitals.memory.totalBytes).toBeGreaterThan(0);
+    expect(Array.isArray(snapshot.apps)).toBe(true);
+    expect(snapshot.remote.map((s:any)=>s.id)).toEqual(['rustdesk','tailscale','nexuslink']);
+    expect((await call('monitor.appAction',{appId:'antigravity',action:'explode'})).code).toBe('INVALID_ARGUMENT');
+    expect((await call('monitor.remoteAction',{service:'ssh',action:'restart'})).code).toBe('INVALID_ARGUMENT');
+    expect((await call('session.subscribe',{topics:['monitor'],monitorInterval:1000})).result.ok).toBe(true);
+    const deadline=Date.now()+4000;
+    while(!events.some(e=>e.type==='monitor-update') && Date.now()<deadline) await Bun.sleep(100);
+    const update=events.find(e=>e.type==='monitor-update');
+    expect(update?.snapshot.vitals.timestamp).toBeNumber();
+  } finally {ws.close();}
+},15000);

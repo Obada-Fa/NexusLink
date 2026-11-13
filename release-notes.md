@@ -1,10 +1,215 @@
-## NexusLink Test 1.0.35+41 — Saved devices and PC app menus
+## NexusLink Test 1.0.51+57
 
-- The login screen shows saved PCs as named cards with desktop, laptop, server, or gaming icons. Tap a card to reconnect using the existing pairing credentials.
-- Long-press a device to rename it, change its icon, or remove it. The previous connection migrates automatically, and address entry is available under Add device.
-- The mobile PC tab has Running apps and Favourites / most used menus. Favourites and mobile usage counts are saved separately for each PC.
-- Long-press apps to favourite, close, or restart them. Desktop close/restart requires the updated Linux PC host from this release. Normal window close allows applications to display unsaved-work prompts.
+- **Lower-bandwidth mirroring.** Virtual sessions, window mirrors and Desktop open with MJPEG, then switch to hardware H.264 after the first decoded picture when the Linux host supports it. MJPEG returns if H.264 fails. Use **Show stream stats** in the mirror toolbar to see codec, bitrate, frame rate, and estimated tap-to-next-frame time.
+- **Agent conversations.** Code Agent chats show sub-agents and their progress in the Agents strip. **Ultra Code** is available in the effort picker. Headless runs observed so far use extra reasoning effort. A busy turn keeps its running state when you reopen the chat, and ten minutes of silence adds a status line while the turn continues.
+- **Mirror keyboard.** The stream keyboard stays connected when the Android IME opens.
 
-This APK is **NexusLink Test** (com.nexuslink.nexuslink.test), built with debug signing as in the preceding Test releases. It installs alongside the production app. Android requires matching signing certificates to update an existing Test installation.
+Pair this APK with the Linux host from this tag to test the host-dependent features. On the RX 9070 XT test PC, H.264 needs the missing GStreamer plugins installed or provided to the host. See [the host requirements and benchmark](docs/H264-BENCH.md).
 
-Validation: targeted Flutter analysis and 12 mobile tests passed; 48 host/protocol tests passed, with two environment-dependent integration tests skipped. Physical-device install and lifecycle testing have not been performed.
+## NexusLink Test 1.0.50+56
+
+Start a coding session on your PC from the phone and follow it in the Claude app, with no desktop stream.
+
+- **Start on PC**: Open **Agents → New chat**, pick or create a folder, then choose **Start for Claude app**. It runs Remote Control in a shell on your PC in that folder. Answer its prompts on the phone, then tap **Open Claude**. The session ends if the PC host restarts.
+- **See and stop**: Sessions started this way are listed under **Agents → Live**. Tap one to return to it, or stop it there.
+- **Home**: Favourite PC apps sit below the shortcuts and the bottom dock shows what is open on your PC. Long-press an app for its actions.
+- **Remote and Settings**: An unpaired Remote reads **Set up** and opens installation help. A Settings gear on Home and on the connection screen reaches phone preferences without a PC.
+
+Opening the Claude app from Nexus and following a session there have not yet been checked on a phone.
+
+## NexusLink Test 1.0.49+55
+
+Home is redesigned into a pocket PC launcher with media controls and a persistent dock for your connected computer.
+
+- **Pocket launcher**: A clean matte landscape with direct illustrated shortcuts for Desktop, Remote, Audio, Agents, Terminal, and Files.
+- **PC Dock**: Pinned favourite apps sit in the bottom dock with one-tap access to open windows and sessions via **Running**. Favourites and dock state are shared with Desktop.
+- **Media widget**: When audio or media plays or pauses on your PC, control playback directly from Home, jump straight to the Media tab, or tap **Stop stream** when listening on your phone.
+- **Check and resume**: Fast access to pending approvals and the Continue action for your current PC tasks.
+
+[See preview captures](https://github.com/Obada-Fa/NexusLink/blob/test-v1.0.49%2B55/docs/home-launcher/idle.webp).
+
+## NexusLink Test 1.0.48+54
+
+Open **Home → Desktop** for a live chart of your PC’s logical CPUs. Each thread has a color. The white trace shows total CPU load.
+
+- Tap **CPU activity** for the processor model, a larger chart and a grid of logical CPUs. Each tile shows its number, percentage and history. Tap a tile to highlight its thread. Hold and drag the main chart to inspect a moment across the grid.
+- Tap the thread count to expand the grid directly on Desktop. GPU and Memory have their own panels. **Open desktop** and **View only** sit above Favourites.
+- Existing Linux hosts already send per-thread readings. History builds as you monitor your PC. Hosts that supply aggregate CPU data show the total.
+
+[See the phone previews](https://github.com/Obada-Fa/NexusLink/blob/test-v1.0.48%2B54/docs/chart-design/README.md).
+
+## NexusLink Test 1.0.47+53
+
+Open **Home → Desktop**, then tap **CPU**, **GPU**, **Memory**, **Network**, or **Disk**.
+
+- CPU and GPU show current load above a five-minute history with the peak marked on the trace. Hold and drag to inspect load, temperature and GPU power at the same instant.
+- Download and Upload each have a labeled plot and a common rate scale. Read and Write work the same way. Gaps remain visible when the PC stops reporting.
+- Desktop shows favourites and open apps alongside PC readings. Apps opens the searchable drawer. Running lets you choose among an app’s windows or phone sessions. Find Processes from the CPU or Memory page.
+- Approval notification taps follow the originating PC and request. Home remembers the starting task when you take a detour into another module. App info removes commands when an agent exits.
+
+[Compare the previous Desktop build with this design](https://github.com/Obada-Fa/NexusLink/blob/nexus-app-phase1/docs/chart-design/README.md). Install the APK over the previous signed test build. Existing compatible PC hosts supply the readings.
+
+## NexusLink Test 1.0.46+52 — Check and resume work
+
+**Home**
+- Home leads with what needs you: a live approval on the connected PC ("Review approval · <project>") opens that chat; otherwise **Continue** takes you back to what you were doing on that PC: the same chat, folder or shell.
+- One PC selector at the top is the only place to switch PCs; **Device settings** holds connect, wake, rename and remove.
+- When the PC is offline Home says so and offers **Reconnect** (and **Wake PC** if set up); when one utility is down it names it.
+- Tools are grouped: **Workspace** (Agents, Terminal, Files) and **PC tools** (Desktop, Remote, Audio). Labels wrap instead of being cut off, and large text switches to one column.
+- First launch leads with **Scan QR code**; Wi-Fi and typed addresses are under **Other ways to connect**. A partial pairing says what is ready and what failed.
+
+**Working loop**
+- Jumping between tools keeps your place: Back returns to the chat, folder or shell you came from (a chat keeps its draft).
+- Chats have a **Project files** button; Files has **Open terminal here** for the folder you are viewing and shows that folder's name as its title.
+- The editor says **Unsaved · not on PC yet** / **Saved to PC**; Git review shows its project.
+- Terminal: the title shows the shell's folder and switches shells; **End shell** moved into the shell options menu.
+- Agents: **New chat** is a labelled button; Live puts "Needs you" ahead of PC vitals; **Forget this PC** moved to Home → Device settings.
+
+- Remote's first tab is **Trackpad**. The screen viewer says the input mode when it changes (View only / Trackpad / Direct touch).
+- Settings are grouped into **This PC** and **This phone**.
+- Arena overview shows each project's name and how many agents need you.
+
+The PC host is unchanged since 1.0.43.
+
+This is a test build.
+
+## NexusLink Test 1.0.45+51 — Files on the home screen
+
+- New **Files** tile on the home screen: browse the PC's folders, preview text files and images, and download files to the phone (saved in `Downloads/NexusLink`). Before, this was only reachable through Terminal → Files.
+
+**One last uninstall:** test builds are now signed with one permanent test key, so from this version on, new test releases install as a normal update. Earlier test builds were each signed with a different throwaway key, so uninstall the old Nexus Test app once before installing this one (you will need to scan the PC's QR code again).
+
+Test releases are now profile builds: smaller and faster than the debug builds before.
+
+The PC host is unchanged since 1.0.43.
+
+This is a test build.
+
+## NexusLink Test 1.0.44+50 — One app, one scan
+
+**Nexus app (phase 1)**
+- One scan pairs everything: scanning the Nexus Utilities QR code on the PC sets up NexusLink, Remote and Audio together. Typing the details in still works as a fallback.
+- New home screen with a tile per module (Desktop, Agents, Terminal, Remote, Audio), a device picker for your saved PCs and a live bar showing what's running.
+- If a PC stops accepting the phone, a banner offers to pair again.
+- **Remote:** control the PC over a pinned, encrypted connection.
+- **Audio (Android):** stream audio between the phone and the PC.
+
+**Naming**
+- Agent names in the app are now neutral: "Code Agent", "Desktop agent", and model names without a brand prefix.
+
+The PC host is unchanged since 1.0.43; keep using `NexusLink-Host-Setup.exe` from that release.
+
+This is a test build. Real audio streams, a real Remote connection and a full QR scan against a live PC have not been tested on a phone yet.
+
+## NexusLink Test 1.0.43+49 — See every project's agents at once
+
+**Arena**
+- Each project now has its own room again, so you can see which project every agent is working on.
+- With two or more projects on a phone, the rooms shrink and sit two across, so about eight projects and their live agents fit on one screen. Pinch or tap a project chip to zoom in; the fit button returns to the full view.
+- Agent labels stay inside their own room and show the full status, such as **Needs you** or **Your turn**. When two labels would overlap, one is hidden until you tap that agent.
+- Finished agents walk to their room's lounge. Stopped sessions go there too, labelled **Stopped**, and after 3 hours agents sleep at their desk.
+- A strip of project chips shows each project's state. The small rooms have no reception desk, so use **New chat**.
+
+**Codex**
+- The model picker now lists the models your Codex install actually offers.
+- Codex chats can now use **Plan** mode.
+
+**Reliability**
+- The running apps and windows lists keep their last known contents when they refresh, instead of briefly emptying.
+
+Codex changes need the updated PC host: on Linux run `bash scripts/deploy-host.sh`, on Windows install `NexusLink-Host-Setup.exe` from this release. Then restart NexusLink on the PC.
+
+This is a test build. Physical-device acceptance is still pending.
+
+## NexusLink Test 1.0.42+48 — New stream keyboard
+
+- The stream now stays full size when the keyboard opens, and slides up only if the keyboard would cover where you are typing.
+- A small floating dock sits on top of your phone keyboard: Windows key, Ctrl, Alt, Shift, Esc and Tab, plus a slide-to-move arrow key, more keys (arrows, Home/End, PgUp/PgDn, Del, F1–F12) and hide.
+- Tap a modifier, then the next key, for shortcuts like Ctrl+C. Tap the Windows key twice to press it on its own.
+- Keyboard suggestions and autocorrect now work, and corrections are applied on the PC.
+
+This is a test build. Physical-device acceptance is still pending.
+
+## NexusLink Test 1.0.41+47 — Shared Arena office
+
+- Explore one shared pixel-art office: drag to move, pinch to zoom, or use the zoom and fit controls.
+- Working agents and agents needing attention appear together; idle and completed chats are tucked into a list. Tap an agent to see its activity and existing approval controls.
+- Use reception or **New chat** to choose a project and start a conversation. Filter the office by project and load more chats when available.
+- Offline activity is marked as last known; reduced motion stops the animations.
+
+This is a test build. Physical-device acceptance is still pending.
+
+## NexusLink Test 1.0.40+46 — Agent campus and phone approvals
+
+**Arena: a pannable pixel campus**
+- Each project you worked on in the last 7 days (or that has an agent running now) gets its own room. Rooms that need you come first.
+- Every agent is a pixel character at its own desk, styled by app (Code Agent, Codex, Antigravity, Cursor, OpenCode). It types while editing, goes to the bookshelf while reading or browsing, works at the server rack while running commands, waits by the door when it needs you, relaxes in the lounge when it's done, and sleeps after a few quiet hours. Agents walk between spots when their state changes.
+- Orchestrators wear a red tie and a crown, and their workers sit right next to them. Sub-agents show up as small robots beside their agent.
+- Drag to pan and pinch to zoom. Use the bottom-left buttons to zoom or fit the whole campus, and the minimap to jump around. Tap a name plate to list a room's agents, or use **List everyone**.
+- Tap the **Needs you / Your turn / Working** chips to fly to the next agent in that state.
+- Tap anyone to open their sheet with **Open chat**, the current step, plan, sub-agents and, if one is waiting, the approval.
+- Confetti when an agent finishes, smoke when it fails, desk lamps at night.
+
+**Answer agent prompts from the phone (PC tab → Phone approvals)**
+- Turn on **Approve agent prompts from this phone** to see your agent's permission prompts on the phone: **Allow**, **Deny** or **Deny with a note**.
+- Answer the agent's multiple-choice questions (or type your own answer), and approve a plan or send it back with feedback.
+- This uses the agent's official permission hook. Whichever answers first, the phone or the PC, wins, and the PC dialog closes when you answer on the phone. If the phone isn't reachable, the agent asks on the PC as usual.
+- Desktop agent sessions always show up. Terminal CLI agent sessions only show up with **Hold terminal prompts for me** turned on.
+- You get a notification if a prompt is still waiting after 10 seconds.
+- Codex isn't supported yet: it needs its hook trusted once in Codex's `/hooks` screen.
+
+**Monitor accuracy**
+- A finished agent no longer shows "Needs you". The desktop agent's after-turn summary now shows as **Your turn**, a separate section you can swipe away. "Needs you" is kept for agents that are really blocked on an approval, a question or a plan.
+- Workers are linked to the orchestrator that started them, and "Reported to its orchestrator" no longer asks for you.
+- Sub-agents are tracked with their own state. A sub-agent waiting on approval flags its parent.
+- Running commands are detected more reliably.
+
+Needs the updated PC host: on Linux run `bash scripts/deploy-host.sh`, on Windows install `NexusLink-Host-Setup.exe` from this release. Then restart NexusLink on the PC.
+
+## NexusLink Test 1.0.39+45 — Phone mic
+
+**Phone mic (PC tab)**
+- Use your phone as a microphone on the PC. PC apps (AI voice chats, Discord, recorders) see a new input device called **NexusLink Phone Mic**.
+- Tap the mic to talk live and tap again to mute, or turn on **Hold to talk** for walkie-talkie style.
+- **Make it the PC's default mic** (on by default) switches the PC's default input while the phone mic is on, then switches back to your usual mic when you stop.
+- Keeps streaming while you switch to Mirror or other tabs. Turns itself off if the connection drops.
+- Needs the updated Linux PC host (`bash scripts/deploy-host.sh`) with PulseAudio or PipeWire. Works while NexusLink is open on the phone.
+
+This release also includes everything from 1.0.38+44 below, which was not published separately.
+
+## 1.0.38+44 — Mission Control
+
+NexusLink is now an agent monitor first. The previous version is saved as the git branch `stable` (tag `stable-1.0.36+42`, APK in `dist/stable/`).
+
+**Monitor tab (Mission Control)**
+- One screen for every agent on the PC: counters for Working / Needs you / Done today (tap to filter), "Needs you" and "Live now" cards with the current step, a ticking timer, plan progress and the last message, then recent chats grouped by day.
+- Live PC vitals strip (CPU, GPU, RAM with temperatures, network).
+- Agent apps strip: Desktop agent, Codex, Antigravity, Cursor and agent CLIs with CPU/memory and one-tap Restart, Quit or Force stop. A frozen app is flagged "Frozen?".
+- RustDesk alert with one-tap Restart when it can't reach the desktop.
+- **Arena**: every agent is a fox at its own desk — it sprints while running commands, sniffs while reading, pounces while editing, barks when it needs you, celebrates when it finishes and naps when idle. The den's campfire burns with CPU load and the moon glows with GPU load.
+- Projects view groups chats by folder.
+- **Mark as done**: swipe a "Needs you" card sideways, or long-press any chat (cards, rows, Arena foxes) for Open, Mark as done, Flag again, Hide from Monitor and Open project files. Undo is offered. The mark is kept on the PC, so it applies everywhere until that chat does something new.
+- "Needs you" that an app infers (for example the desktop agent's needs-action flag) clears by itself after 8 hours without activity. Real pending approvals in chats NexusLink is running never expire.
+
+**PC tab**
+- Vitals: CPU / GPU / RAM gauges with temperature glow, detail sheets (per-core load, GPU hotspot/memory temperature, power vs cap, fan, VRAM, swap), network, disk, storage warning, peripheral batteries.
+- Agent apps with Restart (closes normally, force-stops after 6 s if frozen, relaunches), Focus, Quit, Force stop; CLI agents with Stop.
+- Remote access health for RustDesk, Tailscale and the NexusLink host, with Restart RustDesk.
+- Top processes with End process; View desktop (control or view-only); running windows with Close / Restart menus.
+
+**Reliability**
+- Reconnects automatically to your last PC at launch; a revoked pairing shows "Pair again" instead of a silent "PC offline".
+- Session tokens renew in place before they expire (they used to lapse after an hour).
+- No list flicker on reconnect; live agent events are no longer dropped; Stop reports the real result.
+- Approvals for chats you are not looking at appear in a banner.
+- Open PC chats update live with a progress header.
+- Background monitor survives reboots and app updates (if you left it on).
+- Files: readable sizes and dates, image preview, Move / Delete (to the PC's Trash).
+
+**PC host (Linux)** — deploy with `bash scripts/deploy-host.sh`
+- New monitor API: vitals, agent apps, remote-access health; RustDesk watchdog.
+- Apps launched or restarted from the phone survive NexusLink restarts.
+- Waits for Tailscale at boot instead of staying up with no listener.
+- VS Code server requires a per-session token; downloads resume correctly; screen streams stop when access expires; a frozen app can no longer hang the host.
+
+This APK is **NexusLink Test** (com.nexuslink.nexuslink.test), built with this PC's debug signing as in the preceding Test releases, so it updates the existing Test installation.

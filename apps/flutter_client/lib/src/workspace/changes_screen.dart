@@ -3,6 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../state/connection.dart';
 import 'editor_screen.dart';
 
+/// The project folder's own name for the changes header.
+String changesProjectName(String cwd) =>
+    cwd.split(RegExp(r'[/\\]')).where((p) => p.isNotEmpty).lastOrNull ?? cwd;
+
 class ChangesScreen extends ConsumerStatefulWidget {
   final String cwd;
   const ChangesScreen({super.key, required this.cwd});
@@ -87,8 +91,9 @@ class _ChangesScreenState extends ConsumerState<ChangesScreen> {
     children: [
       ListTile(
         title: const Text('Working-tree changes'),
-        subtitle: const Text(
-          'Includes edits from agents and other applications.',
+        subtitle: Text(
+          '${changesProjectName(_root ?? widget.cwd)} · includes edits from '
+          'agents and other applications.',
         ),
         trailing: IconButton(
           onPressed: _load,

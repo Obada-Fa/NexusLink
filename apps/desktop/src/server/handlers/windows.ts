@@ -7,6 +7,7 @@ import { readdir } from 'node:fs/promises';
 import { existsSync, watch, type FSWatcher } from 'node:fs';
 import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
+import { launchDetached } from './agent-apps';
 import type { WindowInfo, AppInfo, CaptureRegion, WsMessage } from '@nexuslink/rpc-types';
 import { getScreenMetadata, getPrimaryMonitor } from './capture';
 import { listProfiles } from './app-profiles';
@@ -24,9 +25,11 @@ type SpawnOpts = Parameters<typeof Bun.spawn>[1];
 
 function run(cmd: string[]): string {
   try {
+    // A hung app can stall xprop/wmctrl forever; never let that freeze the host.
     const out = Bun.spawnSync(cmd, {
       env: { ...process.env, DISPLAY },
       stderr: 'ignore',
+      timeout: 3000,
     } as unknown as SpawnOpts);
     return out.stdout?.toString() ?? '';
   } catch {
@@ -263,9 +266,78 @@ export async function listApps(): Promise<AppInfo[]> {
     Promise.all(profilePromises),
   ]);
 
-  const out = [...apps, ...profs];
+  const out: AppInfo[] = [...apps, ...profs];
+  const roles = await defaultAppIds(out.map((a) => a.appId));
+  for (const app of out) {
+    if (app.appId === roles.terminal) app.role = 'terminal';
+    else if (app.appId === roles.files) app.role = 'files';
+  }
   out.sort((a, b) => a.name.localeCompare(b.name));
   return out;
+}
+
+const KNOWN_TERMINALS = [
+  'org.gnome.Ptyxis', 'org.gnome.Console', 'org.gnome.Terminal', 'org.kde.konsole', 'kitty',
+  'Alacritty', 'org.wezfurlong.wezterm', 'com.mitchellh.ghostty', 'xfce4-terminal', 'foot',
+  'com.system76.CosmicTerm', 'tilix', 'terminator', 'xterm',
+];
+
+function firstLine(text: string | undefined): string | undefined {
+  return text?.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#'));
+}
+
+function desktopId(entry: string | undefined): string | undefined {
+  const id = entry?.trim().replace(/^'|'$/g, '').split(':')[0].replace(/\.desktop$/, '');
+  return id || undefined;
+}
+
+async function readText(path: string): Promise<string | undefined> {
+  try { return await Bun.file(path).text(); } catch { return undefined; }
+}
+
+async function commandOut(argv: string[]): Promise<string | undefined> {
+  try {
+    const proc = Bun.spawn(argv, { stdout: 'pipe', stderr: 'ignore' });
+    const text = await new Response(proc.stdout).text();
+    return (await proc.exited) === 0 ? text.trim() : undefined;
+  } catch { return undefined; }
+}
+
+/**
+ * The PC's default terminal and file manager as app ids from [installed].
+ * Terminal: xdg-terminal-exec's lists (desktop-specific first), then the
+ * GNOME setting, then well-known terminals. Files: the inode/directory handler.
+ */
+export async function defaultAppIds(
+  installed: string[],
+  probe: {
+    read?: (path: string) => Promise<string | undefined>;
+    run?: (argv: string[]) => Promise<string | undefined>;
+    env?: Record<string, string | undefined>;
+    home?: string;
+  } = {},
+): Promise<{ terminal?: string; files?: string }> {
+  const read = probe.read ?? readText;
+  const run = probe.run ?? commandOut;
+  const env = probe.env ?? process.env;
+  const config = env.XDG_CONFIG_HOME || join(probe.home ?? homedir(), '.config');
+  const has = new Set(installed);
+  const pick = (id: string | undefined) => (id && has.has(id) ? id : undefined);
+
+  let terminal: string | undefined;
+  const desktops = (env.XDG_CURRENT_DESKTOP ?? '').split(':').map((d) => d.toLowerCase()).filter(Boolean);
+  for (const name of [...desktops.map((d) => `${d}-xdg-terminals.list`), 'xdg-terminals.list']) {
+    terminal = pick(desktopId(firstLine(await read(join(config, name)))));
+    if (terminal) break;
+  }
+  if (!terminal) {
+    const exec = desktopId(await run(['gsettings', 'get', 'org.gnome.desktop.default-applications.terminal', 'exec']));
+    if (exec) terminal = installed.find((id) => id === exec || id.toLowerCase().endsWith(exec.toLowerCase()));
+  }
+  terminal ??= KNOWN_TERMINALS.find((id) => has.has(id));
+
+  const files = pick(desktopId(await run(['xdg-mime', 'query', 'default', 'inode/directory'])));
+  return { terminal, files };
 }
 
 /** Explicitly invalidate catalog & icon cache and broadcast updated app list. */
@@ -302,26 +374,13 @@ export async function launchApp(appId: string): Promise<{ ok: boolean; wmClass?:
   const app = catalog.apps.find((a) => a.appId === appId);
   if (!app) return { ok: false };
 
-  // gio launch handles Exec field codes, DBusActivatable, working dirs, etc.
+  // gio launch handles Exec field codes, DBusActivatable, working dirs, etc. It runs in its
+  // own user scope so restarting NexusLink never takes the launched app down with it.
   try {
-    Bun.spawn(['gio', 'launch', app.path], {
-      stdout: 'ignore',
-      stderr: 'ignore',
-      env: { ...process.env, DISPLAY },
-    } as unknown as SpawnOpts);
+    launchDetached(['gio', 'launch', app.path], app.appId);
     return { ok: true, wmClass: app.wmClass ?? app.appId };
   } catch {
-    // Fallback: strip field codes and run Exec directly.
-    const exec = (app.exec ?? '').replace(/%[fFuUdDnNickvm]/g, '').trim();
-    if (!exec) return { ok: false };
-    try {
-      Bun.spawn(['sh', '-c', `setsid ${exec} >/dev/null 2>&1 &`], {
-        env: { ...process.env, DISPLAY },
-      } as unknown as SpawnOpts);
-      return { ok: true, wmClass: app.wmClass ?? app.appId };
-    } catch {
-      return { ok: false };
-    }
+    return { ok: false };
   }
 }
 
@@ -411,10 +470,9 @@ export async function listWindows(): Promise<WindowInfo[]> {
 
 /** Original geometry per adopted window, restored on release. */
 const savedGeometry = new Map<string, CaptureRegion & { maximized: boolean }>();
-/** Placement + live capture rect so the stream follows the window. */
+/** Placement used to compute the capture rect as the window moves. */
 const adoptedSessions = new Map<string, {
   aspect: number;
-  region: CaptureRegion;
   target: { x: number; y: number; width: number; height: number };
 }>();
 
@@ -527,7 +585,7 @@ export async function adoptWindow(
   }
 
   const cropped = streamRegionForAdopted(actual, target, aspect, screen);
-  adoptedSessions.set(windowId, { aspect, region: cropped, target });
+  adoptedSessions.set(windowId, { aspect, target });
 
   return { region: cropped };
 }
@@ -537,11 +595,9 @@ export function getAdoptedCaptureRegion(windowId: string): CaptureRegion | null 
   const session = adoptedSessions.get(windowId);
   if (!session) return null;
   const live = getWindowGeometry(windowId);
-  if (!live) return session.region;
+  if (!live) return null;
   const screen = getScreenMetadata();
-  const cropped = streamRegionForAdopted(live, session.target, session.aspect, screen);
-  session.region = cropped;
-  return cropped;
+  return streamRegionForAdopted(live, session.target, session.aspect, screen);
 }
 
 /** Restore a previously adopted window to its original geometry. */
@@ -570,7 +626,8 @@ export function closeWindow(windowId: string): { ok: boolean } {
   const result = Bun.spawnSync(['wmctrl', '-i', '-c', windowId], {
     env: { ...process.env, DISPLAY },
     stderr: 'pipe',
-  });
+    timeout: 3000,
+  } as unknown as SpawnOpts);
   if (result.exitCode !== 0) throw new Error('Could not close the window.');
   return { ok: true };
 }

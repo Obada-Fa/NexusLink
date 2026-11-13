@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../state/connection.dart';
+import '../state/last_host.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ProjectContext {
@@ -72,12 +73,89 @@ final workspaceTabProvider = NotifierProvider<WorkspaceTab, int>(
   WorkspaceTab.new,
 );
 
-class PendingTask extends Notifier<String?> {
+/// A task the Agents screens should open next: an agent session id, or
+/// `chat:<chatId>` for a library chat. It belongs to one PC ([hostUrl]) and
+/// is only opened once the phone is connected to that PC, so a link tapped
+/// while another PC's chat list is still showing never opens there.
+class TaskLink {
+  const TaskLink(
+    this.id, {
+    required this.hostUrl,
+    this.approval = false,
+    this.requestId,
+  });
+
+  /// Agent session id, or `chat:<chatId>`.
+  final String id;
+
+  /// The PC's NexusLink address (normalized ws URL).
+  final String hostUrl;
+
+  /// Opened from an approval notification: check the request is still
+  /// waiting and say so if it was already answered.
+  final bool approval;
+
+  /// The exact approval request the notification was for. Null from older
+  /// notifications (and older hosts), which only name the session.
+  final String? requestId;
+
+  /// Whether this link is for the PC at [url].
+  bool isFor(String? url) =>
+      url != null &&
+      url.isNotEmpty &&
+      normalizeHostWsUrl(url) == normalizeHostWsUrl(hostUrl);
+
   @override
-  String? build() => null;
-  void select(String? id) => state = id;
+  String toString() =>
+      'TaskLink($id @ $hostUrl${approval ? ', approval ${requestId ?? '?'}' : ''})';
 }
 
-final pendingTaskProvider = NotifierProvider<PendingTask, String?>(
+/// Whether the approval [link] was opened for is still waiting, given the
+/// session's `agent.pendingApprovals` reply (permission-request events whose
+/// `refId` is the request id). With a request id only that exact request
+/// counts, so another request in the same session doesn't hide that this one
+/// was answered. Older links without one fall back to "anything waiting".
+bool approvalStillPending(TaskLink link, List<dynamic> pending) {
+  final request = link.requestId;
+  if (request == null) return pending.isNotEmpty;
+  return pending.whereType<Map>().any(
+    (event) => event['refId'] == request || event['requestId'] == request,
+  );
+}
+
+class PendingTask extends Notifier<TaskLink?> {
+  @override
+  TaskLink? build() => null;
+  void select(TaskLink? link) => state = link;
+
+  /// Returns the pending link and clears it, but only for a consumer that is
+  /// connected to the link's own PC at [connectedUrl]. Otherwise it stays.
+  TaskLink? takeFor(String? connectedUrl) {
+    final link = state;
+    if (link == null || !link.isFor(connectedUrl)) return null;
+    state = null;
+    return link;
+  }
+}
+
+final pendingTaskProvider = NotifierProvider<PendingTask, TaskLink?>(
   PendingTask.new,
+);
+
+/// A folder Files should show next (Home's Continue). Consumed once.
+class PendingFolder extends Notifier<String?> {
+  @override
+  String? build() => null;
+  void select(String? path) => state = path;
+
+  /// Returns the pending folder and clears it.
+  String? take() {
+    final path = state;
+    if (path != null) state = null;
+    return path;
+  }
+}
+
+final pendingFolderProvider = NotifierProvider<PendingFolder, String?>(
+  PendingFolder.new,
 );

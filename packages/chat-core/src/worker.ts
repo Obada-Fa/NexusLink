@@ -8,6 +8,9 @@ self.onmessage = (event: MessageEvent) => {
       case 'init': storage=new LibraryStorage(data.directory); result=storage.revision(); break;
       case 'get': result=storage.get(data.id); break;
       case 'upsert': result=storage.upsert(data.rows,data.source,data.removeMissing); break;
+      case 'hot': result=storage.hot(data.since,data.limit); break;
+      case 'setState': result=storage.setState(data.id,data.change); break;
+      case 'decay': result=storage.decay(); break;
       case 'list': result=storage.page(data); break;
       case 'folders': result=storage.page(data,true); break;
       case 'health': storage.setHealth(data); result=storage.revision(); break;

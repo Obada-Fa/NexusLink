@@ -1,0 +1,22 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Merged into the host app, so the app manifest needs no edits (docs/NEXUS-APP-PHASE1.md §5). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- The stream notification (with Stop). The app asks for it at runtime; the Nexus app declares it too. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application>
+        <!-- PC streams (ABP v2). Types per live stream: microphone (mic), mediaPlayback (PC audio here),
+             mediaProjection (phone audio on PC). -->
+        <service
+            android:name="com.nexus.nexus_audio.pc.PcStreamService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="microphone|mediaPlayback|mediaProjection" />
+    </application>
+</manifest>
